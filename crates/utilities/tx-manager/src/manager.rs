@@ -41,7 +41,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_eips::{BlockNumberOrTag, Encodable2718};
+use alloy_eips::{BlockNumberOrTag, Encodable2718, eip7594::BlobTransactionSidecarVariant};
 use alloy_network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{Provider, RootProvider};
@@ -51,9 +51,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    BumpedFees, FeeCalculator, FeeOverride, GasPriceCaps, NonceManager, RpcErrorClassifier,
-    SendHandle, SendResponse, SendState, TxCandidate, TxManager, TxManagerConfig, TxManagerError,
-    TxManagerResult, TxMetrics,
+    BlobTxBuilder, BumpedFees, FeeCalculator, FeeOverride, GasPriceCaps, NonceManager,
+    RpcErrorClassifier, SendHandle, SendResponse, SendState, TxCandidate, TxManager,
+    TxManagerConfig, TxManagerError, TxManagerResult, TxMetrics,
 };
 
 /// Number of wei in one gwei (10^9), as `f64` for fractional-precision
@@ -79,10 +79,19 @@ pub struct PreparedTx {
     pub gas_tip_cap: u128,
     /// Maximum total fee per gas used in the signed transaction.
     pub gas_fee_cap: u128,
+    /// Blob fee cap used in the signed transaction. `None` for non-blob txs.
+    pub blob_fee_cap: Option<u128>,
     /// Gas limit used in the signed transaction.
     pub gas_limit: u64,
     /// Nonce assigned to the signed transaction.
     pub nonce: u64,
+    /// Cached blob sidecar from transaction construction. `None` for non-blob txs.
+    ///
+    /// Wrapped in `Arc` so cloning across fee-bump iterations is a pointer
+    /// copy rather than a deep clone (~800 KB per blob). One deep clone per
+    /// `craft_tx` call is unavoidable because alloy's
+    /// `TransactionRequest::sidecar` requires an owned value.
+    pub sidecar: Option<Arc<BlobTransactionSidecarVariant>>,
 }
 
 /// Mutable fee-bump state tracked across iterations in the send loop.
@@ -96,24 +105,31 @@ struct BumpState {
     tip: u128,
     /// Current maximum total fee per gas (base fee + tip).
     fee_cap: u128,
+    /// Current blob fee cap. `None` for non-blob txs.
+    blob_fee_cap: Option<u128>,
     /// Current gas limit.
     gas_limit: u64,
     /// Hash of the most recently published transaction.
     tx_hash: B256,
     /// Nonce used in the most recently published transaction.
     nonce: u64,
+    /// Cached blob sidecar. See [`PreparedTx::sidecar`] for rationale on
+    /// the `Arc` wrapper.
+    sidecar: Option<Arc<BlobTransactionSidecarVariant>>,
 }
 
 impl BumpState {
     /// Constructs a [`BumpState`] from a [`PreparedTx`] and the hash of the
     /// published transaction.
-    const fn from_prepared(prepared: &PreparedTx, tx_hash: B256) -> Self {
+    fn from_prepared(prepared: PreparedTx, tx_hash: B256) -> Self {
         Self {
             tip: prepared.gas_tip_cap,
             fee_cap: prepared.gas_fee_cap,
+            blob_fee_cap: prepared.blob_fee_cap,
             gas_limit: prepared.gas_limit,
             tx_hash,
             nonce: prepared.nonce,
+            sidecar: prepared.sidecar,
         }
     }
 }
@@ -142,6 +158,8 @@ pub struct SimpleTxManager {
     closed: Arc<AtomicBool>,
     /// Metrics collector for transaction lifecycle events.
     metrics: Arc<dyn TxMetrics>,
+    /// Builder for EIP-4844 blob transaction sidecars.
+    blob_builder: BlobTxBuilder,
 }
 
 impl SimpleTxManager {
@@ -189,6 +207,7 @@ impl SimpleTxManager {
 
         let address = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
         let nonce_manager = NonceManager::new(provider.clone(), address, config.network_timeout);
+        let blob_builder = BlobTxBuilder::new(config.cell_proofs_activation_timestamp);
         Ok(Self {
             provider,
             wallet,
@@ -197,6 +216,7 @@ impl SimpleTxManager {
             chain_id,
             closed: Arc::new(AtomicBool::new(false)),
             metrics,
+            blob_builder,
         })
     }
 
@@ -264,6 +284,29 @@ impl SimpleTxManager {
         err
     }
 
+    /// Checks that `fee` does not exceed the configured ceiling relative to
+    /// `suggested` (the raw provider estimate before enforced minimums).
+    const fn check_fee_limit(&self, fee: u128, suggested: u128) -> TxManagerResult<()> {
+        FeeCalculator::check_limits(
+            fee,
+            suggested,
+            self.config.fee_limit_multiplier,
+            self.config.fee_limit_threshold,
+        )
+    }
+
+    /// Returns the raw (pre-minimum) blob fee cap from `caps`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TxManagerError::Unsupported`] if `raw_blob_fee_cap` is `None`,
+    /// which indicates a caller bug (blob tx path must always populate this).
+    fn raw_blob_baseline(&self, caps: &GasPriceCaps) -> TxManagerResult<u128> {
+        caps.raw_blob_fee_cap.ok_or_else(|| {
+            TxManagerError::Unsupported("raw_blob_fee_cap missing on blob transaction path".into())
+        })
+    }
+
     /// Constructs and signs a transaction, retrying on transient errors.
     ///
     /// Wraps [`craft_tx`](Self::craft_tx) in a retry loop with up to
@@ -299,7 +342,7 @@ impl SimpleTxManager {
         candidate: &TxCandidate,
         fee_overrides: Option<FeeOverride>,
     ) -> TxManagerResult<PreparedTx> {
-        self.prepare_with_initial_caps(candidate, fee_overrides, None, None).await
+        self.prepare_with_initial_caps(candidate, fee_overrides, None, None, None).await
     }
 
     /// Internal variant of [`prepare`](Self::prepare) that optionally reuses
@@ -319,9 +362,11 @@ impl SimpleTxManager {
         fee_overrides: Option<FeeOverride>,
         mut initial_caps: Option<GasPriceCaps>,
         nonce_override: Option<u64>,
+        cached_sidecar: Option<Arc<BlobTransactionSidecarVariant>>,
     ) -> TxManagerResult<PreparedTx> {
         (|| {
             let caps = initial_caps.take();
+            let sidecar = cached_sidecar.clone();
             async move {
                 // Re-check closed flag on each retry attempt to avoid wasted
                 // RPC calls after shutdown. ChannelClosed is non-retryable,
@@ -329,7 +374,8 @@ impl SimpleTxManager {
                 if self.is_closed() {
                     return Err(TxManagerError::ChannelClosed);
                 }
-                self.craft_tx_with_caps(candidate, fee_overrides, caps, nonce_override).await
+                self.craft_tx_with_caps(candidate, fee_overrides, caps, nonce_override, sidecar)
+                    .await
             }
         })
         .retry(
@@ -346,29 +392,60 @@ impl SimpleTxManager {
 
     /// Queries the provider for current gas price estimates.
     ///
+    /// Returns a [`GasPriceCaps`] for **non-blob** (EIP-1559) transactions only:
+    /// `blob_fee_cap` and `raw_blob_fee_cap` will always be `None`.
+    ///
+    /// Blob fee estimation is performed internally by
+    /// [`craft_tx`](Self::craft_tx) and [`prepare`](Self::prepare) when the
+    /// [`TxCandidate`] carries blobs — there is no need to call this method
+    /// separately for blob transactions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TxManagerError::Rpc`] if any provider call fails.
+    pub async fn suggest_gas_price_caps(&self) -> TxManagerResult<GasPriceCaps> {
+        self.suggest_gas_price_caps_for(false).await
+    }
+
+    /// Queries the provider for current gas price estimates.
+    ///
+    /// When `is_blob` is `true`, also fetches the blob base fee and computes
+    /// a blob fee cap via [`FeeCalculator::calc_blob_fee_cap`], enforcing the
+    /// configured `min_blob_fee` floor.
+    ///
     /// Returns a [`GasPriceCaps`] containing:
     /// - `gas_tip_cap`: maximum priority fee (enforced >= `config.min_tip_cap`)
     /// - `gas_fee_cap`: `tip + 2 * base_fee` via [`FeeCalculator::calc_gas_fee_cap`]
     /// - `raw_gas_fee_cap`: fee cap from the raw provider values before
     ///   enforcing minimums, used as the `suggested` baseline in
     ///   [`FeeCalculator::check_limits`]
-    /// - `blob_fee_cap`: `None` (blob transactions not yet supported)
+    /// - `blob_fee_cap`: `Some(2 × blob_base_fee)` when `is_blob`, else `None`
     ///
     /// # Errors
     ///
     /// Returns [`TxManagerError::Rpc`] if any provider call fails.
-    pub async fn suggest_gas_price_caps(&self) -> TxManagerResult<GasPriceCaps> {
-        // Query tip cap and latest block concurrently.
-        let (tip_result, block_result) = tokio::join!(
-            tokio::time::timeout(
-                self.config.network_timeout,
-                self.provider.get_max_priority_fee_per_gas(),
-            ),
-            tokio::time::timeout(
-                self.config.network_timeout,
-                self.provider.get_block_by_number(BlockNumberOrTag::Latest),
-            ),
+    async fn suggest_gas_price_caps_for(&self, is_blob: bool) -> TxManagerResult<GasPriceCaps> {
+        // Query tip cap, latest block, and (optionally) blob base fee concurrently.
+        let tip_fut = tokio::time::timeout(
+            self.config.network_timeout,
+            self.provider.get_max_priority_fee_per_gas(),
         );
+        let block_fut = tokio::time::timeout(
+            self.config.network_timeout,
+            self.provider.get_block_by_number(BlockNumberOrTag::Latest),
+        );
+
+        let (tip_result, block_result, blob_fee_result) = if is_blob {
+            let blob_fut = tokio::time::timeout(
+                self.config.network_timeout,
+                self.provider.get_blob_base_fee(),
+            );
+            let (t, b, bf) = tokio::join!(tip_fut, block_fut, blob_fut);
+            (t, b, Some(bf))
+        } else {
+            let (t, b) = tokio::join!(tip_fut, block_fut);
+            (t, b, None)
+        };
 
         let raw_tip_cap = tip_result
             .map_err(|_| self.rpc_error("get_max_priority_fee_per_gas timed out"))?
@@ -400,7 +477,31 @@ impl SimpleTxManager {
         self.metrics.record_basefee(base_fee as f64 / WEI_PER_GWEI);
         self.metrics.record_tipcap(tip_cap as f64 / WEI_PER_GWEI);
 
-        Ok(GasPriceCaps { gas_tip_cap: tip_cap, gas_fee_cap, raw_gas_fee_cap, blob_fee_cap: None })
+        // Compute blob fee cap when this is a blob transaction.
+        let (blob_fee_cap, raw_blob_fee_cap) = match blob_fee_result {
+            Some(result) => {
+                let raw_blob_base_fee = result
+                    .map_err(|_| self.rpc_error("get_blob_base_fee timed out"))?
+                    .map_err(|e| self.classify_and_record_rpc(&e.to_string()))?;
+                let raw_blob_cap = FeeCalculator::calc_blob_fee_cap(raw_blob_base_fee);
+                let blob_base_fee = raw_blob_base_fee.max(self.config.min_blob_fee);
+                let blob_cap = FeeCalculator::calc_blob_fee_cap(blob_base_fee);
+                self.metrics.record_blob_fee(blob_cap as f64 / WEI_PER_GWEI);
+                (Some(blob_cap), Some(raw_blob_cap))
+            }
+            None => (None, None),
+        };
+
+        let block_timestamp = latest_block.header.timestamp;
+
+        Ok(GasPriceCaps {
+            gas_tip_cap: tip_cap,
+            gas_fee_cap,
+            raw_gas_fee_cap,
+            blob_fee_cap,
+            raw_blob_fee_cap,
+            block_timestamp,
+        })
     }
 
     /// Computes bumped fee parameters for a replacement transaction.
@@ -433,8 +534,17 @@ impl SimpleTxManager {
         old_fee_cap: u128,
         old_blob_fee_cap: Option<u128>,
     ) -> TxManagerResult<BumpedFees> {
+        // Validate consistency: old_blob_fee_cap must be Some for blob txs
+        // and None for non-blob txs.
+        if old_blob_fee_cap.is_some() == candidate.blobs.is_empty() {
+            return Err(TxManagerError::Unsupported(
+                "old_blob_fee_cap must be Some for blob transactions and None for non-blob transactions"
+                    .into(),
+            ));
+        }
+
         // Step 1: Fetch fresh network fees.
-        let caps = self.suggest_gas_price_caps().await?;
+        let caps = self.suggest_gas_price_caps_for(!candidate.blobs.is_empty()).await?;
 
         // Step 2: Derive effective base fee from the caps.
         let new_base_fee = FeeCalculator::base_fee_from_caps(caps.gas_fee_cap, caps.gas_tip_cap);
@@ -450,20 +560,34 @@ impl SimpleTxManager {
         );
 
         // Step 4: Enforce fee ceiling.
-        FeeCalculator::check_limits(
-            bumped_fee_cap,
-            caps.raw_gas_fee_cap,
-            self.config.fee_limit_multiplier,
-            self.config.fee_limit_threshold,
-        )?;
+        self.check_fee_limit(bumped_fee_cap, caps.raw_gas_fee_cap)?;
 
         // Step 5: Bump blob fee cap separately with 100% minimum.
-        let blob_fee_cap = old_blob_fee_cap.map(|old_blob| {
-            let threshold = FeeCalculator::calc_threshold_value(old_blob, true);
-            caps.blob_fee_cap.map_or(threshold, |network_blob| threshold.max(network_blob))
-        });
+        let blob_fee_cap = match old_blob_fee_cap {
+            Some(old_blob) => {
+                let threshold = FeeCalculator::calc_threshold_value(old_blob, true);
+                let bumped_blob =
+                    caps.blob_fee_cap.map_or(threshold, |network_blob| threshold.max(network_blob));
 
-        info!(%old_tip, %old_fee_cap, %bumped_tip, %bumped_fee_cap, "gas price increase computed");
+                // Enforce fee ceiling on blob fee cap using the raw
+                // (pre-minimum) blob fee cap as the baseline, mirroring
+                // the gas fee cap ceiling in Step 4.
+                self.check_fee_limit(bumped_blob, self.raw_blob_baseline(&caps)?)?;
+
+                Some(bumped_blob)
+            }
+            None => None,
+        };
+
+        info!(
+            %old_tip,
+            %old_fee_cap,
+            %bumped_tip,
+            %bumped_fee_cap,
+            old_blob_fee_cap = ?old_blob_fee_cap,
+            blob_fee_cap = ?blob_fee_cap,
+            "gas price increase computed",
+        );
 
         Ok(BumpedFees { gas_tip_cap: bumped_tip, gas_fee_cap: bumped_fee_cap, blob_fee_cap, caps })
     }
@@ -504,7 +628,7 @@ impl SimpleTxManager {
         candidate: &TxCandidate,
         fee_overrides: Option<FeeOverride>,
     ) -> TxManagerResult<PreparedTx> {
-        self.craft_tx_with_caps(candidate, fee_overrides, None, None).await
+        self.craft_tx_with_caps(candidate, fee_overrides, None, None, None).await
     }
 
     /// Internal variant of [`craft_tx`](Self::craft_tx) that optionally uses
@@ -519,18 +643,30 @@ impl SimpleTxManager {
         fee_overrides: Option<FeeOverride>,
         caps: Option<GasPriceCaps>,
         nonce_override: Option<u64>,
+        cached_sidecar: Option<Arc<BlobTransactionSidecarVariant>>,
     ) -> TxManagerResult<PreparedTx> {
-        // Blob transactions are not yet supported.
-        if !candidate.blobs.is_empty() {
+        let is_blob = !candidate.blobs.is_empty();
+
+        // Blob transactions must have a recipient address (no contract creation).
+        if is_blob && candidate.to.is_none() {
             return Err(TxManagerError::Unsupported(
-                "blob transactions are not yet supported".to_string(),
+                "blob transactions must have a recipient address".to_string(),
             ));
         }
 
-        // Step 1: Get fee estimates.
+        // Reject blob transactions that exceed the per-transaction blob limit.
+        if is_blob && candidate.blobs.len() > crate::MAX_BLOBS_PER_TX {
+            return Err(TxManagerError::Unsupported(format!(
+                "blob count {} exceeds maximum {} per transaction",
+                candidate.blobs.len(),
+                crate::MAX_BLOBS_PER_TX,
+            )));
+        }
+
+        // Step 1: Get fee estimates (includes blob base fee when is_blob).
         let caps = match caps {
             Some(caps) => caps,
-            None => self.suggest_gas_price_caps().await?,
+            None => self.suggest_gas_price_caps_for(is_blob).await?,
         };
 
         // Step 2: Apply fee overrides as a floor.
@@ -540,12 +676,10 @@ impl SimpleTxManager {
         // and the override so the replacement transaction is guaranteed
         // to satisfy geth's replacement rules even if network fees have
         // dropped since the bump was calculated.
-        let (tip_cap, fee_cap) = match fee_overrides {
-            Some(FeeOverride { gas_tip_cap, gas_fee_cap }) => {
-                (caps.gas_tip_cap.max(gas_tip_cap), caps.gas_fee_cap.max(gas_fee_cap))
-            }
-            None => (caps.gas_tip_cap, caps.gas_fee_cap),
-        };
+        let (tip_cap, fee_cap) =
+            fee_overrides.as_ref().map_or((caps.gas_tip_cap, caps.gas_fee_cap), |fo| {
+                (caps.gas_tip_cap.max(fo.gas_tip_cap), caps.gas_fee_cap.max(fo.gas_fee_cap))
+            });
 
         // Step 3: Check fee limits.
         //
@@ -554,12 +688,25 @@ impl SimpleTxManager {
         // (`min_tip_cap`, `min_basefee`). This detects when enforced
         // minimums or fee overrides inflate the fee cap beyond
         // `fee_limit_multiplier × raw_provider_fee_cap`.
-        FeeCalculator::check_limits(
-            fee_cap,
-            caps.raw_gas_fee_cap,
-            self.config.fee_limit_multiplier,
-            self.config.fee_limit_threshold,
-        )?;
+        self.check_fee_limit(fee_cap, caps.raw_gas_fee_cap)?;
+
+        // Step 3b: Compute blob fee cap with config minimum and override floor.
+        let blob_fee_cap = if is_blob {
+            let network = caps.blob_fee_cap.ok_or_else(|| {
+                TxManagerError::Unsupported(
+                    "blob_fee_cap missing from fee caps on blob transaction path".into(),
+                )
+            })?;
+            let floor = fee_overrides.as_ref().and_then(|fo| fo.blob_fee_cap).unwrap_or(0);
+            Some(network.max(floor))
+        } else {
+            None
+        };
+
+        // Step 3c: Enforce blob fee ceiling (mirrors Step 3 for gas fee cap).
+        if let Some(blob_cap) = blob_fee_cap {
+            self.check_fee_limit(blob_cap, self.raw_blob_baseline(&caps)?)?;
+        }
 
         // Step 4: Build TransactionRequest.
         let from = self.sender_address();
@@ -577,12 +724,55 @@ impl SimpleTxManager {
             None => tx_request = tx_request.into_create(),
         }
 
+        // Step 4b: Attach blob sidecar and blob-specific fields.
+        //
+        // Reuse a cached sidecar when available (fee bump iterations) to
+        // avoid recomputing KZG proofs from the same blob data. If the
+        // cached sidecar's proof variant no longer matches the current
+        // block timestamp (e.g. fork activation crossed mid-send-loop),
+        // discard it and rebuild.
+        let built_sidecar = if is_blob {
+            let sidecar =
+                match cached_sidecar {
+                    Some(cached)
+                        if self.blob_builder.is_sidecar_valid(&cached, caps.block_timestamp) =>
+                    {
+                        cached
+                    }
+                    cached => {
+                        if let Some(ref stale) = cached {
+                            info!(
+                                block_timestamp = caps.block_timestamp,
+                                cached_is_eip7594 = stale.is_eip7594(),
+                                "cached sidecar proof type stale, rebuilding"
+                            );
+                        }
+                        Arc::new(self.blob_builder.make_sidecar_auto(
+                            Arc::clone(&candidate.blobs),
+                            caps.block_timestamp,
+                        )?)
+                    }
+                };
+            tx_request.sidecar = Some((*sidecar).clone());
+            tx_request.populate_blob_hashes();
+            tx_request.max_fee_per_blob_gas = blob_fee_cap;
+            Some(sidecar)
+        } else {
+            None
+        };
+
         // Step 5: Gas estimation.
         //
         // Always call estimate_gas to enforce intrinsic gas checks (e.g.
         // the 21,000 minimum for plain value transfers). When the caller
         // supplies an explicit gas_limit, it is used as a floor via max()
         // so the transaction never under-provisions gas.
+        //
+        // Strip the blob sidecar for the estimation call — some nodes
+        // reject sidecar data in `eth_estimateGas`. Versioned hashes and
+        // `max_fee_per_blob_gas` remain so intrinsic-gas accounting is
+        // correct.
+        let sidecar_stash = tx_request.sidecar.take();
         let estimated = tokio::time::timeout(
             self.config.network_timeout,
             self.provider.estimate_gas(tx_request.clone()),
@@ -590,7 +780,9 @@ impl SimpleTxManager {
         .await
         .map_err(|_| self.rpc_error("estimate_gas timed out"))?
         .map_err(|e| self.classify_and_record_rpc(&e.to_string()))?;
-        let gas_limit = candidate.gas_limit.max(estimated);
+        tx_request.sidecar = sidecar_stash;
+        let gas_floor = fee_overrides.as_ref().map_or(0, |fo| fo.gas_limit_floor);
+        let gas_limit = candidate.gas_limit.max(gas_floor).max(estimated);
         tx_request = tx_request.with_gas_limit(gas_limit);
 
         // Step 6: Assign nonce.
@@ -614,6 +806,7 @@ impl SimpleTxManager {
             gas_limit = %gas_limit,
             tip_cap = %tip_cap,
             fee_cap = %fee_cap,
+            blob_fee_cap = ?blob_fee_cap,
             "transaction crafted",
         );
 
@@ -636,8 +829,10 @@ impl SimpleTxManager {
                     raw_tx: Bytes::from(Encodable2718::encoded_2718(&envelope)),
                     gas_tip_cap: tip_cap,
                     gas_fee_cap: fee_cap,
+                    blob_fee_cap,
                     gas_limit,
                     nonce,
+                    sidecar: built_sidecar,
                 })
             }
             Err(e) => {
@@ -825,9 +1020,9 @@ impl SimpleTxManager {
         // The returned PreparedTx carries the actual on-wire fees, eliminating
         // the need for a separate suggest_gas_price_caps() call.
         let prepared =
-            self.prepare_with_initial_caps(candidate, None, None, nonce_override).await?;
+            self.prepare_with_initial_caps(candidate, None, None, nonce_override, None).await?;
         let tx_hash = self.publish_tx(send_state, &prepared.raw_tx, None).await?;
-        let mut bump = BumpState::from_prepared(&prepared, tx_hash);
+        let mut bump = BumpState::from_prepared(prepared, tx_hash);
 
         // Receipt delivery channel — mpsc because fee bumps may spawn
         // new wait tasks with different tx hashes.
@@ -969,13 +1164,17 @@ impl SimpleTxManager {
         receipt_tx: &mpsc::Sender<TransactionReceipt>,
         old: &BumpState,
     ) -> TxManagerResult<BumpState> {
-        let bumped = self.increase_gas_price(candidate, old.tip, old.fee_cap, None).await?;
+        let bumped =
+            self.increase_gas_price(candidate, old.tip, old.fee_cap, old.blob_fee_cap).await?;
 
-        // Clone candidate with the previous gas limit as a floor so that
-        // craft_tx_with_caps's `candidate.gas_limit.max(estimated)` logic
-        // ensures the gas limit never decreases across bumps.
-        let mut bump_candidate = candidate.clone();
-        bump_candidate.gas_limit = old.gas_limit;
+        // Build fee overrides including blob fee cap and gas limit floor.
+        // The gas limit floor ensures the limit never decreases across bumps,
+        // avoiding a full candidate clone.
+        let mut fee_override = FeeOverride::new(bumped.gas_tip_cap, bumped.gas_fee_cap)
+            .with_gas_limit_floor(old.gas_limit);
+        if let Some(blob_cap) = bumped.blob_fee_cap {
+            fee_override = fee_override.with_blob_fee_cap(blob_cap);
+        }
 
         // Rebuild transaction with bumped fees as overrides and the fresh
         // caps to avoid a redundant provider round-trip.
@@ -985,10 +1184,11 @@ impl SimpleTxManager {
         // send_async() tasks.
         let prepared = self
             .prepare_with_initial_caps(
-                &bump_candidate,
-                Some(FeeOverride::new(bumped.gas_tip_cap, bumped.gas_fee_cap)),
+                candidate,
+                Some(fee_override),
                 Some(bumped.caps),
                 Some(old.nonce),
+                old.sidecar.clone(),
             )
             .await?;
 
@@ -1004,6 +1204,8 @@ impl SimpleTxManager {
             new_tip = %prepared.gas_tip_cap,
             old_fee_cap = %old.fee_cap,
             new_fee_cap = %prepared.gas_fee_cap,
+            old_blob_fee_cap = ?old.blob_fee_cap,
+            new_blob_fee_cap = ?prepared.blob_fee_cap,
             old_gas_limit = %old.gas_limit,
             new_gas_limit = %prepared.gas_limit,
             "fee bump applied",
@@ -1019,7 +1221,7 @@ impl SimpleTxManager {
             Arc::clone(&self.closed),
         );
 
-        Ok(BumpState::from_prepared(&prepared, new_hash))
+        Ok(BumpState::from_prepared(prepared, new_hash))
     }
 
     /// Applies the result of a fee bump attempt, updating the tracked fee
@@ -1385,33 +1587,46 @@ mod tests {
 
     #[rstest]
     #[case::success_updates_state(
-        Ok(BumpState { tip: 200, fee_cap: 2000, gas_limit: 50_000, tx_hash: B256::with_last_byte(0x42), nonce: 0 }),
-        false, 200, 2000, 50_000, B256::with_last_byte(0x42),
+        Ok(BumpState { tip: 200, fee_cap: 2000, blob_fee_cap: None, gas_limit: 50_000, tx_hash: B256::with_last_byte(0x42), nonce: 0, sidecar: None }),
+        false, 200, 2000, None, 50_000, B256::with_last_byte(0x42),
+    )]
+    #[case::success_with_blob_fee_cap(
+        Ok(BumpState { tip: 300, fee_cap: 3000, blob_fee_cap: Some(10_000), gas_limit: 60_000, tx_hash: B256::with_last_byte(0x43), nonce: 1, sidecar: None }),
+        false, 300, 3000, Some(10_000), 60_000, B256::with_last_byte(0x43),
     )]
     #[case::non_retryable_returns_abort(
         Err(TxManagerError::FeeLimitExceeded { fee: 500, ceiling: 100 }),
-        true, 100, 1000, 21_000, B256::ZERO,
+        true, 100, 1000, Some(5_000), 21_000, B256::ZERO,
     )]
     #[case::retryable_continues(
         Err(TxManagerError::Rpc("transient error".to_string())),
-        false, 100, 1000, 21_000, B256::ZERO,
+        false, 100, 1000, Some(5_000), 21_000, B256::ZERO,
     )]
     fn apply_bump_result(
         #[case] input: Result<BumpState, TxManagerError>,
         #[case] abort_expected: bool,
         #[case] expected_tip: u128,
         #[case] expected_fee_cap: u128,
+        #[case] expected_blob_fee_cap: Option<u128>,
         #[case] expected_gas_limit: u64,
         #[case] expected_hash: B256,
     ) {
-        let mut state =
-            BumpState { tip: 100, fee_cap: 1000, gas_limit: 21_000, tx_hash: B256::ZERO, nonce: 0 };
+        let mut state = BumpState {
+            tip: 100,
+            fee_cap: 1000,
+            blob_fee_cap: Some(5_000),
+            gas_limit: 21_000,
+            tx_hash: B256::ZERO,
+            nonce: 0,
+            sidecar: None,
+        };
 
         let abort = SimpleTxManager::apply_bump_result(input, &mut state);
 
         assert_eq!(abort.is_some(), abort_expected);
         assert_eq!(state.tip, expected_tip);
         assert_eq!(state.fee_cap, expected_fee_cap);
+        assert_eq!(state.blob_fee_cap, expected_blob_fee_cap);
         assert_eq!(state.gas_limit, expected_gas_limit);
         assert_eq!(state.tx_hash, expected_hash);
     }
@@ -1480,10 +1695,12 @@ mod tests {
             gas_fee_cap: 15_000_000_000_000,
             raw_gas_fee_cap: 15_000_000_000_000,
             blob_fee_cap: None,
+            raw_blob_fee_cap: None,
+            block_timestamp: 0,
         };
 
         let prepared = manager
-            .prepare_with_initial_caps(&candidate, None, Some(caps.clone()), None)
+            .prepare_with_initial_caps(&candidate, None, Some(caps.clone()), None, None)
             .await
             .expect("should prepare tx using supplied caps");
         let tx = decode_eip1559(&prepared.raw_tx);

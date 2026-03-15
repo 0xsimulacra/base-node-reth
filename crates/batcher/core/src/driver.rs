@@ -175,7 +175,7 @@ where
                             tx_data: Bytes::new(),
                             value: U256::ZERO,
                             gas_limit: 0,
-                            blobs,
+                            blobs: Arc::new(blobs),
                         },
                         Err(e) => {
                             warn!(id = %id.0, error = %e, "failed to encode frames to blobs, requeueing");
@@ -198,7 +198,7 @@ where
                             tx_data: Bytes::from(data),
                             value: U256::ZERO,
                             gas_limit: 0,
-                            blobs: vec![],
+                            blobs: vec![].into(),
                         }
                     }
                 };

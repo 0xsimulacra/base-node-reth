@@ -195,13 +195,32 @@ pub struct FeeOverride {
     pub gas_tip_cap: u128,
     /// Minimum acceptable maximum total fee per gas (base fee + tip).
     pub gas_fee_cap: u128,
+    /// Minimum acceptable blob fee cap (for EIP-4844 txs). `None` = no override.
+    pub blob_fee_cap: Option<u128>,
+    /// Minimum gas limit (floor). Used during fee bumps so the gas limit
+    /// never decreases across replacement attempts. `0` = no override.
+    pub gas_limit_floor: u64,
 }
 
 impl FeeOverride {
     /// Creates a new [`FeeOverride`] with the given tip and fee cap floors.
     #[must_use]
     pub const fn new(gas_tip_cap: u128, gas_fee_cap: u128) -> Self {
-        Self { gas_tip_cap, gas_fee_cap }
+        Self { gas_tip_cap, gas_fee_cap, blob_fee_cap: None, gas_limit_floor: 0 }
+    }
+
+    /// Returns a copy with the blob fee cap floor set.
+    #[must_use]
+    pub const fn with_blob_fee_cap(mut self, blob_fee_cap: u128) -> Self {
+        self.blob_fee_cap = Some(blob_fee_cap);
+        self
+    }
+
+    /// Returns a copy with the gas limit floor set.
+    #[must_use]
+    pub const fn with_gas_limit_floor(mut self, gas_limit_floor: u64) -> Self {
+        self.gas_limit_floor = gas_limit_floor;
+        self
     }
 }
 
@@ -243,6 +262,18 @@ pub struct GasPriceCaps {
     pub raw_gas_fee_cap: u128,
     /// Maximum blob fee per gas (for EIP-4844 txs). `None` for non-blob txs.
     pub blob_fee_cap: Option<u128>,
+    /// Blob fee cap computed from the raw provider blob base fee before
+    /// enforcing configured minimums (`min_blob_fee`).
+    ///
+    /// Used as the `suggested` baseline in [`FeeCalculator::check_limits`]
+    /// so the blob fee ceiling mirrors the gas fee ceiling behaviour.
+    pub raw_blob_fee_cap: Option<u128>,
+    /// Timestamp of the latest block used to derive these fee estimates.
+    ///
+    /// Threaded to [`BlobTxBuilder::make_sidecar_auto`] so the
+    /// legacy-vs-cell-proof decision is deterministic with respect to
+    /// chain state rather than wall-clock time.
+    pub block_timestamp: u64,
 }
 
 #[cfg(test)]
@@ -262,6 +293,8 @@ mod tests {
         assert_eq!(caps.gas_fee_cap, 0);
         assert_eq!(caps.raw_gas_fee_cap, 0);
         assert!(caps.blob_fee_cap.is_none());
+        assert!(caps.raw_blob_fee_cap.is_none());
+        assert_eq!(caps.block_timestamp, 0);
     }
 
     #[test]
