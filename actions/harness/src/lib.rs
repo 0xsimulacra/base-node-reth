@@ -11,7 +11,8 @@ pub use miner::{L1Block, L1Miner, L1MinerConfig, PendingTx, ReorgError, block_in
 
 mod l2;
 pub use l2::{
-    ActionL2Source, L2Sequencer, L2SequencerError, TEST_ACCOUNT_ADDRESS, TEST_ACCOUNT_KEY,
+    ActionL2Source, L2Sequencer, L2SequencerError, SharedBlockHashRegistry, TEST_ACCOUNT_ADDRESS,
+    TEST_ACCOUNT_KEY,
 };
 
 mod harness;

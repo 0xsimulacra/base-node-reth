@@ -1,6 +1,5 @@
 #![doc = "TDD action test skeletons for sequencer drift scenarios."]
 
-use alloy_primitives::B256;
 use base_action_harness::{
     ActionL2Source, ActionTestHarness, BatcherConfig, L1MinerConfig, SharedL1Chain,
     TestRollupConfigBuilder, block_info_from,
@@ -66,14 +65,14 @@ async fn sequencer_drift_produces_deposit_only_blocks() {
     //
     // Blocks 1-6 have user transactions. Blocks 7-8 also have user txs
     // (sequencer doesn't enforce drift), but the pipeline should drop them.
-    let (mut verifier, chain) = h.create_verifier();
-    let mut block_hashes: Vec<(u64, B256)> = Vec::new();
+    let (mut verifier, chain) = h.create_verifier_from_sequencer(
+        &sequencer,
+        SharedL1Chain::from_blocks(h.l1.chain().to_vec()),
+    );
 
-    for i in 1u64..=8 {
+    for _ in 1u64..=8 {
         // Build with user transactions — the pipeline decides what to accept.
         let block = sequencer.build_next_block().expect("build L2 block");
-        let hash = sequencer.head().block_info.hash;
-        block_hashes.push((i, hash));
 
         // Submit each block as a separate batch in its own L1 block.
         let mut source = ActionL2Source::new();
@@ -84,9 +83,6 @@ async fn sequencer_drift_produces_deposit_only_blocks() {
         h.mine_and_push(&chain);
     }
 
-    for (number, hash) in &block_hashes {
-        verifier.register_block_hash(*number, *hash);
-    }
     verifier.initialize().await.expect("initialize");
 
     // Drive derivation through all L1 blocks.
@@ -148,15 +144,15 @@ async fn sequencer_drift_forced_empty_blocks_accepted() {
     let l1_genesis = block_info_from(h.l1.block_by_number(0).expect("genesis"));
     sequencer.pin_l1_origin(l1_genesis);
 
-    let (mut verifier, chain) = h.create_verifier();
-    let mut block_hashes: Vec<(u64, B256)> = Vec::new();
+    let (mut verifier, chain) = h.create_verifier_from_sequencer(
+        &sequencer,
+        SharedL1Chain::from_blocks(h.l1.chain().to_vec()),
+    );
 
     // Build 6 normal blocks (within drift, ts=300..1800) + 2 empty blocks
     // (over drift, ts=2100, 2400). block_time=300 s, max_drift=1800 s.
-    for i in 1u64..=6 {
+    for _ in 1u64..=6 {
         let block = sequencer.build_next_block().expect("build normal block");
-        let hash = sequencer.head().block_info.hash;
-        block_hashes.push((i, hash));
 
         let mut source = ActionL2Source::new();
         source.push(block);
@@ -167,10 +163,8 @@ async fn sequencer_drift_forced_empty_blocks_accepted() {
     }
 
     // Build empty blocks past the drift boundary.
-    for i in 7u64..=8 {
+    for _ in 7u64..=8 {
         let block = sequencer.build_empty_block().expect("build empty block");
-        let hash = sequencer.head().block_info.hash;
-        block_hashes.push((i, hash));
 
         // The empty block has only the deposit tx — the batcher encodes it
         // but the pipeline will drop it (stale epoch) and produce a default block.
@@ -182,9 +176,6 @@ async fn sequencer_drift_forced_empty_blocks_accepted() {
         h.mine_and_push(&chain);
     }
 
-    for (number, hash) in &block_hashes {
-        verifier.register_block_hash(*number, *hash);
-    }
     verifier.initialize().await.expect("initialize");
 
     let mut total_derived = 0;

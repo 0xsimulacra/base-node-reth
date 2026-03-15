@@ -276,7 +276,10 @@ async fn span_batch_rejected_before_delta() {
 
     h.l1.mine_block();
 
-    let (mut verifier, _chain) = h.create_verifier();
+    let (mut verifier, _chain) = h.create_verifier_from_sequencer(
+        &builder,
+        SharedL1Chain::from_blocks(h.l1.chain().to_vec()),
+    );
     verifier.initialize().await.expect("initialize");
     verifier.act_l1_head_signal(block_info_from(h.l1.tip())).await.expect("signal");
     verifier.act_l2_pipeline_full().await.expect("pipeline");
@@ -304,12 +307,9 @@ async fn span_batch_derives_after_delta() {
     let l1_chain = SharedL1Chain::from_blocks(h.l1.chain().to_vec());
     let mut builder = h.create_l2_sequencer(l1_chain);
 
-    let mut block_hashes = Vec::new();
     let mut source = ActionL2Source::new();
     source.push(builder.build_next_block().expect("build L2 block 1"));
-    block_hashes.push((builder.head().block_info.number, builder.head().block_info.hash));
     source.push(builder.build_next_block().expect("build L2 block 2"));
-    block_hashes.push((builder.head().block_info.number, builder.head().block_info.hash));
 
     let span_cfg = BatcherConfig { batch_type: BatchType::Span, ..batcher_cfg.clone() };
     let mut batcher = h.create_batcher(source, span_cfg);
@@ -318,10 +318,10 @@ async fn span_batch_derives_after_delta() {
 
     h.l1.mine_block();
 
-    let (mut verifier, _chain) = h.create_verifier();
-    for (number, hash) in &block_hashes {
-        verifier.register_block_hash(*number, *hash);
-    }
+    let (mut verifier, _chain) = h.create_verifier_from_sequencer(
+        &builder,
+        SharedL1Chain::from_blocks(h.l1.chain().to_vec()),
+    );
     verifier.initialize().await.expect("initialize");
     verifier.act_l1_head_signal(block_info_from(h.l1.tip())).await.expect("signal");
     let derived = verifier.act_l2_pipeline_full().await.expect("pipeline");
@@ -343,12 +343,9 @@ async fn single_batch_derives_with_fjord() {
     let l1_chain = SharedL1Chain::from_blocks(h.l1.chain().to_vec());
     let mut builder = h.create_l2_sequencer(l1_chain);
 
-    let mut block_hashes = Vec::new();
     for _ in 0..2 {
         let mut source = ActionL2Source::new();
         source.push(builder.build_next_block().expect("build L2 block"));
-        let head = builder.head();
-        block_hashes.push((head.block_info.number, head.block_info.hash));
 
         let mut batcher = h.create_batcher(source, batcher_cfg.clone());
         batcher.advance().expect("batcher advance");
@@ -356,10 +353,10 @@ async fn single_batch_derives_with_fjord() {
         h.l1.mine_block();
     }
 
-    let (mut verifier, _chain) = h.create_verifier();
-    for (number, hash) in &block_hashes {
-        verifier.register_block_hash(*number, *hash);
-    }
+    let (mut verifier, _chain) = h.create_verifier_from_sequencer(
+        &builder,
+        SharedL1Chain::from_blocks(h.l1.chain().to_vec()),
+    );
     verifier.initialize().await.expect("initialize");
 
     for i in 1..=2u64 {
@@ -415,7 +412,6 @@ async fn jovian_derivation_crosses_activation_boundary() {
     let l1_chain = SharedL1Chain::from_blocks(h.l1.chain().to_vec());
     let mut builder = h.create_l2_sequencer(l1_chain);
 
-    let mut block_hashes = Vec::new();
     for i in 1..=4u64 {
         let mut source = ActionL2Source::new();
         let block = if i == 3 {
@@ -425,8 +421,6 @@ async fn jovian_derivation_crosses_activation_boundary() {
             builder.build_next_block().expect("build L2 block")
         };
         source.push(block);
-        let head = builder.head();
-        block_hashes.push((head.block_info.number, head.block_info.hash));
 
         let mut batcher = h.create_batcher(source, batcher_cfg.clone());
         batcher.advance().expect("batcher encode");
@@ -434,10 +428,10 @@ async fn jovian_derivation_crosses_activation_boundary() {
         h.l1.mine_block();
     }
 
-    let (mut verifier, _chain) = h.create_verifier();
-    for (number, hash) in &block_hashes {
-        verifier.register_block_hash(*number, *hash);
-    }
+    let (mut verifier, _chain) = h.create_verifier_from_sequencer(
+        &builder,
+        SharedL1Chain::from_blocks(h.l1.chain().to_vec()),
+    );
     verifier.initialize().await.expect("initialize");
 
     for i in 1..=4u64 {
