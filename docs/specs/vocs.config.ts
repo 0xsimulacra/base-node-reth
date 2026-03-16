@@ -134,7 +134,7 @@ function sectionItemWithoutDirs(
 
 const hiddenProtocolFiles = ['access-lists.md']
 
-const protocolTodoExcludedDirs = ['bridging', 'consensus', 'execution', 'fault-proof']
+const protocolTodoExcludedDirs = ['bridging', 'configuration', 'consensus', 'execution', 'fault-proof']
 
 const protocolTodoExcludedFiles = [
   ...hiddenProtocolFiles,
@@ -192,6 +192,7 @@ const sidebar: SidebarItem[] = [
   {
     text: 'Upgrades',
     items: [
+      { text: 'V1', link: '/upgrades/v1/overview' },
       { text: 'Jovian', link: '/upgrades/jovian/overview' },
       { text: 'Isthmus', link: '/upgrades/isthmus/overview' },
       { text: 'Pectra Blob Schedule (Sepolia)', link: '/upgrades/pectra-blob-schedule/overview' },
