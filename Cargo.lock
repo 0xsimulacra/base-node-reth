@@ -2497,6 +2497,7 @@ name = "base-alloy-rpc-jsonrpsee"
 version = "0.0.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rpc-types-eth",
  "jsonrpsee",
 ]
 
@@ -2546,6 +2547,27 @@ dependencies = [
  "sha2 0.10.9",
  "snap",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "base-alloy-signer"
+version = "0.0.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-network",
+ "alloy-node-bindings",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-signer",
+ "alloy-signer-local",
+ "async-trait",
+ "base-alloy-rpc-jsonrpsee",
+ "jsonrpsee",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
