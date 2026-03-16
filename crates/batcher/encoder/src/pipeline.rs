@@ -55,11 +55,29 @@ pub trait BatchPipeline: Send {
     /// the channel is force-closed and its blocks are requeued.
     fn advance_l1_head(&mut self, l1_block: u64);
 
+    /// Force-close the current channel, moving it to the submission queue.
+    ///
+    /// Unlike [`advance_l1_head`](Self::advance_l1_head) with `u64::MAX`, this does not
+    /// mutate the L1 head tracker, so subsequent real [`advance_l1_head`](Self::advance_l1_head)
+    /// calls continue to work correctly.
+    ///
+    /// Intended for test harnesses that need to flush the current channel without
+    /// simulating L1 time progression.
+    fn force_close_channel(&mut self);
+
     /// Reset all pipeline state.
     ///
     /// Called after a reorg is detected. The caller is responsible for waiting for all
     /// in-flight submissions to settle (confirm or requeue) before calling reset.
     fn reset(&mut self);
+
+    /// Prune blocks confirmed safe on L2 to prevent unbounded queue growth.
+    ///
+    /// Drains blocks from the front of the input queue whose block number is
+    /// `<= safe_l2_number` **and** that have already been fed into a channel
+    /// (i.e. are before the encoding cursor). Blocks that have not yet been
+    /// encoded are never pruned, even if their number is below the safe head.
+    fn prune_safe(&mut self, safe_l2_number: u64);
 
     /// Returns the estimated DA backlog in bytes.
     ///
