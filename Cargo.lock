@@ -4435,6 +4435,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-proof-tee-nitro-verifier"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "base-proof-tee-registrar"
 version = "0.0.0"
 dependencies = [
