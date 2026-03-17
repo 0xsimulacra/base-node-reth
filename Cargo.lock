@@ -2890,10 +2890,9 @@ version = "0.0.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-provider",
  "alloy-rlp",
  "alloy-rpc-types-eth",
- "alloy-signer",
- "alloy-signer-local",
  "alloy-trie",
  "async-trait",
  "axum",
@@ -2902,10 +2901,10 @@ dependencies = [
  "base-proof-contracts",
  "base-proof-rpc",
  "base-protocol",
+ "base-tx-manager",
  "clap",
  "eyre",
  "futures",
- "hex",
  "humantime",
  "metrics",
  "reqwest 0.13.2",
@@ -2917,7 +2916,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "zeroize",
 ]
 
 [[package]]
@@ -2928,7 +2926,6 @@ dependencies = [
  "base-cli-utils",
  "clap",
  "eyre",
- "zeroize",
 ]
 
 [[package]]
