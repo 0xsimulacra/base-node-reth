@@ -4113,6 +4113,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-load-tests-core"
+version = "0.0.0"
+dependencies = [
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "base-cli-utils",
+ "base-tx-manager",
+ "eyre",
+ "futures",
+ "humantime",
+ "rand 0.9.2",
+ "revm",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "base-macros"
 version = "0.0.0"
 
