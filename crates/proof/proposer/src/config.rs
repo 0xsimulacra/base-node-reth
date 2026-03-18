@@ -50,14 +50,12 @@ pub enum ConfigError {
 pub struct ProposerConfig {
     /// Allow proposals based on non-finalized L1 data.
     pub allow_non_finalized: bool,
-    /// URL of the enclave RPC endpoint.
-    pub enclave_rpc: Url,
+    /// URL of the prover RPC endpoint.
+    pub prover_rpc: Url,
     /// URL of the L1 Ethereum RPC endpoint.
     pub l1_eth_rpc: Url,
     /// URL of the L2 Ethereum RPC endpoint.
     pub l2_eth_rpc: Url,
-    /// Use reth-specific RPC calls for L2.
-    pub l2_reth: bool,
     /// Address of the `AnchorStateRegistry` contract on L1.
     pub anchor_state_registry_addr: Address,
     /// Address of the `DisputeGameFactory` contract on L1.
@@ -94,7 +92,7 @@ impl ProposerConfig {
     /// Create a validated configuration from CLI arguments.
     pub fn from_cli(cli: Cli) -> Result<Self, ConfigError> {
         // Validate URLs have scheme and host
-        validate_url(&cli.proposer.enclave_rpc, "enclave-rpc")?;
+        validate_url(&cli.proposer.prover_rpc, "prover-rpc")?;
         validate_url(&cli.proposer.l1_eth_rpc, "l1-eth-rpc")?;
         validate_url(&cli.proposer.l2_eth_rpc, "l2-eth-rpc")?;
 
@@ -136,10 +134,9 @@ impl ProposerConfig {
 
         Ok(Self {
             allow_non_finalized: cli.proposer.allow_non_finalized,
-            enclave_rpc: cli.proposer.enclave_rpc,
+            prover_rpc: cli.proposer.prover_rpc,
             l1_eth_rpc: cli.proposer.l1_eth_rpc,
             l2_eth_rpc: cli.proposer.l2_eth_rpc,
-            l2_reth: cli.proposer.l2_reth,
             anchor_state_registry_addr: cli.proposer.anchor_state_registry_addr,
             dispute_game_factory_addr: cli.proposer.dispute_game_factory_addr,
             game_type: cli.proposer.game_type,
@@ -216,10 +213,9 @@ mod tests {
         Cli {
             proposer: ProposerArgs {
                 allow_non_finalized: false,
-                enclave_rpc: Url::parse("http://localhost:8080").unwrap(),
+                prover_rpc: Url::parse("http://localhost:8080").unwrap(),
                 l1_eth_rpc: Url::parse("http://localhost:8545").unwrap(),
                 l2_eth_rpc: Url::parse("http://localhost:9545").unwrap(),
-                l2_reth: false,
                 anchor_state_registry_addr: "0x1234567890123456789012345678901234567890"
                     .parse()
                     .unwrap(),
@@ -382,8 +378,8 @@ mod tests {
     #[test]
     fn test_config_error_display() {
         let error =
-            ConfigError::InvalidUrl { field: "enclave-rpc", reason: "missing host".to_string() };
-        assert_eq!(error.to_string(), "invalid enclave-rpc URL: missing host");
+            ConfigError::InvalidUrl { field: "prover-rpc", reason: "missing host".to_string() };
+        assert_eq!(error.to_string(), "invalid prover-rpc URL: missing host");
 
         let error = ConfigError::OutOfRange {
             field: "poll-interval",

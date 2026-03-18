@@ -48,9 +48,9 @@ pub struct ProposerArgs {
     )]
     pub allow_non_finalized: bool,
 
-    /// URL of the enclave RPC endpoint.
-    #[arg(long = "enclave-rpc", env = cli_env!("ENCLAVE_RPC"))]
-    pub enclave_rpc: Url,
+    /// URL of the prover RPC endpoint.
+    #[arg(long = "prover-rpc", env = cli_env!("PROVER_RPC"))]
+    pub prover_rpc: Url,
 
     /// URL of the L1 Ethereum RPC endpoint.
     #[arg(long = "l1-eth-rpc", env = cli_env!("L1_ETH_RPC"))]
@@ -59,10 +59,6 @@ pub struct ProposerArgs {
     /// URL of the L2 Ethereum RPC endpoint.
     #[arg(long = "l2-eth-rpc", env = cli_env!("L2_ETH_RPC"))]
     pub l2_eth_rpc: Url,
-
-    /// Use reth-specific RPC calls for L2.
-    #[arg(long = "l2-reth", env = cli_env!("L2_RETH"), default_value = "false")]
-    pub l2_reth: bool,
 
     /// Address of the `AnchorStateRegistry` contract on L1.
     #[arg(long = "anchor-state-registry-addr", env = cli_env!("ANCHOR_STATE_REGISTRY_ADDR"))]
@@ -188,7 +184,7 @@ mod tests {
         // Test that we can construct minimal CLI args (requires all required fields)
         let args = vec![
             "proposer",
-            "--enclave-rpc",
+            "--prover-rpc",
             "http://localhost:8080",
             "--l1-eth-rpc",
             "http://localhost:8545",
@@ -209,7 +205,6 @@ mod tests {
 
         // Check defaults
         assert!(!cli.proposer.allow_non_finalized);
-        assert!(!cli.proposer.l2_reth);
         assert_eq!(cli.proposer.poll_interval, Duration::from_secs(12));
         assert_eq!(cli.proposer.rpc_timeout, Duration::from_secs(30));
         assert_eq!(cli.proposer.rollup_rpc.as_str(), "http://localhost:7545/");
@@ -251,7 +246,7 @@ mod tests {
     fn test_cli_missing_rollup_rpc() {
         let args = vec![
             "proposer",
-            "--enclave-rpc",
+            "--prover-rpc",
             "http://localhost:8080",
             "--l1-eth-rpc",
             "http://localhost:8545",

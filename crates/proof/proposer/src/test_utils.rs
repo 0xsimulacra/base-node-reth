@@ -1,29 +1,21 @@
 //! Shared test utilities: reusable mock stubs for L1/L2 clients and a `test_prover` helper.
 
-use std::sync::Arc;
-
 use alloy_primitives::{Address, B256, Bytes, U256};
 use async_trait::async_trait;
 use base_enclave::{
-    AccountResult, BlockId, ExecutionWitness, Genesis, GenesisSystemConfig, PerChainConfig,
-    RollupConfig,
+    AccountResult, BlockId, Genesis, GenesisSystemConfig, PerChainConfig, RollupConfig,
 };
 use base_proof_contracts::{
     AggregateVerifierClient, AnchorRoot, AnchorStateRegistryClient, ContractError,
     DisputeGameFactoryClient, GameAtIndex, GameInfo,
 };
+use base_proof_primitives::Proposal;
 use base_proof_rpc::{
-    L1BlockId, L1BlockRef, L1Provider, L2BlockRef, L2Provider, OpBlock, RollupProvider, RpcError,
-    RpcResult, SyncStatus,
+    L1BlockId, L1BlockRef, L1Provider, L2BlockRef, L2Provider, OpBlock, OutputAtBlock,
+    RollupProvider, RpcError, RpcResult, SyncStatus,
 };
 
-use crate::{
-    enclave::EnclaveClientTrait,
-    error::ProposerError,
-    output_proposer::OutputProposer,
-    prover::{Prover, ProverProposal},
-    rpc::ProverL2Provider,
-};
+use crate::{error::ProposerError, output_proposer::OutputProposer};
 
 /// Mock L1 client with configurable `block_number()` return.
 pub(crate) struct MockL1 {
@@ -36,7 +28,7 @@ impl L1Provider for MockL1 {
         Ok(self.latest_block_number)
     }
     async fn header_by_number(&self, _: Option<u64>) -> RpcResult<alloy_rpc_types_eth::Header> {
-        unimplemented!()
+        Ok(alloy_rpc_types_eth::Header { hash: B256::repeat_byte(0x11), ..Default::default() })
     }
     async fn header_by_hash(&self, _: B256) -> RpcResult<alloy_rpc_types_eth::Header> {
         unimplemented!()
@@ -90,16 +82,6 @@ impl L2Provider for MockL2 {
     }
 }
 
-#[async_trait]
-impl ProverL2Provider for MockL2 {
-    async fn execution_witness(&self, _: u64) -> RpcResult<ExecutionWitness> {
-        unimplemented!()
-    }
-    async fn db_get(&self, _: B256) -> RpcResult<Bytes> {
-        unimplemented!()
-    }
-}
-
 /// Mock rollup client that returns a configurable `SyncStatus`.
 pub(crate) struct MockRollupClient {
     pub sync_status: SyncStatus,
@@ -112,6 +94,12 @@ impl RollupProvider for MockRollupClient {
     }
     async fn sync_status(&self) -> RpcResult<SyncStatus> {
         Ok(self.sync_status.clone())
+    }
+    async fn output_at_block(&self, block_number: u64) -> RpcResult<OutputAtBlock> {
+        Ok(OutputAtBlock {
+            output_root: B256::repeat_byte(block_number as u8),
+            block_ref: test_l2_block_ref(block_number, B256::repeat_byte(block_number as u8)),
+        })
     }
 }
 
@@ -200,19 +188,6 @@ pub(crate) fn test_per_chain_config() -> PerChainConfig {
     }
 }
 
-/// Build a `Prover` with mock L1/L2 clients and the given enclave mock.
-pub(crate) fn test_prover<E: EnclaveClientTrait>(enclave: E) -> Prover<MockL1, MockL2, E> {
-    Prover::new(
-        test_per_chain_config(),
-        RollupConfig::default(),
-        Arc::new(MockL1 { latest_block_number: 0 }),
-        Arc::new(MockL2 { block_not_found: false, canonical_hash: None }),
-        enclave,
-        Address::ZERO,
-        B256::ZERO,
-    )
-}
-
 pub(crate) fn test_l1_block_ref(number: u64) -> L1BlockRef {
     L1BlockRef { hash: B256::ZERO, number, parent_hash: B256::ZERO, timestamp: 1_000_000 + number }
 }
@@ -248,6 +223,16 @@ pub(crate) fn test_anchor_root(block_number: u64) -> AnchorRoot {
     AnchorRoot { root: B256::ZERO, l2_block_number: block_number }
 }
 
+pub(crate) fn test_prover() -> crate::prover::Prover {
+    use jsonrpsee::http_client::HttpClientBuilder;
+
+    use crate::prover_client::RpcProverClient;
+
+    let client = HttpClientBuilder::default().build("http://localhost:19999").expect("valid URL");
+    let prover_client = RpcProverClient::new(client);
+    crate::prover::Prover::new(test_per_chain_config(), std::sync::Arc::new(prover_client))
+}
+
 /// Mock output proposer that does nothing (returns `Ok(())`).
 pub(crate) struct MockOutputProposer;
 
@@ -255,7 +240,8 @@ pub(crate) struct MockOutputProposer;
 impl OutputProposer for MockOutputProposer {
     async fn propose_output(
         &self,
-        _proposal: &ProverProposal,
+        _proposal: &Proposal,
+        _l2_block_number: u64,
         _parent_index: u32,
         _intermediate_roots: &[B256],
     ) -> Result<(), ProposerError> {
