@@ -1,4 +1,5 @@
 use base_proof_tee_nitro_attestation_prover::ProverError;
+use base_tx_manager::TxManagerError;
 use thiserror::Error;
 
 /// Errors that can occur in the prover registrar.
@@ -44,6 +45,10 @@ pub enum RegistrarError {
     #[error("signing error")]
     Signing(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    /// Transaction submission or confirmation failed (RPC, nonce, fee, timeout).
+    #[error("transaction error")]
+    Transaction(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     /// Configuration is invalid.
     #[error("config error: {0}")]
     Config(String),
@@ -52,6 +57,12 @@ pub enum RegistrarError {
 impl From<ProverError> for RegistrarError {
     fn from(e: ProverError) -> Self {
         Self::ProofGeneration(Box::new(e))
+    }
+}
+
+impl From<TxManagerError> for RegistrarError {
+    fn from(e: TxManagerError) -> Self {
+        Self::Transaction(Box::new(e))
     }
 }
 
