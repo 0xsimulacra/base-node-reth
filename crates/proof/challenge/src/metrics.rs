@@ -41,6 +41,15 @@ impl ChallengerMetrics {
     /// Gauge: number of in-flight proof sessions.
     pub const PENDING_PROOFS: &str = "base_challenger_pending_proofs";
 
+    /// Counter: total number of TEE proof attempts.
+    pub const TEE_PROOF_ATTEMPTS_TOTAL: &str = "base_challenger_tee_proof_attempts_total";
+
+    /// Counter: total number of TEE proofs successfully obtained.
+    pub const TEE_PROOF_OBTAINED_TOTAL: &str = "base_challenger_tee_proof_obtained_total";
+
+    /// Counter: total number of TEE proof failures that fell back to ZK.
+    pub const TEE_PROOF_FALLBACK_TOTAL: &str = "base_challenger_tee_proof_fallback_total";
+
     /// Label key for status.
     pub const LABEL_STATUS: &str = "status";
 
