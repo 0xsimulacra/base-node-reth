@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use alloy_consensus::{Header, Receipt};
 use alloy_eips::eip4844::Blob;
-use alloy_primitives::{Address, B256, Bytes, Log};
+use alloy_primitives::{Address, B256, Bytes, Log, LogData, U256};
 use base_batcher_encoder::FrameEncoder;
 use base_blobs::BlobEncoder;
-use base_protocol::{BlockInfo, Frame};
+use base_consensus_genesis::{CONFIG_UPDATE_EVENT_VERSION_0, CONFIG_UPDATE_TOPIC};
+use base_protocol::{BlockInfo, DEPOSIT_EVENT_ABI_HASH, DEPOSIT_EVENT_VERSION_0, Frame};
 use tracing::info;
 
 use crate::Action;
@@ -18,6 +19,27 @@ pub fn block_info_from(block: &L1Block) -> BlockInfo {
         parent_hash: block.header.parent_hash,
         timestamp: block.timestamp(),
     }
+}
+
+/// Parameters for a user deposit transaction, passed to [`L1Miner::enqueue_user_deposit`].
+///
+/// Mirrors the fields of the on-chain `OptimismPortal.sol` `TransactionDeposited` event.
+#[derive(Debug, Clone)]
+pub struct UserDeposit {
+    /// The L1 portal contract address that emits the deposit event.
+    pub deposit_contract: Address,
+    /// The L1 sender address.
+    pub from: Address,
+    /// The L2 recipient address.
+    pub to: Address,
+    /// ETH value to mint on L2 (in wei, as u128).
+    pub mint: u128,
+    /// ETH value to transfer on L2.
+    pub value: U256,
+    /// Gas limit for the L2 deposit transaction.
+    pub gas_limit: u64,
+    /// Calldata for the L2 deposit transaction.
+    pub data: Vec<u8>,
 }
 
 /// Error returned by [`L1Miner::reorg_to`].
@@ -216,6 +238,136 @@ impl L1Miner {
     /// looks blobs up from this sidecar by versioned hash.
     pub fn enqueue_blob(&mut self, hash: B256, blob: Box<Blob>) {
         self.pending_blobs.push((hash, blob));
+    }
+
+    /// Queue a `ConfigUpdate(Batcher)` log for the next mined block.
+    ///
+    /// Encodes a batcher address rotation to `new_batcher`. The derivation
+    /// pipeline reads this from L1 receipts and updates its internal
+    /// [`SystemConfig`] for subsequent L2 blocks.
+    ///
+    /// [`SystemConfig`]: base_consensus_genesis::SystemConfig
+    pub fn enqueue_batcher_update(&mut self, l1_sys_cfg_addr: Address, new_batcher: Address) {
+        let mut data = [0u8; 96];
+        data[31] = 0x20; // pointer → offset 32
+        data[63] = 0x20; // length  → 32 bytes
+        data[76..96].copy_from_slice(new_batcher.as_slice()); // address, right-aligned
+        self.enqueue_log(Log {
+            address: l1_sys_cfg_addr,
+            data: LogData::new_unchecked(
+                vec![CONFIG_UPDATE_TOPIC, CONFIG_UPDATE_EVENT_VERSION_0, B256::ZERO],
+                data.into(),
+            ),
+        });
+    }
+
+    /// Queue a `ConfigUpdate(GasConfig)` log for the next mined block.
+    ///
+    /// Encodes a GPO `overhead` and `scalar` update. The derivation pipeline
+    /// applies this through the `SystemConfig` update mechanism.
+    pub fn enqueue_gas_config_update(
+        &mut self,
+        l1_sys_cfg_addr: Address,
+        overhead: u64,
+        scalar: u64,
+    ) {
+        let mut data = [0u8; 128];
+        data[31] = 0x20; // pointer = 32
+        data[63] = 0x40; // length  = 64
+        data[88..96].copy_from_slice(&overhead.to_be_bytes());
+        data[120..128].copy_from_slice(&scalar.to_be_bytes());
+        let mut update_type = [0u8; 32];
+        update_type[31] = 1; // GasConfig = 1
+        self.enqueue_log(Log {
+            address: l1_sys_cfg_addr,
+            data: LogData::new_unchecked(
+                vec![CONFIG_UPDATE_TOPIC, CONFIG_UPDATE_EVENT_VERSION_0, B256::from(update_type)],
+                data.into(),
+            ),
+        });
+    }
+
+    /// Queue a `ConfigUpdate(GasLimit)` log for the next mined block.
+    pub fn enqueue_gas_limit_update(&mut self, l1_sys_cfg_addr: Address, gas_limit: u64) {
+        let mut data = [0u8; 96];
+        data[31] = 0x20; // pointer = 32
+        data[63] = 0x20; // length  = 32
+        data[88..96].copy_from_slice(&gas_limit.to_be_bytes());
+        let mut update_type = [0u8; 32];
+        update_type[31] = 2; // GasLimit = 2
+        self.enqueue_log(Log {
+            address: l1_sys_cfg_addr,
+            data: LogData::new_unchecked(
+                vec![CONFIG_UPDATE_TOPIC, CONFIG_UPDATE_EVENT_VERSION_0, B256::from(update_type)],
+                data.into(),
+            ),
+        });
+    }
+
+    /// Queue a `ConfigUpdate(OperatorFee)` log for the next mined block.
+    ///
+    /// Encodes an operator fee update with the given `scalar` and `constant`.
+    pub fn enqueue_operator_fee_update(
+        &mut self,
+        l1_sys_cfg_addr: Address,
+        operator_fee_scalar: u32,
+        operator_fee_constant: u64,
+    ) {
+        let mut data = [0u8; 96];
+        data[31] = 0x20; // pointer = 32
+        data[63] = 0x20; // length  = 32
+        data[84..88].copy_from_slice(&operator_fee_scalar.to_be_bytes());
+        data[88..96].copy_from_slice(&operator_fee_constant.to_be_bytes());
+        let mut update_type = [0u8; 32];
+        update_type[31] = 5; // OperatorFee = 5
+        self.enqueue_log(Log {
+            address: l1_sys_cfg_addr,
+            data: LogData::new_unchecked(
+                vec![CONFIG_UPDATE_TOPIC, CONFIG_UPDATE_EVENT_VERSION_0, B256::from(update_type)],
+                data.into(),
+            ),
+        });
+    }
+
+    /// Queue a `TransactionDeposited` log for the next mined block.
+    ///
+    /// Mirrors the on-chain `OptimismPortal.sol` `TransactionDeposited` event.
+    /// The derivation pipeline reads this from L1 receipts to include the
+    /// deposit in the corresponding L2 block's attribute set.
+    pub fn enqueue_user_deposit(&mut self, deposit: &UserDeposit) {
+        // opaqueData: mint(32) + value(32) + gas_limit(8) + isCreation(1) + calldata
+        let opaque_len = 32 + 32 + 8 + 1 + deposit.data.len();
+        let opaque_padded = opaque_len.div_ceil(32) * 32;
+        let total_len = 64 + opaque_padded; // offset(32) + length(32) + padded opaqueData
+
+        let mut log_data = vec![0u8; total_len];
+        log_data[24..32].copy_from_slice(&32u64.to_be_bytes()); // offset
+        log_data[56..64].copy_from_slice(&(opaque_len as u64).to_be_bytes()); // length
+
+        let base = 64;
+        log_data[base + 16..base + 32].copy_from_slice(&deposit.mint.to_be_bytes());
+        log_data[base + 32..base + 64].copy_from_slice(&deposit.value.to_be_bytes::<32>());
+        log_data[base + 64..base + 72].copy_from_slice(&deposit.gas_limit.to_be_bytes());
+        log_data[base + 72] = 0; // isCreation: false
+        log_data[base + 73..base + 73 + deposit.data.len()].copy_from_slice(&deposit.data);
+
+        let mut from_topic = [0u8; 32];
+        from_topic[12..32].copy_from_slice(deposit.from.as_slice());
+        let mut to_topic = [0u8; 32];
+        to_topic[12..32].copy_from_slice(deposit.to.as_slice());
+
+        self.enqueue_log(Log {
+            address: deposit.deposit_contract,
+            data: LogData::new_unchecked(
+                vec![
+                    DEPOSIT_EVENT_ABI_HASH,
+                    B256::from(from_topic),
+                    B256::from(to_topic),
+                    DEPOSIT_EVENT_VERSION_0,
+                ],
+                log_data.into(),
+            ),
+        });
     }
 
     /// Return the most recently mined block.
