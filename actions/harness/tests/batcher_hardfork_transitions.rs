@@ -443,10 +443,10 @@ async fn jovian_single_batch_transition_block_deposit_only() {
 
     // Submit each block as a separate SingleBatch channel, one L1 block each.
     // L1 blocks 1–4 each contain one singular batch.
+    let mut batcher = Batcher::new(ActionL2Source::new(), &h.rollup_config, batcher_cfg.clone());
     for block in [block1, block2, block3_invalid, block4] {
-        let mut source = ActionL2Source::new();
-        source.push(block);
-        Batcher::new(source, &h.rollup_config, batcher_cfg.clone()).advance(&mut h.l1).await;
+        batcher.push_block(block);
+        batcher.advance(&mut h.l1).await;
         chain.push(h.l1.tip().clone());
     }
 

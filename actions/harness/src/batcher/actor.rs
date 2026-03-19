@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use base_alloy_consensus::OpBlock;
 use base_batcher_core::{
     BatchDriver, BatchDriverConfig, BatchDriverError, DaThrottle, NoopThrottleClient,
     ThrottleConfig, ThrottleController, ThrottleStrategy,
@@ -10,7 +11,7 @@ use base_consensus_genesis::RollupConfig;
 use base_runtime::TokioRuntime;
 use tokio_util::sync::CancellationToken;
 
-use crate::{L1Miner, L1MinerTxManager, L2BlockProvider};
+use crate::{ActionL2Source, L1Miner, L1MinerTxManager, L2BlockProvider};
 
 /// Configuration for the [`Batcher`] actor.
 #[derive(Debug, Clone)]
@@ -313,6 +314,15 @@ impl<S: L2BlockProvider> Batcher<S> {
         tokio::task::yield_now().await;
 
         Ok(())
+    }
+}
+
+impl Batcher<ActionL2Source> {
+    /// Push a block into the L2 source for the next [`advance`] call.
+    ///
+    /// [`advance`]: Batcher::advance
+    pub fn push_block(&mut self, block: OpBlock) {
+        self.l2_source.push(block);
     }
 }
 
