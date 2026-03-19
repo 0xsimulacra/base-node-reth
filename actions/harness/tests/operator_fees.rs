@@ -1,4 +1,4 @@
-#![doc = "Action tests for operator fee encoding and hardfork activation."]
+//! Action tests for operator fee encoding and hardfork activation.
 
 use alloy_primitives::Address;
 use base_action_harness::{
