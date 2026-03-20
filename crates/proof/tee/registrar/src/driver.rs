@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
-    InstanceDiscovery, ProverClient, ProverInstance, RegistrarError, RegistryClient, Result,
-    registry::ITEEProverRegistry,
+    InstanceDiscovery, ProverClient, ProverInstance, RegistrarError, RegistrarMetrics,
+    RegistryClient, Result, registry::ITEEProverRegistry,
 };
 
 /// Runtime parameters for the [`RegistrationDriver`] that are not
@@ -86,6 +86,7 @@ where
         loop {
             if let Err(e) = self.step().await {
                 warn!(error = %e, "registration step failed");
+                metrics::counter!(RegistrarMetrics::PROCESSING_ERRORS_TOTAL).increment(1);
             }
 
             tokio::select! {
@@ -104,6 +105,7 @@ where
     /// Single registration cycle: discover → resolve addresses → register → deregister orphans.
     async fn step(&self) -> Result<()> {
         let instances = self.discovery.discover_instances().await?;
+        metrics::counter!(RegistrarMetrics::DISCOVERY_SUCCESS_TOTAL).increment(1);
 
         if !instances.is_empty() {
             let registerable =
@@ -141,6 +143,7 @@ where
                         endpoint = %instance.endpoint,
                         "failed to resolve signer address"
                     );
+                    metrics::counter!(RegistrarMetrics::PROCESSING_ERRORS_TOTAL).increment(1);
                 }
             }
         }
@@ -170,6 +173,7 @@ where
 
         if let Err(e) = self.deregister_orphans(&active_signers).await {
             warn!(error = %e, "failed to deregister orphan signers");
+            metrics::counter!(RegistrarMetrics::PROCESSING_ERRORS_TOTAL).increment(1);
         }
 
         Ok(())
@@ -211,6 +215,7 @@ where
                 instance = %instance.instance_id,
                 "registration attempt failed"
             );
+            metrics::counter!(RegistrarMetrics::PROCESSING_ERRORS_TOTAL).increment(1);
         }
 
         Ok(signer_address)
@@ -278,6 +283,7 @@ where
             tx_hash = %receipt.transaction_hash,
             "signer registered successfully"
         );
+        metrics::counter!(RegistrarMetrics::REGISTRATIONS_TOTAL).increment(1);
 
         Ok(())
     }
@@ -333,6 +339,7 @@ where
                         tx_hash = %receipt.transaction_hash,
                         "orphan signer deregistered"
                     );
+                    metrics::counter!(RegistrarMetrics::DEREGISTRATIONS_TOTAL).increment(1);
                     deregistered += 1;
                 }
                 Err(e) => {
@@ -341,6 +348,7 @@ where
                         signer = %signer,
                         "failed to deregister orphan signer"
                     );
+                    metrics::counter!(RegistrarMetrics::PROCESSING_ERRORS_TOTAL).increment(1);
                 }
             }
         }
