@@ -35,7 +35,7 @@ where
         {
             let state_flags: [(&str, String); 2] = [
                 ("active", self.is_active.to_string()),
-                ("recovery", self.in_recovery_mode.to_string()),
+                ("recovery", self.recovery_mode.get().to_string()),
             ];
 
             let gauge = metrics::gauge!(crate::Metrics::SEQUENCER_STATE, &state_flags);
@@ -48,11 +48,6 @@ where
 pub(super) fn update_attributes_build_duration_metrics(duration: Duration) {
     // Log the attributes build duration, if metrics are enabled.
     base_macros::set!(gauge, crate::Metrics::SEQUENCER_ATTRIBUTES_BUILDER_DURATION, duration);
-}
-
-#[inline]
-pub(super) fn update_conductor_commitment_duration_metrics(duration: Duration) {
-    base_macros::set!(gauge, crate::Metrics::SEQUENCER_CONDUCTOR_COMMITMENT_DURATION, duration);
 }
 
 #[inline]

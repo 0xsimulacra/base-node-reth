@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use alloy_primitives::B256;
 use alloy_transport::RpcError;
 use base_consensus_rpc::SequencerAdminAPIError;
@@ -69,7 +71,7 @@ async fn test_in_recovery_mode(
     #[values(true, false)] via_channel: bool,
 ) {
     let mut actor = test_actor();
-    actor.in_recovery_mode = recovery_mode;
+    actor.recovery_mode.set(recovery_mode);
 
     let result = async {
         match via_channel {
@@ -87,21 +89,18 @@ async fn test_in_recovery_mode(
     assert_eq!(recovery_mode, result.unwrap());
 }
 
+// --- start_sequencer tests ---
+
+/// No conductor configured: start always succeeds regardless of leadership state.
 #[rstest]
 #[tokio::test]
-async fn test_start_sequencer(
+async fn test_start_sequencer_no_conductor(
     #[values(true, false)] already_started: bool,
     #[values(true, false)] via_channel: bool,
 ) {
     let mut actor = test_actor();
     actor.is_active = already_started;
 
-    // verify starting state
-    let result = actor.is_sequencer_active().await;
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), already_started);
-
-    // start the sequencer
     let result = async {
         match via_channel {
             false => actor.start_sequencer(B256::ZERO).await,
@@ -113,12 +112,123 @@ async fn test_start_sequencer(
         }
     }
     .await;
-    assert!(result.is_ok());
 
-    // verify it is started
-    let result = actor.is_sequencer_active().await;
     assert!(result.is_ok());
-    assert!(result.unwrap());
+    assert!(actor.is_active);
+}
+
+/// Conductor confirms leadership: sequencer activates.
+#[rstest]
+#[tokio::test]
+async fn test_start_sequencer_conductor_is_leader(#[values(true, false)] via_channel: bool) {
+    let mut conductor = MockConductor::new();
+    conductor.expect_leader().times(1).return_once(|| Ok(true));
+
+    let mut actor = test_actor();
+    actor.conductor = Some(conductor);
+    actor.is_active = false;
+
+    let result = async {
+        match via_channel {
+            false => actor.start_sequencer(B256::ZERO).await,
+            true => {
+                let (tx, rx) = oneshot::channel();
+                actor.handle_admin_query(SequencerAdminQuery::StartSequencer(B256::ZERO, tx)).await;
+                rx.await.unwrap()
+            }
+        }
+    }
+    .await;
+
+    assert!(result.is_ok());
+    assert!(actor.is_active);
+}
+
+/// Conductor says not leader: sequencer refuses to activate and remains stopped.
+#[rstest]
+#[tokio::test]
+async fn test_start_sequencer_conductor_not_leader(#[values(true, false)] via_channel: bool) {
+    let mut conductor = MockConductor::new();
+    conductor.expect_leader().times(1).return_once(|| Ok(false));
+
+    let mut actor = test_actor();
+    actor.conductor = Some(conductor);
+    actor.is_active = false;
+
+    let result = async {
+        match via_channel {
+            false => actor.start_sequencer(B256::ZERO).await,
+            true => {
+                let (tx, rx) = oneshot::channel();
+                actor.handle_admin_query(SequencerAdminQuery::StartSequencer(B256::ZERO, tx)).await;
+                rx.await.unwrap()
+            }
+        }
+    }
+    .await;
+
+    assert!(matches!(result.unwrap_err(), SequencerAdminAPIError::NotLeader));
+    assert!(!actor.is_active);
+}
+
+/// Conductor RPC fails: sequencer refuses to activate and surfaces the error.
+#[rstest]
+#[tokio::test]
+async fn test_start_sequencer_conductor_leader_rpc_error(#[values(true, false)] via_channel: bool) {
+    let mut conductor = MockConductor::new();
+    conductor
+        .expect_leader()
+        .times(1)
+        .return_once(|| Err(ConductorError::Rpc(RpcError::local_usage_str("rpc error"))));
+
+    let mut actor = test_actor();
+    actor.conductor = Some(conductor);
+    actor.is_active = false;
+
+    let result = async {
+        match via_channel {
+            false => actor.start_sequencer(B256::ZERO).await,
+            true => {
+                let (tx, rx) = oneshot::channel();
+                actor.handle_admin_query(SequencerAdminQuery::StartSequencer(B256::ZERO, tx)).await;
+                rx.await.unwrap()
+            }
+        }
+    }
+    .await;
+
+    assert!(matches!(result.unwrap_err(), SequencerAdminAPIError::RequestError(_)));
+    assert!(!actor.is_active);
+}
+
+/// Already active: leader check is skipped (idempotent, no RPC call).
+#[rstest]
+#[tokio::test]
+async fn test_start_sequencer_already_active_skips_leader_check(
+    #[values(true, false)] via_channel: bool,
+) {
+    let mut conductor = MockConductor::new();
+    // leader() must NOT be called when already active.
+    conductor.expect_leader().times(0);
+
+    let mut actor = test_actor();
+    actor.conductor = Some(conductor);
+    actor.is_active = true;
+
+    let result = async {
+        match via_channel {
+            false => actor.start_sequencer(B256::ZERO).await,
+            true => {
+                let (tx, rx) = oneshot::channel();
+                actor.handle_admin_query(SequencerAdminQuery::StartSequencer(B256::ZERO, tx)).await;
+                rx.await.unwrap()
+            }
+        }
+    }
+    .await;
+
+    assert!(result.is_ok());
+    assert!(actor.is_active);
 }
 
 #[rstest]
@@ -137,7 +247,7 @@ async fn test_stop_sequencer_success(
     client.expect_get_unsafe_head().times(1).return_once(move || Ok(unsafe_head));
 
     let mut actor = test_actor();
-    actor.engine_client = client;
+    actor.engine_client = Arc::new(client);
     actor.is_active = !already_stopped;
 
     // verify starting state
@@ -146,17 +256,13 @@ async fn test_stop_sequencer_success(
     assert_eq!(result.unwrap(), !already_stopped);
 
     // stop the sequencer
-    let result = async {
-        match via_channel {
-            false => actor.stop_sequencer().await,
-            true => {
-                let (tx, rx) = oneshot::channel();
-                actor.handle_admin_query(SequencerAdminQuery::StopSequencer(tx)).await;
-                rx.await.unwrap()
-            }
-        }
+    let (tx, rx) = oneshot::channel();
+    if via_channel {
+        actor.handle_admin_query(SequencerAdminQuery::StopSequencer(tx)).await;
+    } else {
+        actor.stop_sequencer(tx).await;
     }
-    .await;
+    let result = rx.await.unwrap();
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), expected_hash);
 
@@ -176,19 +282,15 @@ async fn test_stop_sequencer_error_fetching_unsafe_head(#[values(true, false)] v
         .return_once(|| Err(EngineClientError::RequestError("whoops!".to_string())));
 
     let mut actor = test_actor();
-    actor.engine_client = client;
+    actor.engine_client = Arc::new(client);
 
-    let result = async {
-        match via_channel {
-            false => actor.stop_sequencer().await,
-            true => {
-                let (tx, rx) = oneshot::channel();
-                actor.handle_admin_query(SequencerAdminQuery::StopSequencer(tx)).await;
-                rx.await.unwrap()
-            }
-        }
+    let (tx, rx) = oneshot::channel();
+    if via_channel {
+        actor.handle_admin_query(SequencerAdminQuery::StopSequencer(tx)).await;
+    } else {
+        actor.stop_sequencer(tx).await;
     }
-    .await;
+    let result = rx.await.unwrap();
     assert!(result.is_err());
 
     assert!(matches!(
@@ -206,7 +308,7 @@ async fn test_set_recovery_mode(
     #[values(true, false)] via_channel: bool,
 ) {
     let mut actor = test_actor();
-    actor.in_recovery_mode = starting_mode;
+    actor.recovery_mode.set(starting_mode);
 
     // verify starting state
     let result = actor.in_recovery_mode().await;
@@ -299,7 +401,7 @@ async fn test_reset_derivation_pipeline_success(#[values(true, false)] via_chann
     client.expect_reset_engine_forkchoice().times(1).return_once(|| Ok(()));
 
     let mut actor = test_actor();
-    actor.engine_client = client;
+    actor.engine_client = Arc::new(client);
 
     let result = async {
         match via_channel {
@@ -326,7 +428,7 @@ async fn test_reset_derivation_pipeline_error(#[values(true, false)] via_channel
         .return_once(|| Err(EngineClientError::RequestError("reset failed".to_string())));
 
     let mut actor = test_actor();
-    actor.engine_client = client;
+    actor.engine_client = Arc::new(client);
 
     let result = async {
         match via_channel {
@@ -360,7 +462,7 @@ async fn test_handle_admin_query_resilient_to_dropped_receiver() {
 
     let mut actor = test_actor();
     actor.conductor = Some(conductor);
-    actor.engine_client = client;
+    actor.engine_client = Arc::new(client);
 
     let mut queries: Vec<SequencerAdminQuery> = Vec::new();
     {
