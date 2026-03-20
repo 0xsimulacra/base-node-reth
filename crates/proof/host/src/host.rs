@@ -14,14 +14,14 @@ use tokio::{
     sync::RwLock,
     task::{self, JoinHandle},
 };
-use tracing::info;
+use tracing::{Instrument, info, info_span};
 
 #[cfg(feature = "disk")]
 use crate::DiskKeyValueStore;
 use crate::{
     BootKeyValueStore, HostConfig, HostError, HostProviders, MemoryKeyValueStore,
     OfflineHostBackend, OnlineHostBackend, PreimageServer, RecordingOracle, Result,
-    SharedKeyValueStore, SplitKeyValueStore,
+    SharedKeyValueStore, SplitKeyValueStore, metrics::timed,
 };
 
 /// The proof host orchestrator.
@@ -100,7 +100,9 @@ impl Host {
             HintReader::new(hint_chan.host),
             Arc::clone(&backend),
         );
-        let mut server_task = task::spawn(async move { server.start().await });
+        let mut server_task = task::spawn(
+            async move { server.start().await }.instrument(info_span!("preimage_server")),
+        );
 
         let recording = RecordingOracle::new(
             OracleReader::new(preimage_chan.client),
@@ -108,10 +110,9 @@ impl Host {
             Arc::clone(&witness),
         );
 
-        // Both the oracle and hint arms share the same RecordingOracle, ensuring all
-        // fetched preimages are captured into the witness regardless of which channel
-        // triggers them.
-        let client_task = Box::pin(Self::run_client(recording));
+        let client_task = Box::pin(async {
+            Self::run_client(recording).instrument(info_span!("run_client")).await
+        });
 
         tokio::select! {
             result = &mut server_task => {
@@ -131,6 +132,7 @@ impl Host {
 
         witness.finalize()?;
         let preimage_count = witness.preimage_count()?;
+        base_macros::set!(gauge, crate::Metrics::PREIMAGE_COUNT, preimage_count as f64);
         info!(preimage_count, "witness capture complete");
 
         Arc::try_unwrap(witness).map_err(|arc| {
@@ -155,6 +157,7 @@ impl Host {
         H: base_proof_preimage::HintWriterClient + Send + Sync + Clone + std::fmt::Debug + 'static,
         W: WitnessOracle + std::fmt::Debug + 'static,
     {
+        let _timer = timed!(crate::Metrics::REPLAY_DURATION_SECONDS);
         let driver =
             Prologue::new(recording.clone(), recording, OpEvmFactory::default()).load().await?;
         let epilogue = driver.execute().await?;

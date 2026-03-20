@@ -29,6 +29,11 @@ pub use recording::RecordingOracle;
 mod backend;
 pub use backend::{OfflineHostBackend, OnlineHostBackend};
 
+mod metrics;
+pub use metrics::Metrics;
+#[doc(hidden)]
+pub use metrics::{DropTimer, ProofGuard};
+
 mod service;
 pub use service::{ProverError, ProverService};
 
