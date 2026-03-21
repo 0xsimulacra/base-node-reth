@@ -26,7 +26,7 @@ pub use actors::{
     EngineActorRequest, EngineClientError, EngineClientResult, EngineConfig,
     EngineDerivationClient, EngineError, EngineProcessingRequest, EngineProcessor,
     EngineRequestReceiver, EngineRpcProcessor, EngineRpcRequest, EngineRpcRequestReceiver,
-    GetPayloadRequest, L1BlockFetcher, L1OriginSelector, L1OriginSelectorError,
+    GetPayloadRequest, GossipTransport, L1BlockFetcher, L1OriginSelector, L1OriginSelectorError,
     L1OriginSelectorProvider, L1WatcherActor, L1WatcherActorError, L1WatcherDerivationClient,
     L2SourceClient, NetworkActor, NetworkActorError, NetworkBuilder, NetworkBuilderError,
     NetworkConfig, NetworkDriver, NetworkDriverError, NetworkEngineClient, NetworkHandler,
