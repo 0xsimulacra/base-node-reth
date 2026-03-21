@@ -15,7 +15,7 @@ use tokio::{
 
 use crate::{
     BuildRequest, EngineClientError, EngineDerivationClient, EngineError, GetPayloadRequest,
-    ResetRequest, SealRequest,
+    ResetRequest, SealRequest, actors::UpgradeActivations,
 };
 
 /// Requires that the implementor handles [`EngineProcessingRequest`]s via the provided channel.
@@ -216,6 +216,18 @@ where
 
         Ok(())
     }
+
+    fn log_follower_upgrade_activation(&self, envelope: &OpExecutionPayloadEnvelope) {
+        if self.unsafe_head_tx.is_some() {
+            return;
+        }
+
+        UpgradeActivations::log(
+            &self.rollup,
+            envelope.execution_payload.block_number(),
+            envelope.execution_payload.timestamp(),
+        );
+    }
 }
 
 impl<EngineClient_, DerivationClient> EngineRequestReceiver
@@ -293,6 +305,7 @@ where
                         self.engine.enqueue(task);
                     }
                     EngineProcessingRequest::ProcessUnsafeL2Block(envelope) => {
+                        self.log_follower_upgrade_activation(&envelope);
                         let task = EngineTask::Insert(Box::new(InsertTask::new(
                             Arc::clone(&self.client),
                             Arc::clone(&self.rollup),
