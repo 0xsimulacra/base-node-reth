@@ -3452,14 +3452,11 @@ dependencies = [
 name = "base-consensus-peers"
 version = "0.0.0"
 dependencies = [
- "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",
  "arbitrary",
  "arbtest",
  "base-alloy-chains",
- "base-consensus-genesis",
- "base-consensus-registry",
  "derive_more",
  "dirs",
  "discv5",

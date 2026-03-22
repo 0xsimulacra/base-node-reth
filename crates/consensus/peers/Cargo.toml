@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 # consensus
-base-consensus-registry.workspace = true
+base-alloy-chains.workspace = true
 
 # Alloy
 alloy-rlp = { workspace = true, features = ["std"] }
@@ -48,12 +48,8 @@ tempfile.workspace = true
 multihash.workspace = true
 serde_json = { workspace = true, features = ["std"] }
 
-base-alloy-chains.workspace = true
-base-consensus-genesis.workspace = true
-
 arbitrary = { workspace = true, features = ["derive"] }
 alloy-primitives = { workspace = true, features = ["arbitrary"] }
-alloy-consensus = { workspace = true, features = ["arbitrary", "k256", "std"] }
 
 [features]
 default = []
