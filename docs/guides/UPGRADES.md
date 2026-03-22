@@ -386,7 +386,7 @@ forks.push((BaseUpgrade::V1.boxed(), self[BaseUpgrade::V1]));  // <-- add
 - [ ] `is_X_active` + `is_first_X_block` added to `RollupConfig`; `upgrade_activation` arm added; previous terminal upgrade cascades to new one (unless standalone)
 - [ ] `is_X_active_at_timestamp` added to `BaseUpgrades` trait
 - [ ] Timestamp constants added to `mainnet.rs`, `sepolia.rs`, `devnet_0_sepolia_dev_0.rs`; re-exported from `lib.rs`
-- [ ] Registry fixtures (`base_mainnet.rs`, `base_sepolia.rs`) updated
+- [ ] Registry fixtures (`test_utils/mod.rs`) updated
 - [ ] Default rollup config updated (`defaults.rs`)
 - [ ] Upgrade consistency tests pass
 
