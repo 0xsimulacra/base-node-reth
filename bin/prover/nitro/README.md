@@ -1,14 +1,14 @@
-# `base-prover`
+# `base-prover-nitro`
 
-Prover binary supporting TEE and ZK proving backends.
+TEE prover binary for AWS Nitro Enclaves.
 
-## `nitro` — TEE (AWS Nitro Enclaves)
+## Subcommands
 
-- **`nitro server`** — Runs the JSON-RPC server on the EC2 host, forwarding proving requests to the enclave over vsock.
-- **`nitro enclave`** — Runs the proving process inside the Nitro Enclave, listening on vsock.
-- **`nitro local`** *(feature-gated)* — Runs server and enclave in a single process for local development.
+- **`server`** — Runs the JSON-RPC server on the EC2 host, forwarding proving requests to the enclave over vsock.
+- **`enclave`** — Runs the proving process inside the Nitro Enclave, listening on vsock.
+- **`local`** *(feature-gated)* — Runs server and enclave in a single process for local development.
 
-### Inspecting the enclave
+## Inspecting the enclave
 
 **Remotely (from your local machine):**
 
@@ -48,7 +48,3 @@ docker exec <PROVER_CONTAINER_ID> /app/nitro-cli describe-enclaves
 The `PCR0` in the output is the enclave image measurement. It only changes when
 the enclave image (EIF) is rebuilt. The `teeImageHash` used on-chain is
 `keccak256(PCR0_raw_bytes)`.
-
-## `zk` — ZK prover service
-
-Runs the gRPC ZK prover server. Reads proof requests from a database outbox, dispatches them to a cluster backend, and stores artifacts in Redis, S3, or GCS.
