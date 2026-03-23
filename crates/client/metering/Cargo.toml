@@ -25,7 +25,6 @@ reth-trie-common.workspace = true
 base-execution-evm.workspace = true
 reth-primitives-traits.workspace = true
 base-execution-chainspec.workspace = true
-base-execution-primitives.workspace = true
 
 # revm
 revm-database.workspace = true
@@ -41,6 +40,9 @@ alloy-consensus = { workspace = true, features = ["std"] }
 
 # rpc
 jsonrpsee.workspace = true
+
+# base-alloy
+base-alloy-consensus.workspace = true
 
 # DA calculation
 base-alloy-flz.workspace = true
@@ -69,6 +71,7 @@ base-node-runner = { workspace = true, features = ["test-utils"] }
 # reth
 base-node-core.workspace = true
 reth-db-common.workspace = true
+base-execution-primitives.workspace = true
 reth-db = { workspace = true, features = ["test-utils"] }
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 
@@ -78,13 +81,12 @@ revm-bytecode.workspace = true
 revm-context-interface.workspace = true
 
 # alloy
+alloy-network.workspace = true
 alloy-rpc-client.workspace = true
 alloy-genesis = { workspace = true, features = ["std"] }
 alloy-rpc-types-eth = { workspace = true, features = ["std"] }
 
 # base-alloy
-base-alloy-network.workspace = true
-base-alloy-consensus.workspace = true
 base-alloy-rpc-types.workspace = true
 
 # misc
