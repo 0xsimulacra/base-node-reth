@@ -1,8 +1,10 @@
 use std::{fmt, path::Path, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_signer_local::PrivateKeySigner;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::{
     runner::{TxConfig, TxType},
@@ -12,54 +14,60 @@ use crate::{
 
 /// Configuration for a load test, loadable from YAML.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TestConfig {
     /// RPC endpoint URL.
-    pub rpc: String,
+    pub rpc: Url,
 
     /// Mnemonic phrase for deriving sender accounts.
     /// If not provided, accounts are generated from seed.
-    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing)]
     pub mnemonic: Option<String>,
 
-    /// Private key for the funder account (hex with 0x prefix).
-    #[serde(skip_serializing)]
-    pub funder_key: String,
-
     /// Amount to fund each sender account (in wei, as string).
-    #[serde(default = "default_funding_amount")]
     pub funding_amount: String,
 
     /// Number of sender accounts to create/use.
-    #[serde(default = "default_sender_count")]
     pub sender_count: u32,
 
     /// Offset into mnemonic derivation path (skip first N accounts).
-    #[serde(default)]
     pub sender_offset: u32,
 
     /// Maximum in-flight transactions per sender.
-    #[serde(default = "default_in_flight_per_sender")]
     pub in_flight_per_sender: u32,
 
     /// Test duration (e.g., "30s", "5m", "1h").
-    #[serde(default = "default_duration")]
     pub duration: Option<String>,
 
     /// Target gas per second.
-    #[serde(default = "default_target_gps")]
     pub target_gps: Option<u64>,
 
     /// Seed for deterministic account generation (used if mnemonic not provided).
-    #[serde(default = "default_seed")]
     pub seed: u64,
 
     /// Chain ID (if not provided, fetched from RPC).
-    #[serde(default)]
     pub chain_id: Option<u64>,
 
     /// Transaction types with weights.
-    #[serde(default = "default_transactions")]
     pub transactions: Vec<WeightedTxType>,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self {
+            rpc: Url::parse("http://localhost:8545").expect("valid URL"),
+            mnemonic: None,
+            funding_amount: "100000000000000000".to_string(),
+            sender_count: 10,
+            sender_offset: 0,
+            in_flight_per_sender: 16,
+            duration: Some("30s".to_string()),
+            target_gps: Some(2_100_000),
+            seed: rand::rng().random(),
+            chain_id: None,
+            transactions: vec![WeightedTxType { weight: 100, tx_type: TxTypeConfig::Transfer }],
+        }
+    }
 }
 
 impl fmt::Debug for TestConfig {
@@ -67,7 +75,6 @@ impl fmt::Debug for TestConfig {
         f.debug_struct("TestConfig")
             .field("rpc", &self.rpc)
             .field("mnemonic", &self.mnemonic.as_ref().map(|_| "[REDACTED]"))
-            .field("funder_key", &"[REDACTED]")
             .field("funding_amount", &self.funding_amount)
             .field("sender_count", &self.sender_count)
             .field("sender_offset", &self.sender_offset)
@@ -123,22 +130,6 @@ pub enum TxTypeConfig {
     },
 }
 
-fn default_funding_amount() -> String {
-    "100000000000000000".to_string()
-}
-
-const fn default_sender_count() -> u32 {
-    10
-}
-
-const fn default_in_flight_per_sender() -> u32 {
-    16
-}
-
-fn default_seed() -> u64 {
-    rand::rng().random()
-}
-
 const fn default_calldata_size() -> usize {
     128
 }
@@ -147,20 +138,8 @@ const fn default_repeat_count() -> usize {
     1
 }
 
-fn default_duration() -> Option<String> {
-    Some("30s".to_string())
-}
-
-const fn default_target_gps() -> Option<u64> {
-    Some(2_100_000)
-}
-
 fn default_precompile() -> String {
     "sha256".to_string()
-}
-
-fn default_transactions() -> Vec<WeightedTxType> {
-    vec![WeightedTxType { weight: 100, tx_type: TxTypeConfig::Transfer }]
 }
 
 impl TestConfig {
@@ -175,8 +154,28 @@ impl TestConfig {
 
     /// Parses configuration from a YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self> {
-        serde_yaml::from_str(yaml)
-            .map_err(|e| BaselineError::Config(format!("failed to parse YAML: {e}")))
+        let config: Self = serde_yaml::from_str(yaml)
+            .map_err(|e| BaselineError::Config(format!("failed to parse YAML: {e}")))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validates that all required fields are set and values are sensible.
+    pub fn validate(&self) -> Result<()> {
+        if self.sender_count == 0 {
+            return Err(BaselineError::Config("sender_count must be > 0".into()));
+        }
+        Ok(())
+    }
+
+    /// Returns the funder key from the `FUNDER_KEY` environment variable.
+    pub fn funder_key() -> Result<PrivateKeySigner> {
+        let key = std::env::var("FUNDER_KEY").map_err(|_| {
+            BaselineError::Config("FUNDER_KEY environment variable is required".into())
+        })?;
+        key.parse().map_err(|e| {
+            BaselineError::Config(format!("invalid FUNDER_KEY (expected 0x-prefixed hex): {e}"))
+        })
     }
 
     /// Parses the duration string into a Duration.
@@ -206,10 +205,7 @@ impl TestConfig {
             BaselineError::Config("chain_id must be provided in config or fetched from RPC".into())
         })?;
 
-        let rpc_url = self
-            .rpc
-            .parse()
-            .map_err(|e| BaselineError::Config(format!("invalid rpc url '{}': {}", self.rpc, e)))?;
+        let rpc_url = self.rpc.clone();
 
         let duration = self.parse_duration()?.unwrap_or_else(|| Duration::from_secs(30));
 
@@ -267,10 +263,9 @@ mod tests {
     fn parse_minimal_config() {
         let yaml = r#"
 rpc: http://localhost:8545
-funder_key: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 "#;
         let config = TestConfig::from_yaml(yaml).unwrap();
-        assert_eq!(config.rpc, "http://localhost:8545");
+        assert_eq!(config.rpc.host_str(), Some("localhost"));
         assert_eq!(config.sender_count, 10);
         assert!(config.mnemonic.is_none());
     }
@@ -280,7 +275,6 @@ funder_key: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
         let yaml = r#"
 rpc: https://sepolia.base.org
 mnemonic: "test test test test test test test test test test test junk"
-funder_key: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 funding_amount: "500000000000000000"
 sender_count: 20
 sender_offset: 5
@@ -311,7 +305,6 @@ transactions:
     fn parse_duration_formats() {
         let yaml = r#"
 rpc: http://localhost:8545
-funder_key: "0x1234"
 duration: "30s"
 "#;
         let config = TestConfig::from_yaml(yaml).unwrap();
@@ -319,7 +312,6 @@ duration: "30s"
 
         let yaml2 = r#"
 rpc: http://localhost:8545
-funder_key: "0x1234"
 duration: "1h 30m"
 "#;
         let config2 = TestConfig::from_yaml(yaml2).unwrap();
