@@ -41,3 +41,4 @@ serde_json = { workspace = true, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+backtrace.workspace = true
