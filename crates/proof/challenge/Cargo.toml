@@ -69,11 +69,13 @@ rustls = { workspace = true, features = ["ring"] }
 # Shutdown
 tokio-util.workspace = true
 
+# Health
+base-health = { workspace = true, features = ["axum-server"] }
+
 # Misc
 url.workspace = true
 humantime.workspace = true
 uuid = { workspace = true, features = ["v5"] }
-axum = { workspace = true, features = ["http1", "tokio"] }
 
 # Test utilities (optional)
 alloy-rlp = { workspace = true, optional = true }
@@ -82,7 +84,6 @@ serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
-reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["test-util"] }
 base-challenger = { path = ".", features = ["test-utils"] }
 
