@@ -105,6 +105,9 @@
             pkgs.gnumake
             pkgs.mold
 
+            # Foundry (forge/cast/anvil)
+            pkgs.foundry-bin
+
             pkgs.protobuf
           ];
 
