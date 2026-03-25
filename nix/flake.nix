@@ -8,6 +8,7 @@
     inputs.systems.follows = "systems";
   };
   inputs.fenix.url = "github:nix-community/fenix";
+  inputs.foundry.url = "github:shazow/foundry.nix/stable";
 
   outputs =
     {
@@ -15,12 +16,18 @@
       flake-utils,
       systems,
       fenix,
+      foundry,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [
+            foundry.overlay
+          ];
+        };
         llvm = pkgs.llvmPackages;
 
         fenixPkgs = fenix.packages.${system};
@@ -97,6 +104,8 @@
             pkgs.openssl.dev
             pkgs.gnumake
             pkgs.mold
+
+            pkgs.protobuf
           ];
 
           buildInputs = [
@@ -128,7 +137,7 @@
           ];
 
           # Default perf flags (same spirit as server)
-          RUSTFLAGS = "-Clink-arg=-fuse-ld=${pkgs.mold}/bin/mold";
+          # RUSTFLAGS = "-Clink-arg=-fuse-ld=${pkgs.mold}/bin/mold";
 
           # to remove the foritfy fail on just check
           # Remove the hardening added by nix to fix jmalloc compilation error.
@@ -178,6 +187,7 @@
             echo "CARGO_HOME=$CARGO_HOME"
             echo "Toolchain symlinks in $TOOLBIN"
             echo "rust-src linked at $TOOLROOT/rust-src"
+            echo "protoc: $(command -v protoc)"
           '';
         };
       }
