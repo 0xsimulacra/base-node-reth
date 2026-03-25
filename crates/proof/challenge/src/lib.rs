@@ -7,7 +7,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 mod cli;
-pub use cli::{ChallengerArgs, Cli, LogArgs, MetricsArgs, SignerCli, TxManagerCli};
+pub use cli::{ChallengerArgs, Cli, HealthArgs, LogArgs, MetricsArgs, SignerCli, TxManagerCli};
 
 mod config;
 pub use config::{ChallengerConfig, ConfigError, UrlValidationError, Validated};
@@ -20,9 +20,6 @@ pub use pending::{PendingProof, PendingProofs, ProofPhase, ProofUpdate};
 
 mod error;
 pub use error::ChallengeSubmitError;
-
-mod health;
-pub use health::HealthServer;
 
 mod metrics;
 pub use metrics::ChallengerMetrics;
@@ -43,6 +40,9 @@ mod validator;
 pub use validator::{
     IntermediateValidationParams, OutputValidator, ValidationResult, ValidatorError,
 };
+
+mod verify;
+pub use verify::{AccountProofError, verify_account_proof};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

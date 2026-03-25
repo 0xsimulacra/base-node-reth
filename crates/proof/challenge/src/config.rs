@@ -190,6 +190,15 @@ impl ChallengerConfig {
             });
         }
 
+        // Validate health port (health server is always started)
+        if cli.health.port == 0 {
+            return Err(ConfigError::OutOfRange {
+                field: "health.port",
+                constraint: "greater than 0",
+                value: "0".to_string(),
+            });
+        }
+
         // Validate metrics port when enabled
         if cli.metrics.enabled && cli.metrics.port == 0 {
             return Err(ConfigError::Metrics(
@@ -204,7 +213,7 @@ impl ChallengerConfig {
         let tx_manager =
             TxManagerConfig::try_from(cli.challenger.tx_manager).map_err(ConfigError::TxManager)?;
 
-        let health_addr = SocketAddr::new(cli.challenger.health_addr, cli.challenger.health_port);
+        let health_addr = cli.health.socket_addr();
 
         let tee_request_timeout = tee_rpc_url.as_ref().map(|_| cli.challenger.tee_request_timeout);
 
@@ -301,6 +310,14 @@ mod tests {
         let cli = cli_from_args(&all_args);
         let result = ChallengerConfig::from_cli(cli);
         assert!(matches!(result, Err(ConfigError::OutOfRange { field: f, .. }) if f == field));
+    }
+
+    #[test]
+    fn test_health_port_zero_rejected() {
+        let all_args = [&SIGNER_ARGS[..], &["--health.port", "0"]].concat();
+        let cli = cli_from_args(&all_args);
+        let result = ChallengerConfig::from_cli(cli);
+        assert!(matches!(result, Err(ConfigError::OutOfRange { field: "health.port", .. })));
     }
 
     #[rstest]

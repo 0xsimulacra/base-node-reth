@@ -1,7 +1,6 @@
 //! CLI argument parsing and config construction for the prover registrar.
 
 use std::{
-    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{
         Arc,
@@ -14,13 +13,13 @@ use alloy_primitives::Address;
 use alloy_provider::RootProvider;
 use alloy_signer_local::PrivateKeySigner;
 use base_cli_utils::RuntimeManager;
+use base_health::HealthServer;
 use base_proof_tee_nitro_attestation_prover::{
     AttestationProofProvider, BoundlessProver, DirectProver,
 };
 use base_proof_tee_registrar::{
-    AwsDiscoveryConfig, AwsTargetGroupDiscovery, BoundlessConfig, DriverConfig, HealthServer,
-    ProvingConfig, RegistrarConfig, RegistrarError, RegistrarMetrics, RegistrationDriver,
-    RegistryContractClient,
+    AwsDiscoveryConfig, AwsTargetGroupDiscovery, BoundlessConfig, DriverConfig, ProvingConfig,
+    RegistrarConfig, RegistrarError, RegistrarMetrics, RegistrationDriver, RegistryContractClient,
 };
 use base_tx_manager::{BaseTxMetrics, SignerConfig, SimpleTxManager, TxManagerConfig};
 use clap::{Args, Parser, ValueEnum};
@@ -33,6 +32,7 @@ use url::Url;
 base_cli_utils::define_cli_env!("BASE_REGISTRAR");
 base_cli_utils::define_log_args!("BASE_REGISTRAR");
 base_cli_utils::define_metrics_args!("BASE_REGISTRAR", 7300);
+base_cli_utils::define_health_args!("BASE_REGISTRAR", 8080);
 base_tx_manager::define_signer_cli!("BASE_REGISTRAR");
 base_tx_manager::define_tx_manager_cli!("BASE_REGISTRAR");
 
@@ -106,13 +106,8 @@ pub(crate) struct Cli {
     prover_timeout_secs: u64,
 
     // ── Health Server ─────────────────────────────────────────────────────────
-    /// IP address for the health check HTTP server.
-    #[arg(long = "health.addr", env = cli_env!("HEALTH_ADDR"), default_value = "0.0.0.0")]
-    health_addr: IpAddr,
-
-    /// Port for the health check HTTP server.
-    #[arg(long = "health.port", env = cli_env!("HEALTH_PORT"), default_value_t = 8080)]
-    health_port: u16,
+    #[command(flatten)]
+    health: HealthArgs,
 
     // ── Logging ───────────────────────────────────────────────────────────────
     #[command(flatten)]
@@ -277,7 +272,11 @@ impl Cli {
             ));
         }
 
-        let health_addr = SocketAddr::new(self.health_addr, self.health_port);
+        if self.health.port == 0 {
+            return Err(RegistrarError::Config("health server port must be non-zero".into()));
+        }
+
+        let health_addr = self.health.socket_addr();
 
         Ok(RegistrarConfig {
             l1_rpc_url: self.l1_rpc_url,
@@ -318,7 +317,7 @@ impl Cli {
         metrics_config
             .init_with(|| {
                 base_cli_utils::register_version_metrics!();
-                RegistrarMetrics::record_startup();
+                RegistrarMetrics::record_startup(env!("CARGO_PKG_VERSION"));
             })
             .wrap_err("failed to install Prometheus recorder")?;
 
@@ -434,7 +433,7 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{net::SocketAddr, time::Duration};
 
     use rstest::rstest;
 
@@ -612,6 +611,14 @@ mod tests {
         let mut args = boundless_args();
         args.extend([flag, value]);
         let result = Cli::try_parse_from(args).expect("clap should parse these args").into_config();
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn health_port_zero_rejected() {
+        let mut args = boundless_args();
+        args.extend(["--health.port", "0"]);
+        let result = Cli::parse_from(args).into_config();
         assert!(result.is_err());
     }
 

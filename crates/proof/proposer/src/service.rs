@@ -1,16 +1,14 @@
 //! Full proposer service lifecycle.
 
-use std::{
-    net::SocketAddr,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use alloy_primitives::Address;
 use alloy_provider::Provider;
 use base_cli_utils::RuntimeManager;
+use base_health::HealthServer;
 use base_proof_contracts::{
     AggregateVerifierClient, AggregateVerifierContractClient, AnchorStateRegistryContractClient,
     DisputeGameFactoryClient, DisputeGameFactoryContractClient,
@@ -21,7 +19,7 @@ use base_proof_rpc::{
     RollupProvider,
 };
 use base_tx_manager::{BaseTxMetrics, SimpleTxManager, TxManager};
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use jsonrpsee::http_client::HttpClientBuilder;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -30,24 +28,14 @@ use tracing::{info, warn};
 use crate::{
     balance::balance_monitor,
     config::ProposerConfig,
-    driver::{Driver, DriverConfig, DriverHandle, ProposerDriverControl},
-    health::serve,
+    driver::{
+        DriverConfig, PipelineConfig, PipelineHandle, ProposerDriverControl, ProvingPipeline,
+    },
     metrics::record_startup_metrics,
     output_proposer::ProposalSubmitter,
 };
 
 /// Runs the full proposer service lifecycle.
-///
-/// Steps:
-/// 1. Initialise logging, TLS, and metrics
-/// 2. Create RPC clients (L1, L2, rollup, prover)
-/// 3. Read onchain config (`BLOCK_INTERVAL`, `initBond`)
-/// 4. Create prover, output proposer, and driver
-/// 5. Start health / admin HTTP server
-/// 6. Start balance monitor (if metrics enabled)
-/// 7. Start the driver loop
-/// 8. Wait for SIGTERM or SIGINT
-/// 9. Graceful shutdown in reverse order
 pub async fn run(config: ProposerConfig) -> Result<()> {
     config.log.init_tracing_subscriber()?;
 
@@ -62,7 +50,7 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
     let signal_handle = RuntimeManager::install_signal_handler(cancel.clone());
 
     // ── 2. Metrics recorder and HTTP server (if enabled) ─────────────────
-    config.metrics.init().expect("failed to install Prometheus recorder");
+    config.metrics.init().wrap_err("failed to install Prometheus recorder")?;
 
     // Record startup metrics (no-ops if no recorder installed).
     record_startup_metrics(env!("CARGO_PKG_VERSION"));
@@ -97,7 +85,12 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
     // Fetch chain configuration from op-node
     info!("Fetching chain configuration from rollup RPC...");
     let chain_config = rollup_client.rollup_config().await?;
-    info!(chain_id = %chain_config.l2_chain_id.id(), "Chain configuration loaded");
+    let v1_hardfork_timestamp = chain_config.hardforks.base.v1;
+    info!(
+        chain_id = %chain_config.l2_chain_id.id(),
+        v1_hardfork_timestamp,
+        "Chain configuration loaded"
+    );
 
     let prover_client = HttpClientBuilder::default()
         .request_timeout(crate::constants::PROVER_TIMEOUT)
@@ -200,18 +193,23 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
         };
     info!("Output proposer initialized");
 
-    // ── 6. Create driver ───────────────────────────────────────────────────
-    let driver_config = DriverConfig {
-        poll_interval: config.poll_interval,
-        block_interval,
-        intermediate_block_interval,
-        init_bond,
-        game_type: config.game_type,
-        allow_non_finalized: config.allow_non_finalized,
-        proposer_address: proposer_address.unwrap_or_default(),
+    // ── 6. Create proving pipeline ─────────────────────────────────────────
+    let pipeline_config = PipelineConfig {
+        max_parallel_proofs: config.max_parallel_proofs,
+        max_retries: 3,
+        v1_hardfork_timestamp,
+        driver: DriverConfig {
+            poll_interval: config.poll_interval,
+            block_interval,
+            intermediate_block_interval,
+            init_bond,
+            game_type: config.game_type,
+            allow_non_finalized: config.allow_non_finalized,
+            proposer_address: proposer_address.unwrap_or_default(),
+        },
     };
-    let driver = Driver::new(
-        driver_config,
+    let pipeline = ProvingPipeline::new(
+        pipeline_config,
         prover_client,
         Arc::clone(&l1_client),
         l2_client,
@@ -222,26 +220,37 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
         output_proposer,
         cancel.child_token(),
     );
-
+    info!(max_parallel_proofs = config.max_parallel_proofs, "Proving pipeline initialized");
     let driver_handle: Arc<dyn ProposerDriverControl> =
-        Arc::new(DriverHandle::new(driver, cancel.clone()));
+        Arc::new(PipelineHandle::new(pipeline, cancel.clone()));
 
-    // ── 7. Start health / admin HTTP server ──────────────────────────────
+    // ── 7. Start health HTTP server ─────────────────────────────────────
     let ready = Arc::new(AtomicBool::new(false));
-    let admin_driver = if config.rpc.enable_admin {
-        info!("Admin RPC enabled");
-        Some(Arc::clone(&driver_handle))
-    } else {
-        None
-    };
     let health_handle: JoinHandle<Result<()>> = {
-        let addr = SocketAddr::new(config.rpc.addr, config.rpc.port);
-        let ready_flag = Arc::clone(&ready);
+        let ready = Arc::clone(&ready);
+        let addr = config.health_addr;
         let health_cancel = cancel.clone();
-        tokio::spawn(async move { serve(addr, ready_flag, admin_driver, health_cancel).await })
+        tokio::spawn(async move { HealthServer::serve(addr, ready, health_cancel).await })
     };
 
-    // ── 8. Start balance monitor (if metrics enabled and not dry-run) ───
+    // ── 8. Start admin RPC server (separate listener, localhost-only) ───
+    let admin_handle: Option<JoinHandle<Result<()>>> = config.admin_addr.map(|admin_addr| {
+        info!("Admin RPC enabled");
+        let driver = Arc::clone(&driver_handle);
+        let admin_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let app = crate::admin::AdminState::router(driver);
+            let listener = tokio::net::TcpListener::bind(admin_addr).await?;
+            info!(%admin_addr, "Admin RPC server started");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { admin_cancel.cancelled().await })
+                .await?;
+            info!("Admin RPC server stopped");
+            Ok(())
+        })
+    });
+
+    // ── 9. Start balance monitor (if metrics enabled and not dry-run) ───
     let balance_handle: Option<JoinHandle<()>> = if config.metrics.enabled
         && let Some(addr) = proposer_address
     {
@@ -252,7 +261,7 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
         None
     };
 
-    // ── 9. Start the driver loop ─────────────────────────────────────────
+    // ── 10. Start the driver loop ────────────────────────────────────────
     driver_handle.start_proposer().await.map_err(|e| eyre::eyre!(e))?;
 
     ready.store(true, Ordering::SeqCst);
@@ -263,11 +272,11 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
         "Service is ready"
     );
 
-    // ── 10. Wait for shutdown signal ─────────────────────────────────────
+    // ── 11. Wait for shutdown signal ─────────────────────────────────────
     cancel.cancelled().await;
     info!("Shutdown signal received, stopping service...");
 
-    // ── 11. Graceful shutdown (reverse initialisation order) ─────────────
+    // ── 12. Graceful shutdown (reverse initialisation order) ─────────────
     ready.store(false, Ordering::SeqCst);
 
     if driver_handle.is_running()
@@ -278,6 +287,14 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
 
     if let Some(handle) = balance_handle {
         let _ = handle.await;
+    }
+
+    if let Some(handle) = admin_handle {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(error = %e, "Admin RPC server error during shutdown"),
+            Err(e) => warn!(error = %e, "Admin RPC server task panicked"),
+        }
     }
 
     match health_handle.await {

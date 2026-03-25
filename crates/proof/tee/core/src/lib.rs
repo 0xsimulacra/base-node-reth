@@ -1,13 +1,10 @@
 #![doc = include_str!("../README.md")]
 
 mod error;
-pub use error::{CryptoError, ProviderError};
+pub use error::CryptoError;
 
 mod proof;
 pub use proof::{PROOF_TYPE_TEE, ProofEncoder};
 
 mod types;
-pub use types::{
-    AccountResult, BlockId, Genesis, GenesisSystemConfig, PerChainConfig, RollupConfig,
-    StorageProof, output_root_v0, output_root_v0_with_hash,
-};
+pub use types::{BlockId, Genesis, GenesisSystemConfig, PerChainConfig, RollupConfig};
