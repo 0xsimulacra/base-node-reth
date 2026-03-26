@@ -3093,7 +3093,6 @@ dependencies = [
  "async-trait",
  "base-challenger",
  "base-cli-utils",
- "base-enclave",
  "base-health",
  "base-proof-contracts",
  "base-proof-primitives",
@@ -3618,12 +3617,9 @@ dependencies = [
  "alloy-primitives",
  "base-consensus-genesis",
  "base-consensus-registry",
- "base-proof-primitives",
  "hex",
- "rstest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4599,8 +4595,10 @@ dependencies = [
  "async-trait",
  "base-proof-preimage",
  "jsonrpsee",
+ "rstest",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4839,7 +4837,6 @@ dependencies = [
  "base-alloy-rpc-types",
  "base-cli-utils",
  "base-consensus-genesis",
- "base-enclave",
  "base-health",
  "base-proof-contracts",
  "base-proof-primitives",
