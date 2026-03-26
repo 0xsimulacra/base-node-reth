@@ -303,7 +303,7 @@ pub fn validate_withdrawals_presence(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_primitives::{Address, B64, B256, b64};
     use alloy_rpc_types_engine::PayloadAttributes;
     use base_alloy_chains::BaseChainConfig;

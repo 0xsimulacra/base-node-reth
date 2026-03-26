@@ -128,7 +128,7 @@ impl BatchReader {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use base_consensus_genesis::{
         HardForkConfig, MAX_RLP_BYTES_PER_CHANNEL_BEDROCK, MAX_RLP_BYTES_PER_CHANNEL_FJORD,
     };

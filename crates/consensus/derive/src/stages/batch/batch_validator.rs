@@ -326,7 +326,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::{sync::Arc, vec, vec::Vec};
 
     use alloy_eips::{BlockNumHash, NumHash};

@@ -147,7 +147,7 @@ impl core::fmt::Display for PreimageKey {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::string::ToString;
 
     use super::*;

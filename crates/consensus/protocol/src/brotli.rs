@@ -74,7 +74,7 @@ pub fn decompress_brotli(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_primitives::hex;
     use base_consensus_genesis::MAX_RLP_BYTES_PER_CHANNEL_FJORD;
 

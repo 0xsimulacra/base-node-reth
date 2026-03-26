@@ -121,7 +121,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use base_execution_chainspec::{BASE_DEV, BASE_MAINNET};
     use base_node_core::args::RollupArgs;
     use clap::Parser;

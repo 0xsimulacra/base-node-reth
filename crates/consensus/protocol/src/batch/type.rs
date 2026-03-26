@@ -57,7 +57,7 @@ impl Decodable for BatchType {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec::Vec;
 
     use super::*;

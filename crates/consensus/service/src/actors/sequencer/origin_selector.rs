@@ -260,7 +260,7 @@ impl L1OriginSelectorProvider for DelayedL1OriginSelectorProvider {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::HashSet;
 
     use alloy_eips::NumHash;

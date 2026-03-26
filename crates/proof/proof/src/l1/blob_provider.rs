@@ -159,7 +159,7 @@ fn generate_roots_of_unity() -> [Fr; FIELD_ELEMENTS_PER_BLOB as usize] {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_eips::eip4844::{FIELD_ELEMENTS_PER_BLOB, env_settings::EnvKzgSettings};
     use ark_ff::{BigInteger, PrimeField};
     use c_kzg::{BYTES_PER_BLOB, Blob, Bytes32, Bytes48};

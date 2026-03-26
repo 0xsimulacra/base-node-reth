@@ -200,7 +200,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec;
 
     use base_consensus_genesis::HardForkConfig;

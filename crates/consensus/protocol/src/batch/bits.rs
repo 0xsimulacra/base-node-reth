@@ -154,7 +154,7 @@ impl SpanBatchBits {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use proptest::{collection::vec, prelude::any, proptest};
     use rstest::rstest;
 

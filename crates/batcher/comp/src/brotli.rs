@@ -136,7 +136,7 @@ impl ChannelCompressor for BrotliCompressor {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_primitives::hex;
     use base_consensus_genesis::MAX_RLP_BYTES_PER_CHANNEL_FJORD;
     use base_protocol::decompress_brotli;

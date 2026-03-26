@@ -343,7 +343,7 @@ impl OpReceiptBuilder {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_consensus::{Block, BlockBody, Eip658Value, TxEip7702, transaction::TransactionMeta};
     use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{Address, Bytes, Signature, U256, hex};

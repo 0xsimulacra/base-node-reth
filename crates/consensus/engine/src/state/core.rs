@@ -181,7 +181,7 @@ impl EngineState {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     #[cfg(feature = "metrics")]
     use base_protocol::BlockInfo;
     #[cfg(feature = "metrics")]

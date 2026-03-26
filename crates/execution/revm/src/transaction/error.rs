@@ -86,7 +86,7 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::string::ToString;
 
     use super::*;
