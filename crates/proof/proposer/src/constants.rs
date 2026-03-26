@@ -12,3 +12,7 @@ pub const PROVER_TIMEOUT: Duration = Duration::from_mins(30);
 /// the anchor state registry (i.e., no parent game exists).
 /// This is `uint32.max` per the `DisputeGameFactory` contract.
 pub const NO_PARENT_INDEX: u32 = 0xFFFF_FFFF;
+
+/// Maximum number of concurrent `game_at_index` RPC calls during the recovery
+/// scan.
+pub const RECOVERY_SCAN_CONCURRENCY: usize = 32;
