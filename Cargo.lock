@@ -4745,15 +4745,14 @@ name = "base-proof-tee-registrar"
 version = "0.0.0"
 dependencies = [
  "alloy-consensus",
- "alloy-contract",
  "alloy-primitives",
- "alloy-provider",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "alloy-sol-types",
  "async-trait",
  "aws-sdk-ec2",
  "aws-sdk-elasticloadbalancingv2",
+ "base-proof-contracts",
  "base-proof-primitives",
  "base-proof-tee-nitro-attestation-prover",
  "base-tx-manager",
