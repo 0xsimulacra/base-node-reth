@@ -44,6 +44,22 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     info!(version = env!("CARGO_PKG_VERSION"), "Proposer starting");
+    info!(
+        dry_run = config.dry_run,
+        allow_non_finalized = config.allow_non_finalized,
+        anchor_state_registry = %config.anchor_state_registry_addr,
+        dispute_game_factory = %config.dispute_game_factory_addr,
+        game_type = config.game_type,
+        tee_image_hash = %config.tee_image_hash,
+        poll_interval = ?config.poll_interval,
+        rpc_timeout = ?config.rpc_timeout,
+        max_parallel_proofs = config.max_parallel_proofs,
+        max_game_recovery_lookback = config.max_game_recovery_lookback,
+        health_addr = %config.health_addr,
+        admin_addr = ?config.admin_addr,
+        tee_prover_registry = ?config.tee_prover_registry_address,
+        "Resolved configuration"
+    );
 
     // ── 1. Global cancellation token and signal handler ──────────────────
     let cancel = CancellationToken::new();
@@ -54,7 +70,7 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
         .metrics
         .init_with(|| {
             base_cli_utils::register_version_metrics!();
-            Metrics::up().set(1.0);
+            Metrics::init();
         })
         .wrap_err("failed to install Prometheus recorder")?;
 
@@ -271,6 +287,7 @@ pub async fn run(config: ProposerConfig) -> Result<()> {
     driver_handle.start_proposer().await.map_err(|e| eyre::eyre!(e))?;
 
     ready.store(true, Ordering::SeqCst);
+    Metrics::record_startup();
     info!(
         poll_interval = ?config.poll_interval,
         block_interval,
