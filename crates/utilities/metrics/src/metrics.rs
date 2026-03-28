@@ -7,7 +7,8 @@
 ///
 /// The scope is prepended to every metric name with a dot separator.
 /// The scope may contain dots (e.g., `my.app`) by using dot-separated idents.
-/// For a custom struct name, use [`define_metrics_struct!`].
+/// To override the generated struct name, add `struct = MyMetrics,` after the
+/// scope.
 ///
 /// # Attributes
 ///
@@ -23,9 +24,36 @@
 ///     requests_total: counter,
 /// }
 /// Metrics::requests_total().increment(1);
+///
+/// base_metrics::define_metrics! {
+///     my.app,
+///     struct = MyMetrics,
+///     #[describe("Request duration")]
+///     #[label(method)]
+///     request_duration: histogram,
+/// }
+/// MyMetrics::request_duration("GET").record(0.42);
 /// ```
 #[macro_export]
 macro_rules! define_metrics {
+    (
+        $($scope:ident).+, struct = $name:ident,
+        $(
+            #[describe($desc:expr)]
+            $(#[label($label:ident)])*
+            $field:ident : $kind:ident
+        ),*
+        $(,)?
+    ) => {
+        $crate::__define_metrics_impl! {
+            $name, {$($scope).+},
+            $(
+                #[describe($desc)]
+                $(#[label($label)])*
+                $field : $kind
+            ),*
+        }
+    };
     (
         $($scope:ident).+
         $(
@@ -37,41 +65,6 @@ macro_rules! define_metrics {
     ) => {
         $crate::__define_metrics_impl! {
             Metrics, {$($scope).+},
-            $(
-                #[describe($desc)]
-                $(#[label($label)])*
-                $field : $kind
-            ),*
-        }
-    };
-}
-
-/// Like [`define_metrics!`] but with a custom struct name.
-///
-/// # Example
-///
-/// ```ignore
-/// base_metrics::define_metrics_struct! {
-///     MyMetrics, my.app,
-///     #[describe("Request duration")]
-///     #[label(method)]
-///     request_duration: histogram,
-/// }
-/// MyMetrics::request_duration("GET").record(0.42);
-/// ```
-#[macro_export]
-macro_rules! define_metrics_struct {
-    (
-        $name:ident, $($scope:ident).+,
-        $(
-            #[describe($desc:expr)]
-            $(#[label($label:ident)])*
-            $field:ident : $kind:ident
-        ),*
-        $(,)?
-    ) => {
-        $crate::__define_metrics_impl! {
-            $name, {$($scope).+},
             $(
                 #[describe($desc)]
                 $(#[label($label)])*
@@ -254,80 +247,4 @@ macro_rules! time {
         __timer.stop();
         __result
     }};
-}
-
-/// Sets a metric value, optionally with a specified label.
-#[macro_export]
-macro_rules! set {
-    (counter, $metric:path, $key:expr, $value:expr, $amount:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::counter!($metric, $key => $value).absolute($amount);
-    };
-    ($instrument:ident, $metric:path, $key:expr, $value:expr, $amount:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric, $key => $value).set($amount);
-    };
-    (counter, $metric:path, $value:expr, $amount:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::counter!($metric, "type" => $value).absolute($amount);
-    };
-    ($instrument:ident, $metric:path, $value:expr, $amount:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric, "type" => $value).set($amount);
-    };
-    (counter, $metric:path, $value:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::counter!($metric).absolute($value);
-    };
-    ($instrument:ident, $metric:path, $value:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric).set($value);
-    };
-}
-
-/// Increments a metric value, optionally with a specified label.
-#[macro_export]
-macro_rules! inc {
-    ($instrument:ident, $metric:path, $value:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric, "type" => $value).increment(1);
-    };
-    ($instrument:ident, $metric:path $(, $label_key:expr $(=> $label_value:expr)?)*$(,)?) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric $(, $label_key $(=> $label_value)?)*).increment(1);
-    };
-    ($instrument:ident, $metric:path, $value:expr $(, $label_key:expr $(=> $label_value:expr)?)*$(,)?) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric $(, $label_key $(=> $label_value)?)*).increment($value);
-    };
-}
-
-/// Decrements a metric value, optionally with a specified label.
-#[macro_export]
-macro_rules! dec {
-    ($instrument:ident, $metric:path, $value:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric, "type" => $value).decrement(1.0);
-    };
-    ($instrument:ident, $metric:path $(, $label_key:expr $(=> $label_value:expr)?)*$(,)?) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric $(, $label_key $(=> $label_value)?)*).decrement(1.0);
-    };
-    ($instrument:ident, $metric:path, $value:expr $(, $label_key:expr $(=> $label_value:expr)?)*$(,)?) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric $(, $label_key $(=> $label_value)?)*).decrement($value);
-    };
-}
-
-/// Records a value, optionally with a specified label.
-#[macro_export]
-macro_rules! record {
-    ($instrument:ident, $metric:path, $key:expr, $value:expr, $amount:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric, $key => $value).record($amount);
-    };
-    ($instrument:ident, $metric:path, $amount:expr) => {
-        #[cfg(feature = "metrics")]
-        metrics::$instrument!($metric).record($amount);
-    };
 }
