@@ -1,5 +1,5 @@
 target/
-.idea/
+.idea
 .DS_Store
 .devnet/
 .sisyphus/
@@ -8,5 +8,5 @@ docs/specs/node_modules/
 docs/specs/dist/
 docs/specs/.vocs/
 *.log
-.direnv/
-.vscode/
+.direnv
+.vscode
