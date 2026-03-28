@@ -23,6 +23,7 @@ impl Metrics {
     /// This does two things:
     /// * Describes various metrics.
     /// * Initializes metrics to 0 so they can be queried immediately.
+    #[cfg(feature = "metrics")]
     pub fn init() {
         Self::describe();
         Self::zero();
@@ -31,13 +32,10 @@ impl Metrics {
     /// Initializes metrics to `0` so they can be queried immediately by consumers of prometheus
     /// metrics.
     pub fn zero() {
-        // Discovery Event
-        Self::discovery_event("discovered").set(0);
-        Self::discovery_event("session_established").set(0);
-        Self::discovery_event("unverifiable_enr").set(0);
-
-        // Peer Counts
-        Self::discovery_peer_count().set(0);
-        Self::find_node_request().set(0);
+        Self::discovery_event("discovered").set(0.0);
+        Self::discovery_event("session_established").set(0.0);
+        Self::discovery_event("unverifiable_enr").set(0.0);
+        Self::find_node_request().set(0.0);
+        Self::discovery_peer_count().set(0.0);
     }
 }

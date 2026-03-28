@@ -82,31 +82,24 @@ impl EngineSyncState {
     /// is not specified. Returns the new sync state.
     pub fn apply_update(self, sync_state_update: EngineSyncStateUpdate) -> Self {
         if let Some(unsafe_head) = sync_state_update.unsafe_head {
-            Self::update_block_label_metric(
-                Metrics::UNSAFE_BLOCK_LABEL,
-                unsafe_head.block_info.number,
-            );
+            Metrics::block_labels(Metrics::UNSAFE_BLOCK_LABEL)
+                .set(unsafe_head.block_info.number as f64);
         }
         if let Some(cross_unsafe_head) = sync_state_update.cross_unsafe_head {
-            Self::update_block_label_metric(
-                Metrics::CROSS_UNSAFE_BLOCK_LABEL,
-                cross_unsafe_head.block_info.number,
-            );
+            Metrics::block_labels(Metrics::CROSS_UNSAFE_BLOCK_LABEL)
+                .set(cross_unsafe_head.block_info.number as f64);
         }
         if let Some(local_safe_head) = sync_state_update.local_safe_head {
-            Self::update_block_label_metric(
-                Metrics::LOCAL_SAFE_BLOCK_LABEL,
-                local_safe_head.block_info.number,
-            );
+            Metrics::block_labels(Metrics::LOCAL_SAFE_BLOCK_LABEL)
+                .set(local_safe_head.block_info.number as f64);
         }
         if let Some(safe_head) = sync_state_update.safe_head {
-            Self::update_block_label_metric(Metrics::SAFE_BLOCK_LABEL, safe_head.block_info.number);
+            Metrics::block_labels(Metrics::SAFE_BLOCK_LABEL)
+                .set(safe_head.block_info.number as f64);
         }
         if let Some(finalized_head) = sync_state_update.finalized_head {
-            Self::update_block_label_metric(
-                Metrics::FINALIZED_BLOCK_LABEL,
-                finalized_head.block_info.number,
-            );
+            Metrics::block_labels(Metrics::FINALIZED_BLOCK_LABEL)
+                .set(finalized_head.block_info.number as f64);
         }
 
         Self {
@@ -119,18 +112,6 @@ impl EngineSyncState {
             finalized_head: sync_state_update.finalized_head.unwrap_or(self.finalized_head),
         }
     }
-
-    /// Updates a block label metric, keyed by the label.
-    #[cfg(feature = "metrics")]
-    #[inline]
-    fn update_block_label_metric(label: &'static str, number: u64) {
-        base_metrics::set!(gauge, Metrics::BLOCK_LABELS, "label", label, number as f64);
-    }
-
-    /// Updates a block label metric, keyed by the label.
-    #[cfg(not(feature = "metrics"))]
-    #[inline]
-    const fn update_block_label_metric(_label: &'static str, _number: u64) {}
 }
 
 /// Specifies how to update the sync state of the engine.
@@ -194,7 +175,7 @@ mod tests {
     impl EngineState {
         /// Set the unsafe head.
         pub fn set_unsafe_head(&mut self, unsafe_head: L2BlockInfo) {
-            self.sync_state.apply_update(EngineSyncStateUpdate {
+            self.sync_state = self.sync_state.apply_update(EngineSyncStateUpdate {
                 unsafe_head: Some(unsafe_head),
                 ..Default::default()
             });
@@ -202,7 +183,7 @@ mod tests {
 
         /// Set the cross-verified unsafe head.
         pub fn set_cross_unsafe_head(&mut self, cross_unsafe_head: L2BlockInfo) {
-            self.sync_state.apply_update(EngineSyncStateUpdate {
+            self.sync_state = self.sync_state.apply_update(EngineSyncStateUpdate {
                 cross_unsafe_head: Some(cross_unsafe_head),
                 ..Default::default()
             });
@@ -210,7 +191,7 @@ mod tests {
 
         /// Set the local safe head.
         pub fn set_local_safe_head(&mut self, local_safe_head: L2BlockInfo) {
-            self.sync_state.apply_update(EngineSyncStateUpdate {
+            self.sync_state = self.sync_state.apply_update(EngineSyncStateUpdate {
                 local_safe_head: Some(local_safe_head),
                 ..Default::default()
             });
@@ -218,7 +199,7 @@ mod tests {
 
         /// Set the safe head.
         pub fn set_safe_head(&mut self, safe_head: L2BlockInfo) {
-            self.sync_state.apply_update(EngineSyncStateUpdate {
+            self.sync_state = self.sync_state.apply_update(EngineSyncStateUpdate {
                 safe_head: Some(safe_head),
                 ..Default::default()
             });
@@ -226,7 +207,7 @@ mod tests {
 
         /// Set the finalized head.
         pub fn set_finalized_head(&mut self, finalized_head: L2BlockInfo) {
-            self.sync_state.apply_update(EngineSyncStateUpdate {
+            self.sync_state = self.sync_state.apply_update(EngineSyncStateUpdate {
                 finalized_head: Some(finalized_head),
                 ..Default::default()
             });
@@ -250,7 +231,7 @@ mod tests {
         #[case] number: u64,
     ) {
         let handle = PrometheusBuilder::new().install_recorder().unwrap();
-        crate::Metrics::init();
+        Metrics::init();
 
         let mut state = EngineState::default();
         set_fn(
