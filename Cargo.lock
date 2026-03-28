@@ -2937,6 +2937,7 @@ dependencies = [
  "base-execution-payload-builder",
  "base-execution-primitives",
  "base-execution-rpc",
+ "base-metrics",
  "base-node-core",
  "base-node-runner",
  "base-revm",
@@ -2977,7 +2978,6 @@ dependencies = [
  "reth-evm",
  "reth-execution-types",
  "reth-ipc",
- "reth-metrics",
  "reth-network-peers",
  "reth-node-api",
  "reth-node-builder",
@@ -3042,8 +3042,10 @@ dependencies = [
 name = "base-builder-publish"
 version = "0.0.0"
 dependencies = [
+ "base-metrics",
  "futures",
  "metrics",
+ "metrics-exporter-prometheus",
  "rstest",
  "serde",
  "serde_json",
