@@ -1853,10 +1853,10 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "base-bundles",
+ "base-metrics",
  "bytes",
  "futures",
  "metrics",
- "metrics-derive",
  "rdkafka",
  "serde",
  "serde_json",
@@ -2530,6 +2530,7 @@ dependencies = [
  "base-consensus-gossip",
  "base-consensus-node",
  "base-consensus-registry",
+ "base-consensus-safedb",
  "base-execution-chainspec",
  "base-execution-evm",
  "base-protocol",
@@ -2538,6 +2539,7 @@ dependencies = [
  "base-tx-manager",
  "reth-evm",
  "revm",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2783,7 +2785,6 @@ dependencies = [
  "base-tx-manager",
  "derive_more",
  "futures",
- "metrics",
  "rstest",
  "serde",
  "thiserror 2.0.18",
@@ -2801,6 +2802,7 @@ dependencies = [
  "base-alloy-consensus",
  "base-comp",
  "base-consensus-genesis",
+ "base-metrics",
  "base-protocol",
  "metrics",
  "rand 0.9.2",
@@ -2813,8 +2815,10 @@ dependencies = [
 name = "base-batcher-service"
 version = "0.0.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-rlp",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "async-trait",
@@ -2825,7 +2829,9 @@ dependencies = [
  "base-batcher-core",
  "base-batcher-encoder",
  "base-batcher-source",
+ "base-consensus-genesis",
  "base-consensus-rpc",
+ "base-protocol",
  "base-runtime",
  "base-tx-manager",
  "derive_more",
@@ -2833,6 +2839,7 @@ dependencies = [
  "futures",
  "httpmock",
  "jsonrpsee",
+ "miniz_oxide 0.9.1",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2930,6 +2937,7 @@ dependencies = [
  "base-execution-payload-builder",
  "base-execution-primitives",
  "base-execution-rpc",
+ "base-metrics",
  "base-node-core",
  "base-node-runner",
  "base-revm",
@@ -2954,6 +2962,7 @@ dependencies = [
  "jsonrpsee-types",
  "k256",
  "metrics",
+ "metrics-exporter-prometheus",
  "moka",
  "nanoid",
  "opentelemetry",
@@ -2969,7 +2978,6 @@ dependencies = [
  "reth-evm",
  "reth-execution-types",
  "reth-ipc",
- "reth-metrics",
  "reth-network-peers",
  "reth-node-api",
  "reth-node-builder",
@@ -3025,9 +3033,8 @@ dependencies = [
  "base-builder-core",
  "base-bundles",
  "base-node-runner",
- "concurrent-queue",
- "dashmap",
  "jsonrpsee",
+ "moka",
  "tracing",
 ]
 
@@ -3035,8 +3042,10 @@ dependencies = [
 name = "base-builder-publish"
 version = "0.0.0"
 dependencies = [
+ "base-metrics",
  "futures",
  "metrics",
+ "metrics-exporter-prometheus",
  "rstest",
  "serde",
  "serde_json",
@@ -3090,8 +3099,8 @@ dependencies = [
  "async-trait",
  "base-challenger",
  "base-cli-utils",
- "base-enclave",
  "base-health",
+ "base-metrics",
  "base-proof-contracts",
  "base-proof-primitives",
  "base-proof-rpc",
@@ -3251,7 +3260,7 @@ dependencies = [
  "base-consensus-genesis",
  "base-consensus-registry",
  "base-consensus-upgrades",
- "base-macros",
+ "base-metrics",
  "base-protocol",
  "metrics",
  "proptest",
@@ -3274,7 +3283,7 @@ dependencies = [
  "base-cli-utils",
  "base-consensus-genesis",
  "base-consensus-peers",
- "base-macros",
+ "base-metrics",
  "derive_more",
  "discv5",
  "libp2p",
@@ -3310,7 +3319,7 @@ dependencies = [
  "base-alloy-rpc-types-engine",
  "base-consensus-genesis",
  "base-consensus-registry",
- "base-macros",
+ "base-metrics",
  "base-protocol",
  "derive_more",
  "http-body-util",
@@ -3340,7 +3349,6 @@ dependencies = [
  "alloy-sol-types",
  "arbitrary",
  "base-alloy-chains",
- "base-revm",
  "derive_more",
  "rand 0.9.2",
  "serde",
@@ -3366,7 +3374,7 @@ dependencies = [
  "base-consensus-disc",
  "base-consensus-genesis",
  "base-consensus-peers",
- "base-macros",
+ "base-metrics",
  "derive_more",
  "discv5",
  "futures",
@@ -3422,9 +3430,10 @@ dependencies = [
  "base-consensus-peers",
  "base-consensus-providers",
  "base-consensus-rpc",
+ "base-consensus-safedb",
  "base-consensus-sources",
  "base-health",
- "base-macros",
+ "base-metrics",
  "base-protocol",
  "bytes",
  "derive_more",
@@ -3496,7 +3505,7 @@ dependencies = [
  "base-alloy-network",
  "base-consensus-derive",
  "base-consensus-genesis",
- "base-macros",
+ "base-metrics",
  "base-protocol",
  "c-kzg",
  "http-body-util",
@@ -3540,7 +3549,8 @@ dependencies = [
  "base-consensus-engine",
  "base-consensus-genesis",
  "base-consensus-gossip",
- "base-macros",
+ "base-consensus-safedb",
+ "base-metrics",
  "base-protocol",
  "getrandom 0.4.2",
  "ipnet",
@@ -3549,6 +3559,22 @@ dependencies = [
  "metrics",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "base-consensus-safedb"
+version = "0.0.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "async-trait",
+ "base-protocol",
+ "redb",
+ "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3586,23 +3612,7 @@ dependencies = [
  "base-protocol",
  "base-revm",
  "revm",
-]
-
-[[package]]
-name = "base-enclave"
-version = "0.0.0"
-dependencies = [
- "alloy-chains",
- "alloy-eips",
- "alloy-primitives",
- "base-consensus-genesis",
- "base-consensus-registry",
- "base-proof-primitives",
- "hex",
  "rstest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3896,6 +3906,7 @@ dependencies = [
  "base-execution-payload-builder",
  "base-execution-primitives",
  "base-execution-trie",
+ "base-metrics",
  "base-revm",
  "base-txpool",
  "derive_more",
@@ -3909,7 +3920,6 @@ dependencies = [
  "reth-chain-state",
  "reth-chainspec",
  "reth-evm",
- "reth-metrics",
  "reth-node-api",
  "reth-node-builder",
  "reth-payload-util",
@@ -3927,7 +3937,6 @@ dependencies = [
  "reth-transaction-pool",
  "revm",
  "serde",
- "strum 0.28.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3954,6 +3963,7 @@ dependencies = [
  "alloy-genesis",
  "alloy-primitives",
  "auto_impl",
+ "base-metrics",
  "bincode 2.0.1",
  "bytes",
  "derive_more",
@@ -3971,7 +3981,6 @@ dependencies = [
  "reth-evm",
  "reth-evm-ethereum",
  "reth-execution-errors",
- "reth-metrics",
  "reth-node-api",
  "reth-primitives-traits",
  "reth-provider",
@@ -4017,13 +4026,13 @@ dependencies = [
  "base-execution-evm",
  "base-execution-primitives",
  "base-execution-rpc",
+ "base-metrics",
  "base-revm",
  "derive_more",
  "futures",
  "jsonrpsee",
  "jsonrpsee-types",
  "metrics",
- "metrics-derive",
  "rayon",
  "reth-chainspec",
  "reth-evm",
@@ -4172,10 +4181,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base-macros"
-version = "0.0.0"
-
-[[package]]
 name = "base-metering"
 version = "0.0.0"
 dependencies = [
@@ -4197,6 +4202,7 @@ dependencies = [
  "base-execution-evm",
  "base-execution-primitives",
  "base-flashblocks",
+ "base-metrics",
  "base-node-core",
  "base-node-runner",
  "base-revm",
@@ -4205,7 +4211,6 @@ dependencies = [
  "jsonrpsee",
  "lru 0.16.3",
  "metrics",
- "metrics-derive",
  "parking_lot",
  "rand 0.9.2",
  "reth-db",
@@ -4226,6 +4231,15 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "base-metrics"
+version = "0.0.0"
+dependencies = [
+ "metrics",
+ "metrics-util",
+ "ordered-float 5.2.0",
 ]
 
 [[package]]
@@ -4419,6 +4433,7 @@ dependencies = [
  "alloy-provider",
  "alloy-sol-types",
  "async-trait",
+ "futures",
  "thiserror 2.0.18",
  "tracing",
  "url",
@@ -4516,7 +4531,7 @@ dependencies = [
  "base-alloy-rpc-types-engine",
  "base-consensus-genesis",
  "base-consensus-providers",
- "base-macros",
+ "base-metrics",
  "base-proof",
  "base-proof-client",
  "base-proof-mpt",
@@ -4562,6 +4577,7 @@ dependencies = [
  "alloy-primitives",
  "async-channel",
  "async-trait",
+ "rkyv",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -4576,8 +4592,10 @@ dependencies = [
  "async-trait",
  "base-proof-preimage",
  "jsonrpsee",
+ "rstest",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4652,6 +4670,8 @@ dependencies = [
 name = "base-proof-tee-nitro-enclave"
 version = "0.0.0"
 dependencies = [
+ "alloy-chains",
+ "alloy-eips",
  "alloy-primitives",
  "alloy-signer",
  "alloy-signer-local",
@@ -4659,20 +4679,22 @@ dependencies = [
  "aws-nitro-enclaves-cose",
  "aws-nitro-enclaves-nsm-api",
  "base-alloy-evm",
+ "base-consensus-genesis",
  "base-consensus-registry",
- "base-enclave",
  "base-proof-client",
  "base-proof-preimage",
  "base64 0.22.1",
  "bincode 2.0.1",
  "ciborium",
  "eyre",
+ "hex",
  "k256",
  "openssl",
  "parking_lot",
  "rand 0.8.5",
  "serde",
  "serde_bytes",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
@@ -4686,6 +4708,7 @@ dependencies = [
 name = "base-proof-tee-nitro-host"
 version = "0.0.0"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
  "base-health",
  "base-proof-host",
@@ -4723,15 +4746,15 @@ name = "base-proof-tee-registrar"
 version = "0.0.0"
 dependencies = [
  "alloy-consensus",
- "alloy-contract",
  "alloy-primitives",
- "alloy-provider",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "alloy-sol-types",
  "async-trait",
  "aws-sdk-ec2",
  "aws-sdk-elasticloadbalancingv2",
+ "base-metrics",
+ "base-proof-contracts",
  "base-proof-primitives",
  "base-proof-tee-nitro-attestation-prover",
  "base-tx-manager",
@@ -4816,8 +4839,8 @@ dependencies = [
  "base-alloy-rpc-types",
  "base-cli-utils",
  "base-consensus-genesis",
- "base-enclave",
  "base-health",
+ "base-metrics",
  "base-proof-contracts",
  "base-proof-primitives",
  "base-proof-rpc",
@@ -4905,7 +4928,6 @@ dependencies = [
  "base-cli-utils",
  "base-consensus-registry",
  "base-proof-host",
- "base-proof-tee-nitro-enclave",
  "base-proof-tee-nitro-host",
  "clap",
  "eyre",
@@ -4970,6 +4992,7 @@ dependencies = [
  "alloy-sol-types",
  "auto_impl",
  "base-alloy-flz",
+ "base-consensus-genesis",
  "reth-evm",
  "revm",
  "rstest",
@@ -5037,6 +5060,7 @@ dependencies = [
  "async-trait",
  "backon",
  "base-alloy-signer",
+ "base-metrics",
  "clap",
  "humantime",
  "metrics",
@@ -5064,6 +5088,7 @@ dependencies = [
  "base-execution-chainspec",
  "base-execution-evm",
  "base-execution-primitives",
+ "base-metrics",
  "base-revm",
  "base-test-utils",
  "c-kzg",
@@ -5071,11 +5096,9 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "metrics",
- "metrics-derive",
  "parking_lot",
  "reth-chainspec",
  "reth-evm",
- "reth-metrics",
  "reth-node-api",
  "reth-primitives-traits",
  "reth-provider",
@@ -5118,6 +5141,7 @@ dependencies = [
  "base-execution-primitives",
  "base-flashblocks",
  "base-flashblocks-node",
+ "base-metrics",
  "base-node-runner",
  "chrono",
  "derive_more",
@@ -5125,7 +5149,6 @@ dependencies = [
  "futures",
  "lru 0.16.3",
  "metrics",
- "metrics-derive",
  "reth-node-api",
  "reth-primitives-traits",
  "reth-provider",
@@ -5926,6 +5949,29 @@ name = "byte-slice-cast"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
+
+[[package]]
+name = "bytecheck"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0caa33a2c0edca0419d15ac723dff03f1956f7978329b1e3b5fdaaaed9d3ca8b"
+dependencies = [
+ "bytecheck_derive",
+ "ptr_meta",
+ "rancor",
+ "simdutf8",
+]
+
+[[package]]
+name = "bytecheck_derive"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89385e82b5d1821d2219e0b095efa2cc1f246cbf99080f3be46a1a85c0d392d9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "bytemuck"
@@ -9699,11 +9745,11 @@ dependencies = [
  "base-alloy-network",
  "base-bundles",
  "base-execution-evm",
+ "base-metrics",
  "base-revm",
  "clap",
  "jsonrpsee",
  "metrics",
- "metrics-derive",
  "moka",
  "rdkafka",
  "reth-rpc-eth-types",
@@ -11302,7 +11348,9 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.16.1",
+ "indexmap 2.13.0",
  "metrics",
+ "ordered-float 5.2.0",
  "quanta",
  "rand 0.9.2",
  "rand_xoshiro",
@@ -11505,6 +11553,26 @@ dependencies = [
  "pin-project",
  "smallvec",
  "unsigned-varint 0.7.2",
+]
+
+[[package]]
+name = "munge"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e17401f259eba956ca16491461b6e8f72913a0a114e39736ce404410f915a0c"
+dependencies = [
+ "munge_macro",
+]
+
+[[package]]
+name = "munge_macro"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4568f25ccbd45ab5d5603dc34318c1ec56b117531781260002151b8530a9f931"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12334,6 +12402,15 @@ name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "ordered-float"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0218004a4aae742209bee9c3cef05672f6b2708be36a50add8eb613b1f2a4008"
 dependencies = [
  "num-traits",
 ]
@@ -13261,6 +13338,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptr_meta"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b9a0cf95a1196af61d4f1cbdab967179516d9a4a4312af1f31948f8f6224a79"
+dependencies = [
+ "ptr_meta_derive",
+]
+
+[[package]]
+name = "ptr_meta_derive"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7347867d0a7e1208d93b46767be83e2b8f978c3dad35f775ac8d8847551d6fe1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "puffin"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13432,6 +13529,15 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "rancor"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a063ea72381527c2a0561da9c80000ef822bdd7c3241b1cc1b12100e3df081ee"
+dependencies = [
+ "ptr_meta",
+]
 
 [[package]]
 name = "rand"
@@ -13701,6 +13807,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13810,6 +13925,15 @@ name = "relative-path"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
+name = "rend"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cadadef317c2f20755a64d7fdc48f9e7178ee6b0e1f7fce33fa60f1d68a276e6"
+dependencies = [
+ "bytecheck",
+]
 
 [[package]]
 name = "reqwest"
@@ -17232,6 +17356,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rkyv"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a30e631b7f4a03dee9056b8ef6982e8ba371dd5bedb74d3ec86df4499132c70"
+dependencies = [
+ "bytecheck",
+ "bytes",
+ "hashbrown 0.16.1",
+ "indexmap 2.13.0",
+ "munge",
+ "ptr_meta",
+ "rancor",
+ "rend",
+ "rkyv_derive",
+ "tinyvec",
+ "uuid",
+]
+
+[[package]]
+name = "rkyv_derive"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8100bb34c0a1d0f907143db3149e6b4eea3c33b9ee8b189720168e818303986f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "rlimit"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18399,6 +18553,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19132,7 +19292,7 @@ dependencies = [
  "nix 0.29.0",
  "num-derive",
  "num-traits",
- "ordered-float",
+ "ordered-float 4.6.0",
  "pest",
  "pest_derive",
  "phf 0.11.3",
@@ -20774,11 +20934,11 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "backoff",
+ "base-metrics",
  "brotli",
  "futures",
  "http 1.4.0",
  "metrics",
- "metrics-derive",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -20856,7 +21016,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f2ab60e120fd6eaa68d9567f3226e876684639d22a4219b313ff69ec0ccd5ac"
 dependencies = [
  "log",
- "ordered-float",
+ "ordered-float 4.6.0",
  "strsim",
  "thiserror 1.0.69",
  "wezterm-dynamic-derive",

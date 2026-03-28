@@ -13,9 +13,10 @@ use std::{
 };
 
 use alloy_primitives::{Address, B256, Bytes};
-use base_enclave::ProofEncoder;
 use base_proof_contracts::AggregateVerifierClient;
-use base_proof_primitives::{ProofRequest as TeeProofRequest, ProofResult, ProverClient};
+use base_proof_primitives::{
+    ProofEncoder, ProofRequest as TeeProofRequest, ProofResult, ProverClient,
+};
 use base_proof_rpc::L2Provider;
 use base_tx_manager::TxManager;
 use base_zk_client::{ProofType, ProveBlockRequest, ZkProofProvider};
@@ -145,8 +146,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
                 }
             }
 
-            metrics::gauge!(ChallengerMetrics::PENDING_PROOFS)
-                .set(self.pending_proofs.len() as f64);
+            ChallengerMetrics::pending_proofs().set(self.pending_proofs.len() as f64);
 
             select! {
                 biased;
@@ -276,7 +276,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
         if candidate.tee_prover != Address::ZERO
             && let Some(tee) = &self.tee
         {
-            metrics::counter!(ChallengerMetrics::TEE_PROOF_ATTEMPTS_TOTAL).increment(1);
+            ChallengerMetrics::tee_proof_attempts_total().increment(1);
             let tee_fut = self.attempt_tee_proof(
                 &candidate,
                 invalid_index,
@@ -301,7 +301,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
                     if let Err(e) = self.poll_or_submit(game_address).await {
                         warn!(error = %e, game = %game_address, "initial TEE submission failed, will retry next tick");
                     }
-                    metrics::counter!(ChallengerMetrics::TEE_PROOF_OBTAINED_TOTAL).increment(1);
+                    ChallengerMetrics::tee_proof_obtained_total().increment(1);
                     return Ok(());
                 }
                 Ok(Err(e)) => {
@@ -312,7 +312,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
                     );
                 }
             }
-            metrics::counter!(ChallengerMetrics::TEE_PROOF_FALLBACK_TOTAL).increment(1);
+            ChallengerMetrics::tee_proof_fallback_total().increment(1);
         }
 
         // ZK fallback (or direct ZK if no TEE prover).
@@ -361,6 +361,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
             proposer: self.submitter.sender_address(),
             intermediate_block_interval: candidate.intermediate_block_interval,
             l1_head_number,
+            ..Default::default()
         };
 
         let result = tee.provider.prove(request).await.map_err(|e| eyre::eyre!(e))?;
@@ -401,12 +402,14 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
         let start_block_number = candidate.checkpoint_start_block(invalid_index)?;
 
         let session_id = derive_session_id(game_address, invalid_index);
+        let prover_address = format!("{:#x}", self.submitter.sender_address());
         let request = ProveBlockRequest {
             start_block_number,
             number_of_blocks_to_prove: candidate.intermediate_block_interval,
             sequence_window: None,
-            proof_type: ProofType::GenericZkvmClusterCompressed as i32,
+            proof_type: ProofType::GenericZkvmClusterSnarkGroth16.into(),
             session_id: Some(session_id),
+            prover_address: Some(prover_address),
         };
 
         let prove_response = self.zk_prover.prove_block(request.clone()).await?;
@@ -539,7 +542,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
             }
         };
 
-        metrics::counter!(ChallengerMetrics::PROOF_RETRIES_TOTAL).increment(1);
+        ChallengerMetrics::proof_retries_total().increment(1);
 
         match self.zk_prover.prove_block(request).await {
             Ok(response) => {
@@ -575,7 +578,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
 ///
 /// Uses UUID v5 (SHA-1 namespace hash) over `game_address || invalid_index`
 /// to produce an idempotency key that is stable across retries.
-fn derive_session_id(game_address: Address, invalid_index: u64) -> String {
+pub fn derive_session_id(game_address: Address, invalid_index: u64) -> String {
     let mut bytes = [0u8; 28];
     bytes[..20].copy_from_slice(game_address.as_slice());
     bytes[20..].copy_from_slice(&invalid_index.to_be_bytes());

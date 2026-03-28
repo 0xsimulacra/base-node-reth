@@ -13,9 +13,10 @@ workspace = true
 
 [dependencies]
 # Workspace
-base-macros.workspace = true
+base-metrics.workspace = true
 base-consensus-gossip.workspace = true
 base-consensus-engine.workspace = true
+base-consensus-safedb.workspace = true
 base-protocol = { workspace = true, features = ["serde", "std"] }
 base-consensus-genesis = { workspace = true, features = ["serde", "std"] }
 
@@ -59,6 +60,7 @@ client = [
 metrics = [
 	"base-consensus-engine/metrics",
 	"base-consensus-gossip/metrics",
+	"base-metrics/metrics",
 	"dep:metrics",
 	"libp2p/metrics",
 ]

@@ -48,8 +48,8 @@ base-alloy-consensus.workspace = true
 base-alloy-flz.workspace = true
 
 # metrics
-metrics.workspace = true
-metrics-derive.workspace = true
+metrics = { workspace = true, optional = true }
+base-metrics.workspace = true
 
 # misc
 eyre.workspace = true
@@ -64,7 +64,6 @@ tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 # workspace
-base-flashblocks.workspace = true
 base-alloy-flashblocks.workspace = true
 base-node-runner = { workspace = true, features = ["test-utils"] }
 
@@ -93,3 +92,7 @@ base-alloy-rpc-types.workspace = true
 url.workspace = true
 rand.workspace = true
 serde_json.workspace = true
+
+[features]
+default = [ "metrics" ]
+metrics = [ "base-metrics/metrics", "dep:metrics", "reth-evm/metrics" ]

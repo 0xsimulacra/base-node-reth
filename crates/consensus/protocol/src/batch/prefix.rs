@@ -81,7 +81,7 @@ impl SpanBatchPrefix {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec::Vec;
 
     use alloy_primitives::address;

@@ -1,12 +1,13 @@
 use alloy_primitives::{Address, B256};
+use url::Url;
 
 /// A prover instance discovered from the infrastructure layer.
 #[derive(Debug, Clone)]
 pub struct ProverInstance {
     /// EC2 instance ID (e.g. `i-0abc123def456`).
     pub instance_id: String,
-    /// Private IP and port for HTTP connection (e.g. `10.0.1.5:8000`).
-    pub endpoint: String,
+    /// HTTP endpoint URL for the prover (e.g. `http://10.0.1.5:8000/`).
+    pub endpoint: Url,
     /// Current health status of the instance.
     pub health_status: InstanceHealthStatus,
 }
@@ -46,6 +47,15 @@ impl InstanceHealthStatus {
     }
 }
 
+/// A signer currently registered on-chain via `TEEProverRegistry`.
+#[derive(Debug, Clone)]
+pub struct RegisteredSigner {
+    /// The signer's Ethereum address.
+    pub address: Address,
+    /// The `keccak256(PCR0)` measurement hash the signer was registered under.
+    pub pcr0: B256,
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -72,13 +82,4 @@ mod tests {
     fn from_aws_state(#[case] input: &str, #[case] expected: InstanceHealthStatus) {
         assert_eq!(InstanceHealthStatus::from_aws_state(input), expected);
     }
-}
-
-/// A signer currently registered on-chain via `TEEProverRegistry`.
-#[derive(Debug, Clone)]
-pub struct RegisteredSigner {
-    /// The signer's Ethereum address.
-    pub address: Address,
-    /// The `keccak256(PCR0)` measurement hash the signer was registered under.
-    pub pcr0: B256,
 }

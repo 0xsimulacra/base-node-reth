@@ -26,6 +26,10 @@ pub struct DriverConfig {
     /// Address of the proposer that submits proof transactions on-chain.
     /// Included in the proof journal so the enclave signs over the correct `msg.sender`.
     pub proposer_address: Address,
+    /// Keccak256 hash of the expected enclave PCR0 measurement.
+    /// Passed to the prover in each proof request so multi-enclave provers
+    /// can select the correct enclave.
+    pub tee_image_hash: B256,
 }
 
 impl Default for DriverConfig {
@@ -38,6 +42,7 @@ impl Default for DriverConfig {
             game_type: 0,
             allow_non_finalized: false,
             proposer_address: Address::ZERO,
+            tee_image_hash: B256::ZERO,
         }
     }
 }
@@ -46,7 +51,7 @@ impl Default for DriverConfig {
 ///
 /// This is either a game found in the `DisputeGameFactory` or the
 /// anchor root from the `AnchorStateRegistry` when no games exist.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct RecoveredState {
     /// Factory index of the game, or [`crate::NO_PARENT_INDEX`] for anchor state.
     pub game_index: u32,

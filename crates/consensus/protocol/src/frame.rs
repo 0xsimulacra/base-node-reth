@@ -265,7 +265,7 @@ impl Frame {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec;
 
     use super::*;

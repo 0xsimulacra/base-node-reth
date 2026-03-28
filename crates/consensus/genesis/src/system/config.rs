@@ -223,7 +223,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec;
 
     use alloy_primitives::{B256, LogData, address, b256, hex};

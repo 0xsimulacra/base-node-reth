@@ -19,13 +19,13 @@ use reth_network_peers::NodeRecord;
 use reth_primitives_traits::SealedHeader;
 
 use crate::{
-    BASE_DEV, BASE_DEVNET_0_SEPOLIA_DEV_0, BASE_MAINNET, BASE_SEPOLIA, compute_jovian_base_fee,
-    decode_holocene_base_fee,
+    BASE_DEV, BASE_DEVNET_0_SEPOLIA_DEV_0, BASE_MAINNET, BASE_SEPOLIA, BASE_ZERONET,
+    compute_jovian_base_fee, decode_holocene_base_fee,
 };
 
 /// All supported chain names for the CLI.
 pub const SUPPORTED_CHAINS: &[&str] =
-    &["base", "base_sepolia", "base-sepolia", "base-devnet-0-sepolia-dev-0", "dev"];
+    &["base", "base_sepolia", "base-sepolia", "base-devnet-0-sepolia-dev-0", "base-zeronet", "dev"];
 
 /// Genesis info extracted from a Base genesis config.
 #[derive(Default, Debug)]
@@ -119,6 +119,7 @@ impl OpChainSpec {
             "base" => Some(BASE_MAINNET.clone()),
             "base_sepolia" | "base-sepolia" => Some(BASE_SEPOLIA.clone()),
             "base-devnet-0-sepolia-dev-0" => Some(BASE_DEVNET_0_SEPOLIA_DEV_0.clone()),
+            "base-zeronet" => Some(BASE_ZERONET.clone()),
             _ => None,
         }
     }
@@ -346,7 +347,7 @@ mod tests {
     };
     use reth_ethereum_forks::{EthereumHardfork, ForkCondition, ForkHash, ForkId, Head};
 
-    use crate::{BASE_MAINNET, BASE_SEPOLIA, OpChainSpec, OpChainSpecBuilder};
+    use crate::{BASE_MAINNET, BASE_SEPOLIA, BASE_ZERONET, OpChainSpec, OpChainSpecBuilder};
 
     #[test]
     fn test_storage_root_consistency() {
@@ -530,6 +531,15 @@ mod tests {
         );
         let base_fee = BASE_SEPOLIA.next_block_base_fee(genesis, genesis.timestamp).unwrap();
         assert_eq!(base_fee, 980000000);
+    }
+
+    #[test]
+    fn base_zeronet_genesis() {
+        let genesis = BASE_ZERONET.genesis_header();
+        assert_eq!(
+            genesis.hash_slow(),
+            b256!("0x1842d6ef4c40e2a4794458e167f6d327269df919b626979111c37ad3a96047bf")
+        );
     }
 
     #[test]

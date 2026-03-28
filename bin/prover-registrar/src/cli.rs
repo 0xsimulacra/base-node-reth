@@ -18,8 +18,9 @@ use base_proof_tee_nitro_attestation_prover::{
     AttestationProofProvider, BoundlessProver, DirectProver,
 };
 use base_proof_tee_registrar::{
-    AwsDiscoveryConfig, AwsTargetGroupDiscovery, BoundlessConfig, DriverConfig, ProvingConfig,
-    RegistrarConfig, RegistrarError, RegistrarMetrics, RegistrationDriver, RegistryContractClient,
+    AwsDiscoveryConfig, AwsTargetGroupDiscovery, BoundlessConfig, DriverConfig, ProverClient,
+    ProvingConfig, RegistrarConfig, RegistrarError, RegistrarMetrics, RegistrationDriver,
+    RegistryContractClient,
 };
 use base_tx_manager::{BaseTxMetrics, SignerConfig, SimpleTxManager, TxManagerConfig};
 use clap::{Args, Parser, ValueEnum};
@@ -146,17 +147,13 @@ struct BoundlessArgs {
     )]
     boundless_private_key: Option<String>,
 
-    /// IPFS URL of the Nitro attestation verifier ELF uploaded via `nitro-attest-cli`.
+    /// HTTP(S) URL of the Nitro attestation verifier ELF (e.g. Pinata IPFS gateway URL).
     #[arg(
         long,
         env = cli_env!("BOUNDLESS_VERIFIER_PROGRAM_URL"),
         required_if_eq("proving_mode", "boundless")
     )]
     boundless_verifier_program_url: Option<Url>,
-
-    /// Maximum price in wei per cycle for Boundless proof requests.
-    #[arg(long, env = cli_env!("BOUNDLESS_MAX_PRICE"), default_value_t = 1_000_000)]
-    boundless_max_price: u64,
 
     /// Interval between Boundless fulfillment status checks, in seconds.
     #[arg(long, env = cli_env!("BOUNDLESS_POLL_INTERVAL_SECS"), default_value_t = 5)]
@@ -194,7 +191,7 @@ fn parse_image_id(s: &str) -> std::result::Result<[u32; 8], RegistrarError> {
 
     let mut id = [0u32; 8];
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-        id[i] = u32::from_be_bytes(chunk.try_into().unwrap());
+        id[i] = u32::from_le_bytes(chunk.try_into().unwrap());
     }
     Ok(id)
 }
@@ -246,7 +243,6 @@ impl Cli {
                             )
                         })?,
                     image_id: parse_image_id(image_id_hex)?,
-                    max_price: self.boundless.boundless_max_price,
                     poll_interval: Duration::from_secs(self.boundless.boundless_poll_interval_secs),
                     timeout: Duration::from_secs(self.boundless.boundless_timeout_secs),
                     nitro_verifier_address: self.boundless.nitro_verifier_address,
@@ -317,7 +313,7 @@ impl Cli {
         metrics_config
             .init_with(|| {
                 base_cli_utils::register_version_metrics!();
-                RegistrarMetrics::record_startup(env!("CARGO_PKG_VERSION"));
+                RegistrarMetrics::up().set(1.0);
             })
             .wrap_err("failed to install Prometheus recorder")?;
 
@@ -361,7 +357,6 @@ impl Cli {
                 signer: boundless.signer.clone(),
                 verifier_program_url: boundless.verifier_program_url.clone(),
                 image_id: boundless.image_id,
-                max_price: boundless.max_price,
                 poll_interval: boundless.poll_interval,
                 timeout: boundless.timeout,
                 trusted_certs_prefix_len: DEFAULT_TRUSTED_CERTS_PREFIX,
@@ -387,10 +382,10 @@ impl Cli {
         ));
 
         // ── 8. Build and run driver ──────────────────────────────────────────
+        let signer_client = ProverClient::new(config.prover_timeout);
         let driver_config = DriverConfig {
             registry_address: config.tee_prover_registry_address,
             poll_interval: config.poll_interval,
-            prover_timeout: config.prover_timeout,
             cancel: cancel.clone(),
         };
 
@@ -401,10 +396,16 @@ impl Cli {
         ready.store(true, Ordering::SeqCst);
 
         let cancel_guard = cancel.clone().drop_guard();
-        let driver_result =
-            RegistrationDriver::new(discovery, proof_provider, registry, tx_manager, driver_config)
-                .run()
-                .await;
+        let driver_result = RegistrationDriver::new(
+            discovery,
+            proof_provider,
+            registry,
+            tx_manager,
+            signer_client,
+            driver_config,
+        )
+        .run()
+        .await;
         drop(cancel_guard);
 
         // ── 9. Graceful shutdown (always runs, even on driver error) ─────────
@@ -452,10 +453,9 @@ mod tests {
     const TEST_BOUNDLESS_RPC: &str = "http://localhost:9545";
     const TEST_BOUNDLESS_KEY: &str =
         "0202020202020202020202020202020202020202020202020202020202020202";
-    const TEST_VERIFIER_URL: &str =
-        "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+    const TEST_VERIFIER_URL: &str = "https://gateway.pinata.cloud/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
     const TEST_IMAGE_ID: &str =
-        "0x0000000100000002000000030000000400000005000000060000000700000008";
+        "0x0100000002000000030000000400000005000000060000000700000008000000";
     const TEST_ELF_PATH: &str = "/tmp/guest.elf";
     const TEST_SIGNER_ENDPOINT: &str = "http://localhost:8546";
     const TEST_SIGNER_ADDR: &str = "0x0000000000000000000000000000000000000002";
@@ -688,8 +688,8 @@ mod tests {
     // ── parse_image_id unit tests ───────────────────────────────────────
 
     #[rstest]
-    #[case::with_prefix("0x0000000100000002000000030000000400000005000000060000000700000008", [1,2,3,4,5,6,7,8])]
-    #[case::without_prefix("0000000100000002000000030000000400000005000000060000000700000008", [1,2,3,4,5,6,7,8])]
+    #[case::with_prefix("0x0100000002000000030000000400000005000000060000000700000008000000", [1,2,3,4,5,6,7,8])]
+    #[case::without_prefix("0100000002000000030000000400000005000000060000000700000008000000", [1,2,3,4,5,6,7,8])]
     fn parse_image_id_valid(#[case] input: &str, #[case] expected: [u32; 8]) {
         assert_eq!(parse_image_id(input).unwrap(), expected);
     }

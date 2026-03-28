@@ -9,7 +9,7 @@ use std::{
 use alloy_primitives::{Address, B256, Bytes, U256};
 use base_challenger::{
     ChallengeSubmitter, Driver, DriverConfig, GameScanner, L1HeadProvider, OutputValidator,
-    PendingProof, ProofPhase, ScannerConfig, TeeConfig,
+    PendingProof, ProofPhase, ScannerConfig, TeeConfig, derive_session_id,
     test_utils::{
         MockAggregateVerifier, MockDisputeGameFactory, MockGameState, MockL1HeadProvider,
         MockL2Provider, MockTeeProofProvider, MockTxManager, MockZkProofProvider, addr,
@@ -69,24 +69,23 @@ fn test_driver_with_tee(
 }
 
 fn default_zk_prover() -> Arc<MockZkProofProvider> {
-    Arc::new(MockZkProofProvider {
-        session_id: "test-session".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
-    })
+    Arc::new(MockZkProofProvider { session_id: "test-session".to_string(), ..Default::default() })
 }
 
 fn default_tx_manager() -> MockTxManager {
     MockTxManager::new(Ok(receipt_with_status(true, B256::repeat_byte(0xAA))))
 }
 
-const fn default_prove_request() -> ProveBlockRequest {
+fn default_prove_request() -> ProveBlockRequest {
+    let session_id = derive_session_id(addr(0), 1);
+
     ProveBlockRequest {
         start_block_number: 15,
         number_of_blocks_to_prove: 5,
         sequence_window: None,
-        proof_type: ProofType::GenericZkvmClusterCompressed as i32,
-        session_id: None,
+        proof_type: ProofType::GenericZkvmClusterSnarkGroth16.into(),
+        session_id: Some(session_id),
+        prover_address: Some(format!("{:#x}", addr(0))),
     }
 }
 
@@ -190,8 +189,7 @@ async fn test_step_valid_game_skipped() {
     // The ZK prover should NOT be called since the game is valid.
     let zk = Arc::new(MockZkProofProvider {
         session_id: "should-not-be-called".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     let mut driver = test_driver(factory, verifier, l2, zk, default_tx_manager());
@@ -232,8 +230,7 @@ async fn test_step_validation_error_blocks_not_available() {
 
     let zk = Arc::new(MockZkProofProvider {
         session_id: "test-session".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     let mut driver = test_driver(factory, verifier, l2, zk, default_tx_manager());
@@ -251,6 +248,7 @@ async fn test_step_invalid_game_proof_succeeded() {
         session_id: "proof-123".to_string(),
         proof_status: Mutex::new(ProofJobStatus::Succeeded as i32),
         receipt: Mutex::new(vec![0xDE, 0xAD]),
+        ..Default::default()
     });
 
     let tx_hash = B256::repeat_byte(0xCC);
@@ -271,7 +269,7 @@ async fn test_step_invalid_game_proof_failed() {
     let zk = Arc::new(MockZkProofProvider {
         session_id: "proof-fail".to_string(),
         proof_status: Mutex::new(ProofJobStatus::Failed as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     // tx_manager should NOT be called (proof failed → no submission)
@@ -391,15 +389,15 @@ async fn test_step_scan_error_propagated() {
 
 #[tokio::test]
 async fn test_step_pending_proof_skips_prove_block() {
-    // First step: proof initiated (status=Created, not ready).
+    // First step: proof initiated (status=Unspecified via Default, not ready).
     // Second step: same game re-discovered → polls existing session,
     // proof succeeds, nullification submitted.
     let (l2, factory, verifier) = invalid_game_mocks();
 
     let zk = Arc::new(MockZkProofProvider {
         session_id: "pending-session".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
         receipt: Mutex::new(vec![0xBE, 0xEF]),
+        ..Default::default()
     });
 
     let tx_hash = B256::repeat_byte(0xDD);
@@ -407,7 +405,7 @@ async fn test_step_pending_proof_skips_prove_block() {
 
     let mut driver = test_driver(factory, verifier, l2, Arc::clone(&zk), tx_manager);
 
-    // Step 1: proof is initiated but not ready (Created) → session stored.
+    // Step 1: proof is initiated but not ready (Unspecified) → session stored.
     driver.step().await.unwrap();
     assert!(
         driver.pending_proofs.contains_key(&addr(0)),
@@ -437,6 +435,7 @@ async fn test_step_nullification_failure_preserves_proof() {
         session_id: "proof-ok".to_string(),
         proof_status: Mutex::new(ProofJobStatus::Succeeded as i32),
         receipt: Mutex::new(vec![0xDE, 0xAD]),
+        ..Default::default()
     });
 
     // First tx call fails (NonceTooLow), second succeeds.
@@ -539,6 +538,7 @@ async fn test_step_proof_retry_succeeds() {
         session_id: "retry-session".to_string(),
         proof_status: Mutex::new(ProofJobStatus::Failed as i32),
         receipt: Mutex::new(vec![0xBE, 0xEF]),
+        ..Default::default()
     });
 
     let tx_hash = B256::repeat_byte(0xDD);
@@ -575,7 +575,7 @@ async fn test_step_proof_exceeds_max_retries() {
     let zk = Arc::new(MockZkProofProvider {
         session_id: "fail-forever".to_string(),
         proof_status: Mutex::new(ProofJobStatus::Failed as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     let tx_manager = default_tx_manager();
@@ -653,8 +653,7 @@ async fn test_step_invalid_game_tee_fails_zk_fallback() {
     let tee = Arc::new(MockTeeProofProvider::failure("enclave unreachable"));
     let zk = Arc::new(MockZkProofProvider {
         session_id: "zk-fallback".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     let tx_manager = default_tx_manager();
@@ -690,11 +689,8 @@ async fn test_step_invalid_game_no_tee_prover_zk_only() {
 
     // This TEE provider should never be called since tee_prover is ZERO.
     let tee = Arc::new(MockTeeProofProvider::failure("should not be called"));
-    let zk = Arc::new(MockZkProofProvider {
-        session_id: "zk-direct".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
-    });
+    let zk =
+        Arc::new(MockZkProofProvider { session_id: "zk-direct".to_string(), ..Default::default() });
 
     let tx_manager = default_tx_manager();
     let mut driver = test_driver_with_tee(
@@ -729,8 +725,7 @@ async fn test_step_invalid_game_no_tee_provider_zk_only() {
 
     let zk = Arc::new(MockZkProofProvider {
         session_id: "zk-no-provider".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     let tx_manager = default_tx_manager();
@@ -757,6 +752,7 @@ async fn test_step_invalid_game_tee_fails_zk_succeeds() {
         session_id: "zk-after-tee-fail".to_string(),
         proof_status: Mutex::new(ProofJobStatus::Succeeded as i32),
         receipt: Mutex::new(vec![0xDE, 0xAD]),
+        ..Default::default()
     });
 
     let tx_hash = B256::repeat_byte(0xCC);
@@ -848,8 +844,7 @@ async fn test_step_invalid_game_tee_proof_succeeds() {
     // ZK prover should NOT be called since TEE proof succeeds.
     let zk = Arc::new(MockZkProofProvider {
         session_id: "should-not-be-called".to_string(),
-        proof_status: Mutex::new(ProofJobStatus::Created as i32),
-        receipt: Mutex::new(vec![]),
+        ..Default::default()
     });
 
     let mut driver = test_driver_with_tee(

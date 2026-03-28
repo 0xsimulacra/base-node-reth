@@ -55,15 +55,15 @@ base-zk-client.workspace = true
 # Protocol
 base-protocol.workspace = true
 
-# Enclave
-base-enclave.workspace = true
+# Proof
 base-proof-primitives = { workspace = true, features = ["serde", "std", "rpc-client"] }
 
 # JSON-RPC
 jsonrpsee.workspace = true
 
 # Metrics
-metrics.workspace = true
+base-metrics.workspace = true
+metrics = { workspace = true, optional = true }
 
 # TLS
 rustls = { workspace = true, features = ["ring"] }
@@ -88,4 +88,5 @@ tokio = { workspace = true, features = ["test-util"] }
 base-challenger = { path = ".", features = ["test-utils"] }
 
 [features]
+metrics = [ "base-metrics/metrics", "base-tx-manager/metrics", "dep:metrics" ]
 test-utils = [ "base-protocol/test-utils", "serde_json" ]

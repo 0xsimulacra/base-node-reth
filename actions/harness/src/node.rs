@@ -16,6 +16,9 @@ use base_consensus_derive::{
 };
 use base_consensus_engine::{EngineForkchoiceVersion, EngineNewPayloadVersion};
 use base_consensus_genesis::{RollupConfig, SystemConfig};
+use base_consensus_safedb::{
+    SafeDB, SafeDBError, SafeDBReader, SafeHeadListener, SafeHeadResponse,
+};
 use base_protocol::{BlockInfo, L1BlockInfoTx, L2BlockInfo, OpAttributesWithParent};
 
 use crate::{
@@ -113,6 +116,12 @@ pub enum NodeStepResult {
 /// [`ActionEngineClient`] (real EVM execution via revm) and
 /// [`TestGossipTransport`] (in-memory P2P gossip). Tests drive it step-by-step:
 ///
+/// # `SafeDB`
+///
+/// Each node opens a real [`SafeDB`] in a fresh temporary directory. This
+/// exercises the actual persistence layer (redb) rather than a mock, so tests
+/// catch encoding bugs and real read/write behaviour.
+///
 /// 1. Mine and push an L1 block: `h.mine_and_push(&chain)`.
 /// 2. Signal the new head: `node.act_l1_head_signal(block_info).await`.
 /// 3. Step the node: `node.step().await`.
@@ -166,6 +175,8 @@ pub struct TestRollupNode<P: Pipeline + SignalReceiver + Debug + Send = Verifier
     derived_l1_info_txs: Vec<(u64, L1BlockInfoTx)>,
     /// Shared rollup configuration used for Engine API version selection.
     rollup_config: Arc<RollupConfig>,
+    /// redb-backed safe head database for assertion-level testing.
+    safe_db: Arc<SafeDB>,
 }
 
 impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
@@ -180,13 +191,19 @@ impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
     /// [`initialize`]: TestRollupNode::initialize
     /// [`step`]: TestRollupNode::step
     /// [`run_until_idle`]: TestRollupNode::run_until_idle
-    pub const fn new(
+    pub fn new(
         pipeline: P,
         engine: ActionEngineClient,
         p2p: TestGossipTransport,
         safe_head: L2BlockInfo,
         rollup_config: Arc<RollupConfig>,
     ) -> Self {
+        let safedb_dir =
+            tempfile::TempDir::new().expect("TestRollupNode: failed to create safedb temp dir");
+        let safe_db = Arc::new(
+            SafeDB::open(safedb_dir.path().join("safedb"))
+                .expect("TestRollupNode: failed to open safedb"),
+        );
         Self {
             pipeline,
             engine,
@@ -201,6 +218,7 @@ impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
             derived_user_tx_counts: Vec::new(),
             derived_l1_info_txs: Vec::new(),
             rollup_config,
+            safe_db,
         }
     }
 
@@ -264,6 +282,19 @@ impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
     /// Return the current L1 origin the pipeline is positioned at.
     pub fn l1_origin(&self) -> Option<BlockInfo> {
         self.pipeline.origin()
+    }
+
+    /// Query the safe head recorded for a given L1 block number from the persistent `SafeDB`.
+    ///
+    /// Returns the safe head at or before `l1_block_num`, or a [`SafeDBError`]
+    /// if no entry exists (e.g. `NotFound` when no L2 block has been derived yet).
+    /// Call `.unwrap()` at the test site when success is expected, or match on
+    /// the error to assert specific error conditions.
+    pub async fn safe_head_at_l1(
+        &self,
+        l1_block_num: u64,
+    ) -> Result<SafeHeadResponse, SafeDBError> {
+        self.safe_db.safe_head_at_l1(l1_block_num).await
     }
 
     /// Return the total transaction counts for each derived L2 block.
@@ -377,6 +408,10 @@ impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
         self.derived_tx_counts.clear();
         self.derived_user_tx_counts.clear();
         self.derived_l1_info_txs.clear();
+        self.safe_db
+            .safe_head_reset(l2_safe_head)
+            .await
+            .expect("TestRollupNode: safe_db reset failed");
         // Replace the engine with a fresh instance: the stateful EVM must restart
         // from genesis to correctly re-execute the new fork's blocks.
         self.engine = ActionEngineClient::new(
@@ -706,6 +741,7 @@ impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
         };
 
         // Advance the safe head using the block hash returned by the engine.
+        let derived_from = attrs.derived_from;
         let l1_origin = self
             .l1_origin_from_attrs(&attrs)
             .or_else(|| attrs.derived_from.map(|b| BlockNumHash { hash: b.hash, number: b.number }))
@@ -723,6 +759,23 @@ impl<P: Pipeline + SignalReceiver + Debug + Send> TestRollupNode<P> {
             seq_num,
         };
         self.safe_head_history.push((self.safe_head, l1_origin.number));
+        // `attrs.derived_from` carries the full L1 BlockInfo set by the pipeline's
+        // AttributesQueueStage. It is always `Some` for attributes produced by the
+        // real derivation pipeline. The `None` fallback is defensive — it triggers
+        // only if attributes are injected directly without going through the pipeline
+        // (not currently done in these tests). In that case we fall back to
+        // `l1_origin` (hash + number only); parent_hash and timestamp are zeroed.
+        // SafeDB only stores hash and number, so the zeroed fields have no effect.
+        let l1_block_for_db = derived_from.unwrap_or(BlockInfo {
+            number: l1_origin.number,
+            hash: l1_origin.hash,
+            parent_hash: B256::ZERO, // unavailable without full L1 block
+            timestamp: 0,            // unavailable without full L1 block
+        });
+        self.safe_db
+            .safe_head_updated(self.safe_head, l1_block_for_db)
+            .await
+            .expect("TestRollupNode: safe_db update failed");
 
         // If derivation caught up to or past the unsafe head, align them.
         if self.safe_head.block_info.number >= self.unsafe_head.block_info.number {

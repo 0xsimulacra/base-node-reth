@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 # consensus
-base-macros.workspace = true
+base-metrics.workspace = true
 base-protocol.workspace = true
 base-consensus-derive.workspace = true
 base-consensus-genesis.workspace = true
@@ -52,7 +52,11 @@ metrics = { workspace = true, optional = true }
 
 [features]
 default = []
-metrics = [ "base-consensus-derive/metrics", "dep:metrics" ]
+metrics = [
+	"base-consensus-derive/metrics",
+	"base-metrics/metrics",
+	"dep:metrics",
+]
 
 [dev-dependencies]
 tokio.workspace = true

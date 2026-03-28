@@ -38,9 +38,7 @@ mod admin;
 pub use admin::AdminState;
 
 mod metrics;
-pub use metrics::{
-    ACCOUNT_BALANCE_WEI, INFO, L2_OUTPUT_PROPOSALS_TOTAL, LABEL_VERSION, UP, record_startup_metrics,
-};
+pub use metrics::Metrics;
 
 mod service;
 pub use service::run;

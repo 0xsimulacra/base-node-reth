@@ -199,7 +199,7 @@ impl Channel {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::{
         string::{String, ToString},
         vec,

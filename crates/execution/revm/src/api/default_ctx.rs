@@ -27,7 +27,7 @@ impl DefaultOp for OpContext<EmptyDB> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use revm::{
         ExecuteEvm,
         inspector::{InspectEvm, NoOpInspector},

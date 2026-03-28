@@ -12,8 +12,6 @@ workspace = true
 
 [dependencies]
 # Alloy
-alloy-contract.workspace = true
-alloy-provider.workspace = true
 alloy-sol-types.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
@@ -25,6 +23,9 @@ aws-sdk-elasticloadbalancingv2.workspace = true
 # Crypto
 k256.workspace = true
 rand.workspace = true
+
+# Contracts
+base-proof-contracts.workspace = true
 
 # Proving
 base-proof-tee-nitro-attestation-prover.workspace = true
@@ -45,7 +46,8 @@ tokio = { workspace = true, features = ["net", "time", "macros"] }
 thiserror.workspace = true
 
 # Metrics
-metrics.workspace = true
+base-metrics.workspace = true
+metrics = { workspace = true, optional = true }
 
 # Tracing
 tracing.workspace = true
@@ -60,4 +62,7 @@ alloy-consensus.workspace = true
 alloy-rpc-types-eth.workspace = true
 k256 = { workspace = true, features = ["ecdsa"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
+
+[features]
+metrics = [ "base-metrics/metrics", "base-tx-manager/metrics", "dep:metrics" ]
 

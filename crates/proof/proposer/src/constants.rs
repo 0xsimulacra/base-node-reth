@@ -13,16 +13,6 @@ pub const PROVER_TIMEOUT: Duration = Duration::from_mins(30);
 /// This is `uint32.max` per the `DisputeGameFactory` contract.
 pub const NO_PARENT_INDEX: u32 = 0xFFFF_FFFF;
 
-/// Maximum number of games to scan backwards when recovering parent game state
-/// on startup.
-///
-/// IMPORTANT: This value MUST always be greater than the maximum number of pending
-/// (unresolved) dispute games that could exist at any given time. Since games take
-/// 1-7 days to resolve depending on proof type (7 days TEE-only, 1 day TEE+ZK),
-/// a significant backlog can build up during normal operation.
-///
-/// The default of 5000 is suitable for development and testnet environments.
-/// For production deployments with high game volume, this should be increased
-/// further to ensure the proposer can always find and resume from its most recent
-/// game after a restart.
-pub const MAX_GAME_RECOVERY_LOOKBACK: u64 = 5000;
+/// Maximum number of concurrent `game_at_index` RPC calls during the recovery
+/// scan.
+pub const RECOVERY_SCAN_CONCURRENCY: usize = 32;

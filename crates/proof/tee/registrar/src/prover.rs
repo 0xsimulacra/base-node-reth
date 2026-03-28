@@ -1,68 +1,75 @@
 //! JSON-RPC client for polling prover instance signer endpoints.
 
-use std::time::Duration;
+use std::{collections::HashMap, sync::Mutex, time::Duration};
 
 use alloy_primitives::{Address, keccak256};
+use async_trait::async_trait;
 use base_proof_primitives::EnclaveApiClient;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use tracing::debug;
+use url::Url;
 
-use crate::{RegistrarError, Result};
+use crate::{RegistrarError, Result, SignerClient};
 
-/// JSON-RPC client for a single prover instance's signer endpoints.
+/// JSON-RPC client for prover instance signer endpoints.
 ///
-/// Wraps a `jsonrpsee` HTTP client configured for the prover's endpoint.
-/// Calls `enclave_signerPublicKey` and `enclave_signerAttestation` to obtain
-/// the signer's public key and Nitro attestation document, then derives the
-/// Ethereum address from the uncompressed public key.
-#[derive(Debug)]
+/// Implements [`SignerClient`] by making HTTP JSON-RPC calls to the prover's
+/// `enclave_signerPublicKey` and `enclave_signerAttestation` endpoints.
+///
+/// HTTP clients are cached per endpoint so that TCP connections are reused
+/// across poll cycles. The `timeout` is configured once at construction and
+/// applied to all requests.
+///
+/// Also provides [`derive_address`](Self::derive_address), a pure-crypto helper
+/// that derives an Ethereum address from a SEC1-encoded public key.
 pub struct ProverClient {
-    /// The raw endpoint string (host:port, without scheme).
-    endpoint: String,
-    /// The underlying `jsonrpsee` HTTP client.
-    inner: HttpClient,
+    /// Timeout applied to all JSON-RPC requests.
+    timeout: Duration,
+    /// Cached HTTP clients keyed by endpoint URL.
+    ///
+    /// Note: this cache is append-only — entries are never evicted. With
+    /// ephemeral instances (e.g. ASG scale events assigning new IPs), stale
+    /// entries accumulate over the process lifetime. The fleet is small enough
+    /// that this is not a practical concern; if it ever becomes one, a
+    /// `retain_active` method could prune entries not in the current discovered
+    /// set after each poll cycle.
+    clients: Mutex<HashMap<Url, HttpClient>>,
+}
+
+impl std::fmt::Debug for ProverClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProverClient")
+            .field("timeout", &self.timeout)
+            .field("cached_clients", &self.clients.lock().map(|c| c.len()).unwrap_or(0))
+            .finish()
+    }
 }
 
 impl ProverClient {
-    /// Creates a new client for the prover at the given endpoint.
+    /// Creates a new client with the given request timeout.
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout, clients: Mutex::new(HashMap::new()) }
+    }
+
+    /// Returns a cached `jsonrpsee` HTTP client for `endpoint`, building one
+    /// on first access.
     ///
-    /// `endpoint` is a `host:port` string (e.g. `"10.0.1.5:8000"`).
-    /// An `http://` scheme is prepended automatically.
-    pub fn new(endpoint: &str, timeout: Duration) -> Result<Self> {
-        let url = format!("http://{endpoint}");
-        let inner =
-            HttpClientBuilder::default().request_timeout(timeout).build(&url).map_err(|e| {
-                RegistrarError::ProverClient { instance: endpoint.to_string(), source: Box::new(e) }
+    /// The URL must include a scheme (e.g. `http://10.0.1.5:8000`).
+    fn get_or_build_client(&self, endpoint: &Url) -> Result<HttpClient> {
+        let mut cache = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(client) = cache.get(endpoint) {
+            return Ok(client.clone());
+        }
+        let client = HttpClientBuilder::default()
+            .request_timeout(self.timeout)
+            .build(endpoint.as_str())
+            .map_err(|e| RegistrarError::ProverClient {
+                instance: endpoint.to_string(),
+                source: Box::new(e),
             })?;
-        Ok(Self { endpoint: endpoint.to_string(), inner })
-    }
-
-    /// Fetches the signer's 65-byte uncompressed public key via `enclave_signerPublicKey`.
-    ///
-    /// Uses the generated [`EnclaveApiClient`] trait from `base-proof-primitives`,
-    /// which ensures the method name and return type (`Vec<u8>`) match the server's
-    /// `EnclaveApi` trait at compile time.
-    pub async fn signer_public_key(&self) -> Result<Vec<u8>> {
-        debug!(endpoint = %self.endpoint, "fetching signer public key");
-        self.inner.signer_public_key().await.map_err(|e| RegistrarError::ProverClient {
-            instance: self.endpoint.clone(),
-            source: Box::new(e),
-        })
-    }
-
-    /// Fetches the raw Nitro attestation document via `enclave_signerAttestation`.
-    ///
-    /// Optional `user_data` and `nonce` bind the attestation to a specific request.
-    pub async fn signer_attestation(
-        &self,
-        user_data: Option<Vec<u8>>,
-        nonce: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>> {
-        debug!(endpoint = %self.endpoint, "fetching signer attestation");
-        self.inner.signer_attestation(user_data, nonce).await.map_err(|e| {
-            RegistrarError::ProverClient { instance: self.endpoint.clone(), source: Box::new(e) }
-        })
+        cache.insert(endpoint.clone(), client.clone());
+        Ok(client)
     }
 
     /// Derives an Ethereum [`Address`] from a SEC1-encoded public key.
@@ -78,6 +85,31 @@ impl ProverClient {
         let uncompressed = key.to_encoded_point(false);
         let hash = keccak256(&uncompressed.as_bytes()[1..]);
         Ok(Address::from_slice(&hash[12..]))
+    }
+}
+
+#[async_trait]
+impl SignerClient for ProverClient {
+    async fn signer_public_key(&self, endpoint: &Url) -> Result<Vec<Vec<u8>>> {
+        debug!(endpoint = %endpoint, "fetching signer public keys");
+        let client = self.get_or_build_client(endpoint)?;
+        client.signer_public_key().await.map_err(|e| RegistrarError::ProverClient {
+            instance: endpoint.to_string(),
+            source: Box::new(e),
+        })
+    }
+
+    async fn signer_attestation(
+        &self,
+        endpoint: &Url,
+        user_data: Option<Vec<u8>>,
+        nonce: Option<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>> {
+        debug!(endpoint = %endpoint, "fetching signer attestations");
+        let client = self.get_or_build_client(endpoint)?;
+        client.signer_attestation(user_data, nonce).await.map_err(|e| {
+            RegistrarError::ProverClient { instance: endpoint.to_string(), source: Box::new(e) }
+        })
     }
 }
 

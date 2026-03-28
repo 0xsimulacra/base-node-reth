@@ -385,7 +385,7 @@ impl L1BlockInfoTx {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::{string::ToString, vec::Vec};
 
     use alloy_primitives::{address, b256};

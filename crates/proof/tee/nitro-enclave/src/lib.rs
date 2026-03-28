@@ -1,12 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-extern crate alloc;
-
 mod error;
 pub use error::{AttestationError, CryptoError, NitroError, NsmError, ProposalError, Result};
 
 mod oracle;
-pub use base_proof_preimage::PreimageKey;
 pub use oracle::Oracle;
 
 mod transport;
@@ -14,7 +11,8 @@ pub use transport::{Frame, TransportError, TransportResult};
 
 mod types;
 pub use types::{
-    ECDSA_SIGNATURE_LENGTH, PROOF_JOURNAL_BASE_LENGTH, ProofJournal, Proposal, TeeProofResult,
+    BlockId, ECDSA_SIGNATURE_LENGTH, Genesis, GenesisSystemConfig, PROOF_JOURNAL_BASE_LENGTH,
+    PerChainConfig, ProofJournal, Proposal, TeeProofResult,
 };
 
 mod attestation;

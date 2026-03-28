@@ -145,7 +145,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use alloy_primitives::{B256, Bytes, U256};
     use async_trait::async_trait;
@@ -200,16 +200,21 @@ mod tests {
         let l1 = Arc::new(MockL1 { latest_block_number: 1000 });
         let l2 = Arc::new(MockL2 { block_not_found: true, canonical_hash: None });
         let prover: Arc<dyn ProverClient> = Arc::new(InstantMockProver);
-        let rollup = Arc::new(MockRollupClient { sync_status: test_sync_status(200, B256::ZERO) });
+        let rollup = Arc::new(MockRollupClient {
+            sync_status: test_sync_status(200, B256::ZERO),
+            output_roots: HashMap::new(),
+        });
         let anchor_registry =
             Arc::new(MockAnchorStateRegistry { anchor_root: test_anchor_root(0) });
-        let factory = Arc::new(MockDisputeGameFactory { game_count: 0 });
+        let factory = Arc::new(MockDisputeGameFactory::with_count(0));
 
         let pipeline = ProvingPipeline::new(
             PipelineConfig {
                 max_parallel_proofs: 2,
+                max_game_recovery_lookback: 5000,
                 max_retries: 3,
                 v1_hardfork_timestamp: None,
+                tee_prover_registry_address: None,
                 driver: DriverConfig {
                     poll_interval: Duration::from_secs(3600),
                     block_interval: 512,
@@ -223,7 +228,7 @@ mod tests {
             rollup,
             anchor_registry,
             factory,
-            Arc::new(MockAggregateVerifier),
+            Arc::new(MockAggregateVerifier::empty()),
             Arc::new(MockOutputProposer),
             global_cancel.child_token(),
         );

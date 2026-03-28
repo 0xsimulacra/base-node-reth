@@ -3,11 +3,8 @@ use base_consensus_derive::AttributesBuilder;
 use base_consensus_rpc::SequencerAdminAPIError;
 use tokio::sync::oneshot;
 
-use super::{
-    SequencerActor,
-    metrics::{inc_start_rejected, inc_stop_deferred},
-};
-use crate::{Conductor, OriginSelector, SequencerEngineClient, UnsafePayloadGossipClient};
+use super::{SequencerActor, build::UnsealedPayloadHandle};
+use crate::{Conductor, Metrics, OriginSelector, SequencerEngineClient, UnsafePayloadGossipClient};
 
 /// The query types to the sequencer actor for the admin api.
 #[derive(Debug)]
@@ -54,7 +51,11 @@ where
 {
     /// Handles the provided [`SequencerAdminQuery`], sending the response via the provided sender.
     /// This function is used to decouple admin API logic from the response mechanism (channels).
-    pub(super) async fn handle_admin_query(&mut self, query: SequencerAdminQuery) {
+    pub(super) async fn handle_admin_query(
+        &mut self,
+        next_payload: &mut Option<UnsealedPayloadHandle>,
+        query: SequencerAdminQuery,
+    ) {
         match query {
             SequencerAdminQuery::SequencerActive(tx) => {
                 if tx.send(self.is_sequencer_active().await).is_err() {
@@ -67,7 +68,7 @@ where
                 }
             }
             SequencerAdminQuery::StopSequencer(tx) => {
-                self.stop_sequencer(tx).await;
+                self.stop_sequencer(next_payload, tx).await;
             }
             SequencerAdminQuery::ConductorEnabled(tx) => {
                 if tx.send(self.is_conductor_enabled().await).is_err() {
@@ -138,12 +139,12 @@ where
                 Ok(true) => {}
                 Ok(false) => {
                     warn!(target: "sequencer", "Not the conductor leader, refusing to start sequencer");
-                    inc_start_rejected("not_leader");
+                    Metrics::sequencer_start_rejected_total("not_leader").increment(1);
                     return Err(SequencerAdminAPIError::NotLeader);
                 }
                 Err(err) => {
                     error!(target: "sequencer", error = %err, "Failed to check conductor leadership");
-                    inc_start_rejected("leadership_check_failed");
+                    Metrics::sequencer_start_rejected_total("leadership_check_failed").increment(1);
                     return Err(SequencerAdminAPIError::RequestError(err.to_string()));
                 }
             }
@@ -178,17 +179,25 @@ where
 
     /// Stops the sequencer. If a seal pipeline is in-flight, the response is deferred
     /// until the pipeline completes so the returned hash reflects the fully inserted head.
+    ///
+    /// Any pre-built payload and stashed `next_build_parent` are discarded so that a subsequent
+    /// restart always builds on a fresh, accurate head rather than a potentially stale one.
     pub(super) async fn stop_sequencer(
         &mut self,
+        next_payload: &mut Option<UnsealedPayloadHandle>,
         tx: oneshot::Sender<Result<B256, SequencerAdminAPIError>>,
     ) {
         info!(target: "sequencer", "Stopping sequencer");
         self.is_active = false;
+        // Discard any pre-built payload and stashed parent so a subsequent start_sequencer
+        // always builds on a fresh, accurate head rather than a potentially stale one.
+        next_payload.take();
+        self.next_build_parent = None;
         self.update_metrics();
 
         if self.sealer.is_some() {
             info!(target: "sequencer", "Seal pipeline in-flight, deferring stop response");
-            inc_stop_deferred();
+            Metrics::sequencer_stop_deferred_total().increment(1);
             self.pending_stop = Some(tx);
         } else {
             let result = self.resolve_stop_head().await;

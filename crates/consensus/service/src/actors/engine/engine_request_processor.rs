@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use alloy_eips::BlockNumberOrTag;
 use base_alloy_rpc_types_engine::OpExecutionPayloadEnvelope;
 use base_consensus_derive::{ResetSignal, Signal};
 use base_consensus_engine::{
-    BuildTask, ConsolidateInput, ConsolidateTask, Engine, EngineClient, EngineTask,
-    EngineTaskError, EngineTaskErrorSeverity, FinalizeTask, GetPayloadTask, InsertTask, SealTask,
+    BuildTask, ConsolidateInput, ConsolidateTask, Engine, EngineClient, EngineSyncStateUpdate,
+    EngineTask, EngineTaskError, EngineTaskErrorSeverity, FinalizeTask, GetPayloadTask, InsertTask,
+    SealTask,
 };
 use base_consensus_genesis::RollupConfig;
 use base_protocol::L2BlockInfo;
@@ -240,30 +242,136 @@ where
         mut request_channel: mpsc::Receiver<EngineProcessingRequest>,
     ) -> JoinHandle<Result<(), EngineError>> {
         tokio::spawn(async move {
-            // Bootstrap: pre-populate the engine watch channels by performing an initial reset.
-            // Without this, external callers (op_syncStatus, admin_startSequencer) would always
-            // observe a zero unsafe head until the first engine task completes. On nodes where
-            // the sequencer starts stopped (e.g. devnet), no tasks arrive until after
-            // admin_startSequencer is called — creating a deadlock.
+            // Bootstrap: pre-populate the unsafe_head_tx watch channel so that external callers
+            // (admin_startSequencer, op_syncStatus) never observe a zero hash.
             //
-            // We call engine.reset() directly (bypassing EngineProcessor::reset() and
-            // mark_el_sync_complete_and_notify_derivation_actor) so that we do NOT start
-            // derivation here. The el_sync_finished / el_sync_complete gate is preserved:
-            // if the EL responds with Valid, el_sync_finished is set to true and the first
-            // drain() iteration will trigger mark_el_sync_complete_and_notify_derivation_actor
-            // normally. If the EL is still syncing (Syncing response), el_sync_finished stays
-            // false and derivation waits — exactly the same as before.
-            match self.engine.reset(Arc::clone(&self.client), Arc::clone(&self.rollup)).await {
-                Ok(_) => {
-                    if let Some(unsafe_head_tx) = self.unsafe_head_tx.as_ref() {
-                        let new_head = self.engine.state().sync_state.unsafe_head();
-                        unsafe_head_tx.send_if_modified(|val| {
-                            (*val != new_head).then(|| *val = new_head).is_some()
-                        });
+            // We gate on whether reth's current head is at the rollup genesis:
+            //
+            //   • At genesis — reth has no snap-synced canonical chain, so engine.reset() is
+            //     safe: it FCUs to the genesis block and sets up derivation normally. The
+            //     el_sync_finished / el_sync_complete gate is preserved as before.
+            //
+            //   • Beyond genesis — reth already has a canonical chain (e.g. after snap sync).
+            //     Sending a FCU to the sync-start block would reorg reth below its state pivot,
+            //     causing every subsequent engine_newPayload to return Syncing and the node to
+            //     enter an infinite reset loop. Instead we seed the watch channel from reth's
+            //     current head directly; derivation will issue its own FCU once the first Reset
+            //     task arrives.
+            let reth_head = self.client.l2_block_info_by_label(BlockNumberOrTag::Latest).await;
+            let at_genesis = match &reth_head {
+                Ok(Some(head)) => head.block_info.hash == self.rollup.genesis.l2.hash,
+                Ok(None) => true,
+                Err(err) => {
+                    warn!(target: "engine", ?err, "Bootstrap: failed to query reth head, falling back to reset");
+                    true
+                }
+            };
+
+            if at_genesis {
+                match self.engine.reset(Arc::clone(&self.client), Arc::clone(&self.rollup)).await {
+                    Ok(_) => {
+                        if let Some(unsafe_head_tx) = self.unsafe_head_tx.as_ref() {
+                            let new_head = self.engine.state().sync_state.unsafe_head();
+                            unsafe_head_tx.send_if_modified(|val| {
+                                (*val != new_head).then(|| *val = new_head).is_some()
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        warn!(target: "engine", ?err, "Engine startup bootstrap failed; will initialize on first task");
                     }
                 }
-                Err(err) => {
-                    warn!(target: "engine", ?err, "Engine startup bootstrap failed; will initialize on first task");
+            } else if let Ok(Some(head)) = reth_head {
+                //   Beyond genesis — reth already has a canonical chain (e.g. after snap sync).
+                //   Query safe and finalized heads optimistically; if unavailable (chain just
+                //   started, nothing finalized yet) fall back to default and let derivation fill
+                //   them in once the first task drains.
+                let safe = self
+                    .client
+                    .l2_block_info_by_label(BlockNumberOrTag::Safe)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let finalized = self
+                    .client
+                    .l2_block_info_by_label(BlockNumberOrTag::Finalized)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+
+                // Probe the EL with a FCU pointing to reth's own current canonical heads.
+                // This distinguishes two cases:
+                //
+                //   • Valid   — reth's chain is complete (post snap-sync or normal restart).
+                //               el_sync_finished is set to true immediately, so any incoming
+                //               Reset request (e.g. from schedule_initial_reset) is not
+                //               blocked by the ELSyncing guard.
+                //
+                //   • Syncing — reth is still snap-syncing. el_sync_finished stays false.
+                //               Behaviour is identical to the pre-fix path; the sequencer's
+                //               schedule_initial_reset loop keeps retrying until the EL is
+                //               ready (e.g. when a P2P unsafe block triggers InsertTask).
+                //
+                // IMPORTANT: the probe must be called before seed_state. SynchronizeTask
+                // short-circuits (skips the FCU) when state.sync_state already equals
+                // new_sync_state. Calling seed_state first would cause the probe to silently
+                // do nothing, leaving el_sync_finished = false permanently.
+                let probe_update = EngineSyncStateUpdate {
+                    unsafe_head: Some(head),
+                    cross_unsafe_head: Some(head),
+                    local_safe_head: Some(safe),
+                    safe_head: Some(safe),
+                    finalized_head: Some(finalized),
+                };
+                let el_confirmed = match self
+                    .engine
+                    .probe_el_sync(Arc::clone(&self.client), Arc::clone(&self.rollup), probe_update)
+                    .await
+                {
+                    Ok(confirmed) => confirmed,
+                    Err(err) => {
+                        warn!(
+                            target: "engine",
+                            error = ?err,
+                            "Bootstrap: FCU probe failed, treating EL as syncing"
+                        );
+                        false
+                    }
+                };
+
+                if !el_confirmed {
+                    // Snap-sync still in progress or probe failed. Seed the watch channel
+                    // so op_syncStatus never observes zeros during the bootstrap window,
+                    // but leave el_sync_finished = false so Reset requests are deferred
+                    // until the EL finishes syncing.
+                    self.engine.seed_state(probe_update);
+                }
+
+                if let Some(unsafe_head_tx) = self.unsafe_head_tx.as_ref() {
+                    let new_head = self.engine.state().sync_state.unsafe_head();
+                    unsafe_head_tx.send_if_modified(|val| {
+                        (*val != new_head).then(|| *val = new_head).is_some()
+                    });
+                }
+
+                if el_confirmed {
+                    info!(
+                        target: "engine",
+                        unsafe_head = %head.block_info.number,
+                        safe_head = %safe.block_info.number,
+                        finalized_head = %finalized.block_info.number,
+                        "Bootstrap: EL confirmed canonical chain, el_sync_finished = true"
+                    );
+                } else {
+                    info!(
+                        target: "engine",
+                        unsafe_head = %head.block_info.number,
+                        safe_head = %safe.block_info.number,
+                        finalized_head = %finalized.block_info.number,
+                        "Bootstrap: EL sync pending (snap-sync in progress), seeded engine state from reth"
+                    );
                 }
             }
 
@@ -342,6 +450,23 @@ where
                         self.engine.enqueue(task);
                     }
                     EngineProcessingRequest::Reset(reset_request) => {
+                        // Do not reset the engine while the EL is still syncing. A Reset sends a
+                        // forkchoice_updated to reth pointing at the sync-start block, which will
+                        // return Valid and cause reth to set that stale block as canonical,
+                        // aborting any in-progress snap sync. Defer until el_sync_finished=true.
+                        if !self.engine.state().el_sync_finished {
+                            warn!(target: "engine", "Deferring engine reset: EL sync not yet complete");
+                            if reset_request
+                                .result_tx
+                                .send(Err(EngineClientError::ELSyncing))
+                                .await
+                                .is_err()
+                            {
+                                warn!(target: "engine", "Sending ELSyncing response failed");
+                            }
+                            continue;
+                        }
+
                         warn!(target: "engine", "Received reset request");
 
                         let reset_res = self.reset().await;
@@ -374,5 +499,170 @@ where
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use alloy_eips::BlockNumberOrTag;
+    use alloy_rpc_types_engine::{ForkchoiceUpdated, PayloadStatus, PayloadStatusEnum};
+    use base_consensus_engine::{
+        Engine, EngineState,
+        test_utils::{test_block_info, test_engine_client_builder},
+    };
+    use base_consensus_genesis::RollupConfig;
+    use tokio::sync::{mpsc, watch};
+
+    use crate::{
+        EngineClientError, EngineProcessingRequest, EngineProcessor, EngineRequestReceiver,
+        ResetRequest, actors::engine::client::MockEngineDerivationClient,
+    };
+
+    fn valid_fcu() -> ForkchoiceUpdated {
+        ForkchoiceUpdated {
+            payload_status: PayloadStatus {
+                status: PayloadStatusEnum::Valid,
+                latest_valid_hash: None,
+            },
+            payload_id: None,
+        }
+    }
+
+    fn syncing_fcu() -> ForkchoiceUpdated {
+        ForkchoiceUpdated {
+            payload_status: PayloadStatus {
+                status: PayloadStatusEnum::Syncing,
+                latest_valid_hash: None,
+            },
+            payload_id: None,
+        }
+    }
+
+    /// Verifies that when reth is beyond genesis and responds Valid to the bootstrap FCU probe,
+    /// `el_sync_finished` is set immediately so that the sequencer's `schedule_initial_reset`
+    /// loop is not permanently blocked by the `ELSyncing` guard.
+    ///
+    /// This is the fix for the leadership-transfer deadlock: previously the "beyond genesis"
+    /// bootstrap path only called `seed_state` (no FCU), leaving `el_sync_finished = false`
+    /// forever when no P2P unsafe blocks arrived.
+    #[tokio::test]
+    async fn bootstrap_beyond_genesis_valid_fcu_sets_el_sync_finished() {
+        let head = test_block_info(100);
+        let safe = test_block_info(90);
+        let finalized = test_block_info(80);
+
+        let client = Arc::new(
+            test_engine_client_builder()
+                .with_block_info_by_tag(BlockNumberOrTag::Latest, head)
+                .with_block_info_by_tag(BlockNumberOrTag::Safe, safe)
+                .with_block_info_by_tag(BlockNumberOrTag::Finalized, finalized)
+                .with_fork_choice_updated_v3_response(valid_fcu())
+                .build(),
+        );
+
+        let mut mock_derivation = MockEngineDerivationClient::new();
+        // Called by send_derivation_actor_safe_head_if_updated in the first drain() loop.
+        mock_derivation.expect_send_new_engine_safe_head().returning(|_| Ok(()));
+        // Called by mark_el_sync_complete_and_notify_derivation_actor after el_sync_finished
+        // becomes true; finalized_head is non-default so reset() is skipped.
+        mock_derivation.expect_notify_sync_completed().returning(|_| Ok(()));
+
+        let (state_tx, state_rx) = watch::channel(EngineState::default());
+        let (queue_tx, _) = watch::channel(0usize);
+        let engine = Engine::new(EngineState::default(), state_tx, queue_tx);
+
+        let processor = EngineProcessor::new(
+            Arc::clone(&client),
+            Arc::new(RollupConfig::default()),
+            mock_derivation,
+            engine,
+            None, // validator mode — no unsafe_head_tx needed
+        );
+
+        let (req_tx, req_rx) = mpsc::channel(8);
+        let handle = processor.start(req_rx);
+
+        // probe_el_sync calls state_sender.send_replace with el_sync_finished=true during
+        // the bootstrap, before the main loop starts. wait_for resolves as soon as the watch
+        // channel carries a value satisfying the predicate.
+        state_rx
+            .clone()
+            .wait_for(|s| s.el_sync_finished)
+            .await
+            .expect("state channel closed before el_sync_finished was set");
+
+        // Drop sender to cleanly terminate the spawned task.
+        drop(req_tx);
+        let result = handle.await.expect("task panicked");
+        assert!(
+            matches!(result, Err(crate::EngineError::ChannelClosed)),
+            "expected ChannelClosed on clean shutdown, got {result:?}"
+        );
+    }
+
+    /// Verifies that when reth is mid-snap-sync (FCU returns Syncing), `el_sync_finished`
+    /// stays false and a subsequent Reset request is correctly deferred with `ELSyncing`.
+    ///
+    /// This is the pre-existing snap-sync-in-progress path; the fix must not regress it.
+    #[tokio::test]
+    async fn bootstrap_beyond_genesis_syncing_fcu_defers_reset() {
+        let head = test_block_info(100);
+        let safe = test_block_info(90);
+        let finalized = test_block_info(80);
+
+        let client = Arc::new(
+            test_engine_client_builder()
+                .with_block_info_by_tag(BlockNumberOrTag::Latest, head)
+                .with_block_info_by_tag(BlockNumberOrTag::Safe, safe)
+                .with_block_info_by_tag(BlockNumberOrTag::Finalized, finalized)
+                .with_fork_choice_updated_v3_response(syncing_fcu())
+                .build(),
+        );
+
+        let mut mock_derivation = MockEngineDerivationClient::new();
+        // Called by send_derivation_actor_safe_head_if_updated after seed_state seeds safe_head.
+        mock_derivation.expect_send_new_engine_safe_head().returning(|_| Ok(()));
+        // notify_sync_completed must NOT be called: el_sync_finished is still false.
+
+        let (state_tx, state_rx) = watch::channel(EngineState::default());
+        let (queue_tx, _) = watch::channel(0usize);
+        let engine = Engine::new(EngineState::default(), state_tx, queue_tx);
+
+        let processor = EngineProcessor::new(
+            Arc::clone(&client),
+            Arc::new(RollupConfig::default()),
+            mock_derivation,
+            engine,
+            None,
+        );
+
+        let (req_tx, req_rx) = mpsc::channel(8);
+        let handle = processor.start(req_rx);
+
+        // In the Syncing path, seed_state sets unsafe_head to reth's reported latest block.
+        // Wait for that state to be published before sending the Reset.
+        state_rx
+            .clone()
+            .wait_for(|s| s.sync_state.unsafe_head().block_info.number > 0)
+            .await
+            .expect("state channel closed before seed_state published");
+
+        // Send a Reset — the ELSyncing guard must fire and return ELSyncing.
+        let (result_tx, mut result_rx) = mpsc::channel(1);
+        req_tx
+            .send(EngineProcessingRequest::Reset(Box::new(ResetRequest { result_tx })))
+            .await
+            .expect("failed to send reset request");
+
+        let response = result_rx.recv().await.expect("response channel closed");
+        assert!(
+            matches!(response, Err(EngineClientError::ELSyncing)),
+            "expected ELSyncing while snap-sync is in progress, got {response:?}"
+        );
+
+        drop(req_tx);
+        let _ = handle.await;
     }
 }
