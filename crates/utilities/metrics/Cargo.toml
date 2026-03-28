@@ -21,6 +21,5 @@ ordered-float = { workspace = true }
 metrics-util = { workspace = true, features = ["debugging"] }
 
 [features]
-default = []
 std = []
 metrics = [ "dep:metrics", "std" ]
