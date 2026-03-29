@@ -137,7 +137,7 @@ macro_rules! __define_metrics_impl {
 
         #[cfg(feature = "metrics")]
         const _: () = {
-            #[$crate::__private_ctor::ctor(crate_path = $crate::__private_ctor)]
+            #[$crate::__private_ctor::ctor(anonymous, crate_path = $crate::__private_ctor)]
             fn register_metrics_initializer() {
                 $crate::register_initializer($name::init);
             }
