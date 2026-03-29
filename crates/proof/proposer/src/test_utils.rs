@@ -207,6 +207,9 @@ impl AggregateVerifierClient for MockAggregateVerifier {
     async fn starting_block_number(&self, _: Address) -> Result<u64, ContractError> {
         Ok(0)
     }
+    async fn l1_head(&self, _: Address) -> Result<B256, ContractError> {
+        Ok(B256::ZERO)
+    }
     async fn read_block_interval(&self, _: Address) -> Result<u64, ContractError> {
         Ok(512)
     }
@@ -215,6 +218,9 @@ impl AggregateVerifierClient for MockAggregateVerifier {
     }
     async fn intermediate_output_roots(&self, _: Address) -> Result<Vec<B256>, ContractError> {
         Ok(vec![])
+    }
+    async fn countered_index(&self, _: Address) -> Result<u64, ContractError> {
+        Ok(0)
     }
 }
 
