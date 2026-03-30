@@ -4761,6 +4761,7 @@ dependencies = [
  "base-proof-primitives",
  "base-proof-tee-nitro-attestation-prover",
  "base-tx-manager",
+ "futures",
  "hex-literal 1.1.0",
  "jsonrpsee",
  "k256",
