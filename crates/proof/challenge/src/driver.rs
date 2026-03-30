@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::{
     CandidateGame, ChallengeSubmitter, ChallengerMetrics, DisputeIntent, GameCategory, GameScanner,
     IntermediateValidationParams, L1HeadProvider, OutputValidator, PendingProof, PendingProofs,
-    ProofPhase, ProofUpdate, ValidatorError,
+    ProofKind, ProofPhase, ProofUpdate, ValidatorError,
 };
 
 /// Configuration for the challenger [`Driver`].
@@ -347,16 +347,24 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
         // ZK challenge was legitimate.
         if !result.is_valid {
             match result.invalid_intermediate_index {
-                Some(first_invalid)
-                    if u64::try_from(first_invalid).unwrap_or(u64::MAX) <= challenged_index =>
-                {
-                    debug!(
-                        game = %game_address,
-                        challenged_index = challenged_index,
-                        first_invalid_index = first_invalid,
-                        "ZK challenge is legitimate (original root was wrong), skipping"
-                    );
-                    return Ok(());
+                Some(first_invalid) => {
+                    let first_invalid_u64 = u64::try_from(first_invalid).map_err(|_| {
+                        eyre::eyre!(
+                            "first invalid intermediate index {first_invalid} overflows u64"
+                        )
+                    })?;
+                    if first_invalid_u64 <= challenged_index {
+                        debug!(
+                            game = %game_address,
+                            challenged_index = challenged_index,
+                            first_invalid_index = first_invalid,
+                            "ZK challenge is legitimate (original root was wrong), skipping"
+                        );
+                        return Ok(());
+                    }
+                    // first_invalid > challenged_index: all roots up to and
+                    // including the challenged index are valid, so the ZK
+                    // challenge was fraudulent. Fall through to nullify.
                 }
                 None => {
                     // Validation says invalid but no specific index was identified.
@@ -368,11 +376,6 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
                         "validation returned invalid without specific index, skipping"
                     );
                     return Ok(());
-                }
-                Some(_) => {
-                    // first_invalid > challenged_index: all roots up to and
-                    // including the challenged index are valid, so the ZK
-                    // challenge was fraudulent. Fall through to nullify.
                 }
             }
         }
@@ -544,6 +547,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
             proof_type: ProofType::GenericZkvmClusterSnarkGroth16.into(),
             session_id: Some(session_id),
             prover_address: Some(prover_address),
+            l1_head: Some(format!("{:#x}", candidate.l1_head)),
         };
 
         let prove_response = self.zk_prover.prove_block(request.clone()).await?;
@@ -586,7 +590,7 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
     async fn poll_or_submit(&mut self, game_address: Address) -> eyre::Result<()> {
         let (invalid_index, expected_root, intent, targets_tee) =
             match self.pending_proofs.get(&game_address) {
-                Some(p) => (p.invalid_index, p.expected_root, p.intent, p.prove_request.is_none()),
+                Some(p) => (p.invalid_index, p.expected_root, p.intent, p.kind.is_tee()),
                 None => return Ok(()),
             };
 
@@ -623,8 +627,8 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
             // would cause infinite retries after a successful
             // nullification.
             //
-            // TEE proofs (prove_request == None) target `teeProver`;
-            // ZK proofs target `zkProver`. Checking only the relevant
+            // TEE proofs (ProofKind::Tee) target `teeProver`;
+            // ZK proofs (ProofKind::Zk) target `zkProver`. Checking only the relevant
             // prover avoids an infinite revert-retry loop in Path 2
             // (fraudulent ZK challenge on a valid TEE proposal), where
             // nullification zeroes `zkProver` but leaves `teeProver`
@@ -720,14 +724,14 @@ impl<L2: L2Provider, P: ZkProofProvider, T: TxManager> Driver<L2, P, T> {
             return Ok(());
         }
 
-        let request = match &pending.prove_request {
-            Some(req) => req.clone(),
-            None => {
+        let request = match &pending.kind {
+            ProofKind::Tee => {
                 // TEE proofs have no ZK session to re-initiate — drop the entry.
                 debug!(game = %game_address, "TEE proof has no ZK request, dropping entry");
                 self.pending_proofs.remove(&game_address);
                 return Ok(());
             }
+            ProofKind::Zk { prove_request } => prove_request.clone(),
         };
 
         ChallengerMetrics::proof_retries_total().increment(1);
