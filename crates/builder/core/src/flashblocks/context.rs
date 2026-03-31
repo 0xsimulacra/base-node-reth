@@ -1,5 +1,8 @@
 use core::fmt::Debug;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 
 use alloy_consensus::{Eip658Value, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
@@ -15,7 +18,9 @@ use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use base_execution_payload_builder::{OpPayloadBuilderAttributes, error::OpPayloadBuilderError};
 use base_execution_primitives::OpTransactionSigned;
 use base_revm::{L1BlockInfo, OpSpecId};
-use base_txpool::{BundleTransaction, estimated_da_size::DataAvailabilitySized};
+use base_txpool::{
+    BundleTransaction, TimestampedTransaction, estimated_da_size::DataAvailabilitySized,
+};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -47,6 +52,7 @@ fn record_rejected_tx_priority_fee(reason: &TxnExecutionError, priority_fee: f64
         TxnExecutionError::BlockUncompressedSizeExceeded { .. } => {
             "block_uncompressed_size_exceeded"
         }
+        TxnExecutionError::MeteringDataPending => "metering_data_pending",
         TxnExecutionError::ExecutionMeteringLimitExceeded(inner) => match inner {
             ExecutionMeteringLimitExceeded::TransactionExecutionTime(_, _) => {
                 "tx_execution_time_exceeded"
@@ -116,6 +122,8 @@ pub struct FlashblockDiagnostics {
     pub txs_rejected_state_root_time: u64,
     /// Number rejected by uncompressed size limit.
     pub txs_rejected_uncompressed_size: u64,
+    /// Number skipped because metering data has not yet arrived.
+    pub txs_rejected_metering_data_pending: u64,
     /// Number rejected or skipped for other reasons.
     pub txs_rejected_other: u64,
     /// Minimum effective priority fee (tip per gas) among included transactions.
@@ -135,7 +143,7 @@ impl FlashblockDiagnostics {
     }
 
     /// Returns the rejection counts keyed by their metric/log reason labels.
-    pub const fn rejection_counts(&self) -> [(&'static str, u64); 7] {
+    pub const fn rejection_counts(&self) -> [(&'static str, u64); 8] {
         [
             ("gas_limit", self.txs_rejected_gas),
             ("da_size", self.txs_rejected_da),
@@ -143,6 +151,7 @@ impl FlashblockDiagnostics {
             ("execution_time", self.txs_rejected_execution_time),
             ("state_root_time", self.txs_rejected_state_root_time),
             ("uncompressed_size", self.txs_rejected_uncompressed_size),
+            ("metering_data_pending", self.txs_rejected_metering_data_pending),
             ("other", self.txs_rejected_other),
         ]
     }
@@ -155,7 +164,7 @@ impl FlashblockDiagnostics {
             .collect()
     }
 
-    /// Total number of rejected transactions across all limit types.
+    /// Total number of rejected or skipped transactions across all tracked categories.
     pub const fn txs_rejected_total(&self) -> u64 {
         self.txs_rejected_gas
             + self.txs_rejected_da
@@ -163,6 +172,7 @@ impl FlashblockDiagnostics {
             + self.txs_rejected_execution_time
             + self.txs_rejected_state_root_time
             + self.txs_rejected_uncompressed_size
+            + self.txs_rejected_metering_data_pending
             + self.txs_rejected_other
     }
 
@@ -192,6 +202,9 @@ impl FlashblockDiagnostics {
                     self.txs_rejected_state_root_time += 1;
                 }
             },
+            TxnExecutionError::MeteringDataPending => {
+                self.txs_rejected_metering_data_pending += 1;
+            }
             TxnExecutionError::SequencerTransaction
             | TxnExecutionError::NonceTooLow
             | TxnExecutionError::InternalError(_)
@@ -657,6 +670,7 @@ impl OpPayloadBuilderCtx {
             }
 
             let tx_da_size = tx.estimated_da_size();
+            let tx_received_at_ms = tx.received_at();
             let tx = tx.into_consensus();
             let tx_hash = tx.tx_hash();
             let tx_uncompressed_size = tx.encode_2718_len() as u64;
@@ -678,6 +692,24 @@ impl OpPayloadBuilderCtx {
             num_txs_considered += 1;
 
             let resource_usage = self.builder_config.metering_provider.get(&tx_hash);
+
+            // Skip transactions that are too young and don't have metering data yet
+            if self.builder_config.metering_provider.is_enabled()
+                && resource_usage.is_none()
+                && let Some(wait_duration) = self.builder_config.metering_wait_duration
+            {
+                let now_ms = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let tx_age_ms = now_ms.saturating_sub(tx_received_at_ms);
+                if tx_age_ms < wait_duration.as_millis() {
+                    log_txn(Err(TxnExecutionError::MeteringDataPending));
+                    BuilderMetrics::metering_data_pending_skip().increment(1);
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
+            }
 
             // Extract predicted execution and state root times from metering data
             let predicted_execution_time_us =
@@ -1018,6 +1050,7 @@ mod tests {
                 ("execution_time", 0),
                 ("state_root_time", 1),
                 ("uncompressed_size", 0),
+                ("metering_data_pending", 0),
                 ("other", 0),
             ]
         );
@@ -1029,9 +1062,11 @@ mod tests {
         diag.record_rejection(&TxnExecutionError::SequencerTransaction);
         diag.record_rejection(&TxnExecutionError::NonceTooLow);
         diag.record_rejection(&TxnExecutionError::MaxGasUsageExceeded);
+        diag.record_rejection(&TxnExecutionError::MeteringDataPending);
 
+        assert_eq!(diag.txs_rejected_metering_data_pending, 1);
         assert_eq!(diag.txs_rejected_other, 3);
-        assert_eq!(diag.txs_rejected_total(), 3);
+        assert_eq!(diag.txs_rejected_total(), 4);
     }
 
     #[test]

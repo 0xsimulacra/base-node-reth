@@ -2,8 +2,8 @@
 
 use std::{collections::BinaryHeap, sync::Arc};
 
-use base_consensus_genesis::{RollupConfig, SystemConfig};
-use base_protocol::{BlockInfo, L2BlockInfo, OpBlockConversionError, to_system_config};
+use base_consensus_genesis::RollupConfig;
+use base_protocol::{L2BlockInfo, OpBlockConversionError};
 use thiserror::Error;
 use tokio::sync::watch::Sender;
 
@@ -78,7 +78,7 @@ impl<EngineClient_: EngineClient> Engine<EngineClient_> {
         &mut self,
         client: Arc<EngineClient_>,
         config: Arc<RollupConfig>,
-    ) -> Result<(L2BlockInfo, BlockInfo, SystemConfig), EngineResetError> {
+    ) -> Result<L2BlockInfo, EngineResetError> {
         // Clear any outstanding tasks to prepare for the reset.
         self.clear();
 
@@ -90,8 +90,6 @@ impl<EngineClient_: EngineClient> Engine<EngineClient_> {
             Arc::clone(&config),
             EngineSyncStateUpdate {
                 unsafe_head: Some(start.un_safe),
-                cross_unsafe_head: Some(start.un_safe),
-                local_safe_head: Some(start.safe),
                 safe_head: Some(start.safe),
                 finalized_head: Some(start.finalized),
             },
@@ -116,32 +114,9 @@ impl<EngineClient_: EngineClient> Engine<EngineClient_> {
         // see the new forkchoice immediately, without waiting for a task to pass through drain().
         self.state_sender.send_replace(self.state);
 
-        // Find the new safe head's L1 origin and SystemConfig.
-        let origin_block = start
-            .safe
-            .l1_origin
-            .number
-            .saturating_sub(config.channel_timeout(start.safe.block_info.timestamp));
-        let l1_origin_info: BlockInfo = client
-            .get_l1_block(origin_block.into())
-            .await
-            .map_err(SyncStartError::RpcError)?
-            .ok_or(SyncStartError::BlockNotFound(origin_block.into()))?
-            .into_consensus()
-            .into();
-        let l2_safe_block = client
-            .get_l2_block(start.safe.block_info.hash.into())
-            .full()
-            .await
-            .map_err(SyncStartError::RpcError)?
-            .ok_or(SyncStartError::BlockNotFound(origin_block.into()))?
-            .into_consensus()
-            .map_transactions(|t| t.inner.inner.into_inner());
-        let system_config = to_system_config(&l2_safe_block, &config)?;
-
         Metrics::engine_reset_count().increment(1);
 
-        Ok((start.safe, l1_origin_info, system_config))
+        Ok(start.safe)
     }
 
     /// Seeds the engine sync state from an external source without sending a forkchoice update.
@@ -273,8 +248,6 @@ mod tests {
         let mut engine = Engine::new(EngineState::default(), state_tx, queue_tx);
         let update = EngineSyncStateUpdate {
             unsafe_head: Some(head),
-            cross_unsafe_head: Some(head),
-            local_safe_head: Some(safe),
             safe_head: Some(safe),
             finalized_head: Some(finalized),
         };
@@ -333,11 +306,7 @@ mod tests {
             test_engine_client_builder().with_fork_choice_updated_v3_response(valid_fcu()).build(),
         );
 
-        let update = EngineSyncStateUpdate {
-            unsafe_head: Some(head),
-            cross_unsafe_head: Some(head),
-            ..Default::default()
-        };
+        let update = EngineSyncStateUpdate { unsafe_head: Some(head), ..Default::default() };
 
         let mut engine = Engine::new(EngineState::default(), state_tx, queue_tx);
         engine.seed_state(update); // seed first — the wrong order
