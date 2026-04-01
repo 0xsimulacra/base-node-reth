@@ -139,8 +139,10 @@
             pkgs.llvmPackages.libclang.lib
           ];
 
-          # Default perf flags (same spirit as server)
-          # RUSTFLAGS = "-Clink-arg=-fuse-ld=${pkgs.mold}/bin/mold";
+          # instead of using .cargo/config.toml
+          # we define flags here
+          # let us control this on the deployed machine too
+          RUSTFLAGS = "-Clink-arg=-fuse-ld=${pkgs.mold}/bin/mold";
 
           # to remove the foritfy fail on just check
           # Remove the hardening added by nix to fix jmalloc compilation error.
