@@ -10,7 +10,7 @@
 extern crate alloc;
 
 mod params;
-pub use params::{BaseFeeConfig, base_fee_config, base_fee_params, base_fee_params_canyon};
+pub use params::BaseFeeConfig;
 
 mod updates;
 pub use updates::{
@@ -40,5 +40,3 @@ pub use rollup::{
     FJORD_MAX_SEQUENCER_DRIFT, GRANITE_CHANNEL_TIMEOUT, MAX_RLP_BYTES_PER_CHANNEL_BEDROCK,
     MAX_RLP_BYTES_PER_CHANNEL_FJORD, RollupConfig,
 };
-
-mod conversions;

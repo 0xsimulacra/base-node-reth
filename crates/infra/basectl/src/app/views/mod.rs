@@ -1,3 +1,5 @@
+//! TUI view components for basectl panels and dashboards.
+
 mod command_center;
 pub(crate) use command_center::CommandCenterView;
 
@@ -18,6 +20,9 @@ pub(crate) use flashblocks::FlashblocksView;
 
 mod home;
 pub(crate) use home::HomeView;
+
+mod proofs;
+pub(crate) use proofs::ProofsView;
 
 mod transaction_pane;
 pub(crate) use transaction_pane::TransactionPane;
