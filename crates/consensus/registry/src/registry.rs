@@ -1,12 +1,13 @@
 //! Rollup and L1 chain configuration registry.
 
+use alloy_chains::NamedChain;
 use alloy_genesis::ChainConfig;
 use alloy_primitives::{Address, map::HashMap};
 use base_alloy_chains::BaseChainConfig;
 use base_consensus_genesis::RollupConfig;
 use spin::Lazy;
 
-use crate::L1Config;
+use crate::{Holesky, Hoodi, Mainnet, Sepolia};
 
 /// Rollup configurations derived from [`BaseChainConfig`] instances.
 static ROLLUP_CONFIGS: Lazy<HashMap<u64, RollupConfig>> = Lazy::new(|| {
@@ -18,7 +19,14 @@ static ROLLUP_CONFIGS: Lazy<HashMap<u64, RollupConfig>> = Lazy::new(|| {
 });
 
 /// L1 chain configurations built from known L1 genesis data.
-static L1_CONFIGS: Lazy<HashMap<u64, ChainConfig>> = Lazy::new(L1Config::build_l1_configs);
+static L1_CONFIGS: Lazy<HashMap<u64, ChainConfig>> = Lazy::new(|| {
+    let mut map = HashMap::default();
+    map.insert(NamedChain::Mainnet.into(), Mainnet::l1_config());
+    map.insert(NamedChain::Sepolia.into(), Sepolia::l1_config());
+    map.insert(NamedChain::Holesky.into(), Holesky::l1_config());
+    map.insert(NamedChain::Hoodi.into(), Hoodi::l1_config());
+    map
+});
 
 /// A registry of chain configurations for Base networks.
 ///
@@ -118,6 +126,17 @@ mod tests {
             base_sepolia.hardforks.jovian_time,
             Some(BaseChainConfig::sepolia().jovian_timestamp)
         );
+    }
+
+    #[test]
+    fn test_l1_config_all_chains() {
+        // All four known L1 chains must be present.
+        assert!(Registry::l1_config(NamedChain::Mainnet.into()).is_some());
+        assert!(Registry::l1_config(NamedChain::Sepolia.into()).is_some());
+        assert!(Registry::l1_config(NamedChain::Holesky.into()).is_some());
+        assert!(Registry::l1_config(NamedChain::Hoodi.into()).is_some());
+        // Unknown chain IDs must return None.
+        assert!(Registry::l1_config(99999).is_none());
     }
 
     #[test]
