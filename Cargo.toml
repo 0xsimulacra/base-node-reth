@@ -238,6 +238,7 @@ base-revm = { path = "crates/execution/revm", default-features = false }
 # Infra
 based = { path = "crates/infra/based" }
 basectl-cli = { path = "crates/infra/basectl" }
+base-load-tests = { path = "crates/infra/load-tests" }
 audit-archiver-lib = { path = "crates/infra/audit" }
 ingress-rpc-lib = { path = "crates/infra/ingress-rpc" }
 websocket-proxy = { path = "crates/infra/websocket-proxy" }

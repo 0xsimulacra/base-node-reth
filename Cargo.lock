@@ -5320,6 +5320,7 @@ dependencies = [
  "base-consensus-gossip",
  "base-consensus-registry",
  "base-consensus-rpc",
+ "base-load-tests",
  "base-protocol",
  "chrono",
  "crossterm",
