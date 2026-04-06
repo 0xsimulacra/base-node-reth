@@ -261,7 +261,7 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_primitives::{B256, Log, LogData, U64, U256, address};
     use base_consensus_genesis::{CONFIG_UPDATE_TOPIC, HardForkConfig, SystemConfig};
-    use base_consensus_registry::L1Config;
+    use base_consensus_registry::Sepolia;
     use base_protocol::{BlockInfo, DepositDecodeError};
 
     use super::*;
@@ -371,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn test_prepare_payload_block_mismatch_epoch_reset() {
         let cfg = Arc::new(RollupConfig::default());
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -397,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn test_prepare_payload_block_mismatch() {
         let cfg = Arc::new(RollupConfig::default());
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -424,7 +424,7 @@ mod tests {
         let block_time = 10;
         let timestamp = 100;
         let cfg = Arc::new(RollupConfig { block_time, ..Default::default() });
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -456,7 +456,7 @@ mod tests {
         let block_time = 10;
         let timestamp = 100;
         let cfg = Arc::new(RollupConfig { block_time, ..Default::default() });
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -508,7 +508,7 @@ mod tests {
             hardforks: HardForkConfig { canyon_time: Some(0), ..Default::default() },
             ..Default::default()
         });
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -560,7 +560,7 @@ mod tests {
             hardforks: HardForkConfig { ecotone_time: Some(102), ..Default::default() },
             ..Default::default()
         });
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -613,7 +613,7 @@ mod tests {
             hardforks: HardForkConfig { fjord_time: Some(102), ..Default::default() },
             ..Default::default()
         });
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
@@ -665,7 +665,7 @@ mod tests {
             l1_system_config_address: sys_config_addr,
             ..Default::default()
         });
-        let l1_cfg = Arc::new(L1Config::sepolia().into());
+        let l1_cfg = Arc::new(Sepolia::l1_config());
         let l2_number = 1;
         let mut fetcher = TestSystemConfigL2Fetcher::default();
         fetcher.insert(l2_number, SystemConfig::default());
