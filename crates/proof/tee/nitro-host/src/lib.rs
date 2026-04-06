@@ -9,8 +9,11 @@ pub use backend::NitroBackend;
 mod convert;
 pub use convert::Convert;
 
+mod registration;
+pub use registration::{RegistrationChecker, RegistrationError};
+
 mod health;
-pub use health::{RegistrationHealthConfig, RegistrationHealthError, RegistrationHealthzRpc};
+pub use health::{RegistrationHealthConfig, RegistrationHealthzRpc};
 
 mod server;
 pub use server::NitroProverServer;
