@@ -3,8 +3,14 @@
 
 mod config;
 pub use config::{
-    AwsDiscoveryConfig, BoundlessConfig, DEFAULT_MAX_RECOVERY_ATTEMPTS, ProvingConfig,
+    AwsDiscoveryConfig, BoundlessConfig, CrlConfig, DEFAULT_MAX_RECOVERY_ATTEMPTS, ProvingConfig,
     RegistrarConfig,
+};
+
+mod crl;
+pub use crl::{
+    CertCrlInfo, CrlError, DEFAULT_CRL_FETCH_TIMEOUT_SECS, RevokedCertInfo, build_crl_http_client,
+    check_chain_against_crls,
 };
 
 mod discovery;

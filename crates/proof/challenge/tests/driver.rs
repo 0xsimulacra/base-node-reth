@@ -14,13 +14,14 @@ use base_challenger::{
     test_utils::{
         MockAggregateVerifier, MockBondTransactionSubmitter, MockDisputeGameFactory, MockGameState,
         MockL1HeadProvider, MockL2Provider, MockTeeProofProvider, MockTxManager,
-        MockZkProofProvider, addr, build_test_header_and_account, factory_game, mock_state,
-        mock_state_with_tee, receipt_with_status,
+        MockZkProofProvider, addr, build_test_header_and_account, empty_factory, factory_game,
+        mock_state, mock_state_with_tee, receipt_with_status,
     },
 };
 use base_proof_contracts::{AggregateVerifierClient, ContractError, GameAtIndex};
 use base_proof_primitives::{ProofResult, Proposal, ProverClient};
 use base_protocol::OutputRoot;
+use base_runtime::TokioRuntime;
 use base_tx_manager::TxManagerError;
 use base_zk_client::{ProofJobStatus, ProofType, ProveBlockRequest};
 use tokio_util::sync::CancellationToken;
@@ -414,7 +415,7 @@ async fn test_step_scan_error_propagated() {
             submitter,
             tee: None,
             verifier_client: verifier as Arc<dyn AggregateVerifierClient>,
-            bond_manager: None,
+            bond_manager: None::<BondManager<TokioRuntime>>,
         },
     );
 
@@ -570,7 +571,7 @@ async fn test_run_cancellation() {
             submitter,
             tee: None,
             verifier_client: verifier as Arc<dyn AggregateVerifierClient>,
-            bond_manager: None,
+            bond_manager: None::<BondManager<TokioRuntime>>,
         },
     );
 
@@ -1225,7 +1226,13 @@ async fn test_bond_manager_full_lifecycle() {
         Ok(tx_hash), // claimCredit (withdraw) tx
     ]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0)); // instant delay for testing
 
     // Track the game.
@@ -1278,7 +1285,13 @@ async fn test_bond_manager_skips_already_resolved_game() {
         Ok(tx_hash), // claimCredit (withdraw) tx
     ]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0));
     mgr.track_game(game_addr, claim_addr);
 
@@ -1323,7 +1336,13 @@ async fn test_bond_manager_skips_already_unlocked_game() {
         Ok(tx_hash), // claimCredit (withdraw) tx
     ]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0));
     mgr.track_game(game_addr, claim_addr);
 
@@ -1365,7 +1384,13 @@ async fn test_bond_manager_skips_already_claimed_game() {
     // No responses needed — no transactions should be submitted.
     let submitter = MockBondTransactionSubmitter::with_responses(vec![]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0));
     mgr.track_game(game_addr, claim_addr);
 
@@ -1409,7 +1434,13 @@ async fn test_bond_manager_tx_failure_retries() {
         Ok(tx_hash), // retry succeeds
     ]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0));
     mgr.track_game(game_addr, claim_addr);
 
@@ -1436,7 +1467,13 @@ async fn test_bond_manager_ignores_non_claim_addresses() {
     let other_addr = Address::repeat_byte(0xDD);
     let game_addr = addr(0);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     assert!(!mgr.track_game(game_addr, other_addr));
     assert_eq!(mgr.tracked_count(), 0);
 }
@@ -1457,7 +1494,13 @@ async fn test_bond_manager_keeps_defender_wins_when_recipient_is_claimable() {
 
     let submitter = MockBondTransactionSubmitter::with_responses(vec![]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0));
     mgr.track_game(game_addr, claim_addr);
     assert_eq!(mgr.tracked_count(), 1);
@@ -1491,7 +1534,13 @@ async fn test_bond_manager_removes_game_when_recipient_not_claimable() {
     // No responses needed — no transactions should be submitted.
     let submitter = MockBondTransactionSubmitter::with_responses(vec![]);
 
-    let mut mgr = BondManager::new(vec![claim_addr], "http://localhost:8545".parse().unwrap());
+    let mut mgr = BondManager::new(
+        vec![claim_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     mgr.set_weth_delay(Duration::from_secs(0));
     mgr.track_game(game_addr, claim_addr);
     assert_eq!(mgr.tracked_count(), 1);
@@ -1543,8 +1592,13 @@ async fn test_driver_tracks_bond_after_successful_challenge() {
     };
 
     // Bond manager with the sender address as a claim address.
-    let mut bond_manager =
-        BondManager::new(vec![sender_addr], "http://localhost:8545".parse().unwrap());
+    let mut bond_manager = BondManager::new(
+        vec![sender_addr],
+        "http://localhost:8545".parse().unwrap(),
+        empty_factory(),
+        1000,
+        TokioRuntime::new(),
+    );
     bond_manager.set_weth_delay(Duration::from_secs(3600));
 
     let mut driver = Driver::new(

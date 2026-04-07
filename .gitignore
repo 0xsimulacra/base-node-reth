@@ -9,4 +9,5 @@ docs/specs/dist/
 docs/specs/.vocs/
 *.log
 .direnv
-.vscode
+.vscode/
+*.env

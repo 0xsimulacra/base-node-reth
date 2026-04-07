@@ -55,6 +55,7 @@ members = [
   "crates/utilities/*",
   "crates/batcher/*",
   "crates/builder/*",
+  "crates/shared/ring-buffer",
   "crates/infra/audit",
   "crates/infra/basectl",
   "crates/infra/based",
@@ -64,7 +65,6 @@ members = [
   "crates/infra/load-tests",
   "crates/common/*",
   "crates/execution/*",
-  "crates/txpool",
   "etc/tools/*",
   "devnet",
   "actions/harness",
@@ -230,17 +230,16 @@ base-engine-tree = { path = "crates/execution/engine-tree" }
 base-flashblocks = { path = "crates/execution/flashblocks" }
 base-execution-forks = { path = "crates/execution/hardforks" }
 base-execution-storage = { path = "crates/execution/storage" }
+base-execution-txpool = { path = "crates/execution/txpool" }
 base-execution-chainspec = { path = "crates/execution/chainspec" }
 base-execution-consensus = { path = "crates/execution/consensus" }
 base-execution-payload-builder = { path = "crates/execution/payload" }
 base-revm = { path = "crates/execution/revm", default-features = false }
 
-# Txpool
-base-txpool = { path = "crates/txpool" }
-
 # Infra
 based = { path = "crates/infra/based" }
 basectl-cli = { path = "crates/infra/basectl" }
+base-load-tests = { path = "crates/infra/load-tests" }
 audit-archiver-lib = { path = "crates/infra/audit" }
 ingress-rpc-lib = { path = "crates/infra/ingress-rpc" }
 websocket-proxy = { path = "crates/infra/websocket-proxy" }
@@ -291,6 +290,8 @@ base-cli-utils = { path = "crates/utilities/cli" }
 base-reth-cli = { path = "crates/utilities/reth-cli" }
 base-test-utils = { path = "crates/utilities/test-utils" }
 base-tx-manager = { path = "crates/utilities/tx-manager" }
+base-ring-buffer = { path = "crates/shared/ring-buffer" }
+base-macros = { path = "crates/utilities/macros", default-features = false }
 base-metrics = { path = "crates/utilities/metrics", default-features = false }
 base-runtime = { path = "crates/utilities/runtime", default-features = false }
 

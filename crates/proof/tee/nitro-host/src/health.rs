@@ -1,22 +1,15 @@
 //! Registration-gated health check for the nitro prover.
+//!
+//! Delegates signer validity checks to [`RegistrationChecker`], which is shared
+//! with the proving guard in `server.rs`.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
-use alloy_primitives::{Address, keccak256};
+use alloy_primitives::Address;
 use base_health::{HealthzApiServer, HealthzResponse};
-use base_proof_contracts::{TEEProverRegistryClient, TEEProverRegistryContractClient};
 use jsonrpsee::core::{RpcResult, async_trait};
-use tokio::sync::{OnceCell, RwLock};
-use tracing::warn;
 
-use super::transport::NitroTransport;
-
-const REGISTRATION_CACHE_TTL: Duration = Duration::from_secs(30);
-const REGISTRATION_STALE_LIMIT: Duration = Duration::from_secs(300);
-const REGISTRATION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+use super::registration::RegistrationChecker;
 
 /// Configuration for registration-gated health checks.
 #[derive(Debug)]
@@ -27,204 +20,175 @@ pub struct RegistrationHealthConfig {
     pub l1_rpc_url: String,
 }
 
-pub(crate) struct RegistrationHealthzRpc {
+/// JSON-RPC handler for registration-gated health checks.
+///
+/// Uses the shared [`RegistrationChecker`] with a latching policy: once the
+/// signer has been confirmed valid, health stays healthy forever (avoids ASG
+/// replacement on transient L1 failures).
+pub struct RegistrationHealthzRpc {
     version: &'static str,
-    transport: Arc<NitroTransport>,
-    registry: TEEProverRegistryContractClient,
-    signer: OnceCell<Address>,
-    cache: RwLock<Option<(bool, Instant)>>,
+    checker: Arc<RegistrationChecker>,
 }
 
 impl RegistrationHealthzRpc {
-    pub(crate) fn new(
-        version: &'static str,
-        transport: Arc<NitroTransport>,
-        registry: TEEProverRegistryContractClient,
-    ) -> Self {
-        Self { version, transport, registry, signer: OnceCell::new(), cache: RwLock::new(None) }
+    /// Creates a new health check handler backed by the shared checker.
+    pub const fn new(version: &'static str, checker: Arc<RegistrationChecker>) -> Self {
+        Self { version, checker }
     }
+}
 
-    async fn signer_address(&self) -> Result<Address, String> {
-        self.signer
-            .get_or_try_init(|| async {
-                let public_key = self
-                    .transport
-                    .signer_public_key()
-                    .await
-                    .map_err(|e| format!("failed to get signer public key: {e}"))?;
-                Self::derive_signer_address(&public_key)
-            })
-            .await
-            .copied()
-    }
-
-    fn derive_signer_address(public_key: &[u8]) -> Result<Address, String> {
-        let key = k256::PublicKey::from_sec1_bytes(public_key)
-            .map_err(|e| format!("invalid public key: {e}"))?;
-        let uncompressed =
-            k256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(&key, false);
-        let hash = keccak256(&uncompressed.as_bytes()[1..]);
-        Ok(Address::from_slice(&hash[12..]))
-    }
-
-    async fn use_stale_cache_or_fail(&self, signer: Address, error: &str) -> Result<bool, String> {
-        let cache = self.cache.read().await;
-        if let Some((registered, checked_at)) = *cache {
-            let elapsed = checked_at.elapsed();
-            if elapsed < REGISTRATION_STALE_LIMIT {
-                warn!(
-                    error = %error,
-                    signer = %signer,
-                    stale_secs = elapsed.as_secs(),
-                    "L1 RPC failed, using stale cached registration status"
-                );
-                return Ok(registered);
-            }
-        }
-        Err(format!("failed to check registration for {signer}: {error}"))
-    }
-
-    async fn check_registration(&self) -> Result<bool, String> {
-        {
-            let cache = self.cache.read().await;
-            if let Some((registered, checked_at)) = *cache
-                && checked_at.elapsed() < REGISTRATION_CACHE_TTL
-            {
-                return Ok(registered);
-            }
-        }
-
-        let signer = self.signer_address().await?;
-
-        let result = tokio::time::timeout(
-            REGISTRATION_CHECK_TIMEOUT,
-            self.registry.is_registered_signer(signer),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(registered)) => {
-                let mut cache = self.cache.write().await;
-                let was_registered = cache.map(|(r, _)| r);
-                *cache = Some((registered, Instant::now()));
-                if !registered && was_registered != Some(false) {
-                    warn!(signer = %signer, "signer is not registered in TEEProverRegistry");
-                }
-                Ok(registered)
-            }
-            Ok(Err(e)) => self.use_stale_cache_or_fail(signer, &e.to_string()).await,
-            Err(_) => self.use_stale_cache_or_fail(signer, "L1 RPC request timed out").await,
-        }
+impl std::fmt::Debug for RegistrationHealthzRpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationHealthzRpc")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
 impl HealthzApiServer for RegistrationHealthzRpc {
     async fn healthz(&self) -> RpcResult<HealthzResponse> {
-        match self.check_registration().await {
+        match self.checker.check_health().await {
             Ok(true) => Ok(HealthzResponse { version: self.version.to_string() }),
             Ok(false) => Err(jsonrpsee::types::ErrorObjectOwned::owned(
                 -32000,
-                "signer not registered in TEEProverRegistry",
+                "signer is not a valid signer in TEEProverRegistry",
                 None::<()>,
             )),
-            Err(msg) => Err(jsonrpsee::types::ErrorObjectOwned::owned(-32000, msg, None::<()>)),
+            Err(e) => {
+                Err(jsonrpsee::types::ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::address;
-    use hex_literal::hex;
-    use k256::ecdsa::SigningKey;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use alloy_primitives::{Address, address};
+    use base_proof_contracts::TEEProverRegistryClient;
+    use jsonrpsee::core::async_trait;
 
     use super::*;
+    use crate::transport::NitroTransport;
 
-    const HARDHAT_PRIVATE_KEY: [u8; 32] =
-        hex!("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
-
-    fn hardhat_public_key() -> Vec<u8> {
-        let signing_key = SigningKey::from_slice(&HARDHAT_PRIVATE_KEY).unwrap();
-        let verifying_key = signing_key.verifying_key();
-        verifying_key.to_encoded_point(false).as_bytes().to_vec()
+    #[derive(Clone)]
+    struct MockRegistry {
+        valid: Arc<AtomicBool>,
+        call_count: Arc<AtomicUsize>,
+        should_fail: Arc<AtomicBool>,
     }
 
-    #[test]
-    fn derive_signer_address_hardhat_account_zero() {
-        let public_key = hardhat_public_key();
-        let derived = RegistrationHealthzRpc::derive_signer_address(&public_key).unwrap();
-        assert_eq!(derived, address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266"));
+    impl MockRegistry {
+        fn new(valid: bool) -> Self {
+            Self {
+                valid: Arc::new(AtomicBool::new(valid)),
+                call_count: Arc::new(AtomicUsize::new(0)),
+                should_fail: Arc::new(AtomicBool::new(false)),
+            }
+        }
     }
 
-    #[test]
-    fn derive_signer_address_compressed_matches_uncompressed() {
-        let signing_key = SigningKey::from_slice(&HARDHAT_PRIVATE_KEY).unwrap();
-        let verifying_key = signing_key.verifying_key();
-        let compressed = verifying_key.to_encoded_point(true).as_bytes().to_vec();
-        let uncompressed = hardhat_public_key();
+    #[async_trait]
+    impl TEEProverRegistryClient for MockRegistry {
+        async fn is_valid_signer(
+            &self,
+            _signer: Address,
+        ) -> Result<bool, base_proof_contracts::ContractError> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            if self.should_fail.load(Ordering::Relaxed) {
+                return Err(base_proof_contracts::ContractError::Validation(
+                    "mock RPC failure".into(),
+                ));
+            }
+            Ok(self.valid.load(Ordering::Relaxed))
+        }
 
-        let addr_compressed = RegistrationHealthzRpc::derive_signer_address(&compressed).unwrap();
-        let addr_uncompressed =
-            RegistrationHealthzRpc::derive_signer_address(&uncompressed).unwrap();
-        assert_eq!(addr_compressed, addr_uncompressed);
-    }
+        async fn is_registered_signer(
+            &self,
+            _signer: Address,
+        ) -> Result<bool, base_proof_contracts::ContractError> {
+            unimplemented!()
+        }
 
-    #[test]
-    fn derive_signer_address_rejects_invalid_key() {
-        assert!(RegistrationHealthzRpc::derive_signer_address(&[0x04; 66]).is_err());
-        assert!(RegistrationHealthzRpc::derive_signer_address(&[]).is_err());
-    }
-
-    fn test_rpc() -> RegistrationHealthzRpc {
-        let server = Arc::new(base_proof_tee_nitro_enclave::Server::new_local().unwrap());
-        let transport = Arc::new(NitroTransport::local(server));
-        let dummy_url = url::Url::parse("http://localhost:1").unwrap();
-        let registry = TEEProverRegistryContractClient::new(Address::ZERO, dummy_url);
-        RegistrationHealthzRpc::new("0.0.0", transport, registry)
+        async fn get_registered_signers(
+            &self,
+        ) -> Result<Vec<Address>, base_proof_contracts::ContractError> {
+            unimplemented!()
+        }
     }
 
     const TEST_SIGNER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    #[tokio::test]
-    async fn stale_cache_returns_cached_value_on_error() {
-        let rpc = test_rpc();
-        *rpc.cache.write().await = Some((true, Instant::now()));
-        let result = rpc.use_stale_cache_or_fail(TEST_SIGNER, "rpc down").await;
-        assert!(result.unwrap());
+    fn test_healthz_with_mock(
+        registry: impl TEEProverRegistryClient + 'static,
+    ) -> (Arc<RegistrationChecker>, RegistrationHealthzRpc) {
+        let server = Arc::new(base_proof_tee_nitro_enclave::Server::new_local().unwrap());
+        let transport = Arc::new(NitroTransport::local(server));
+        let checker = Arc::new(RegistrationChecker::new(transport, registry));
+        let rpc = RegistrationHealthzRpc::new("0.0.0", Arc::clone(&checker));
+        (checker, rpc)
     }
 
     #[tokio::test]
-    async fn stale_cache_fails_when_expired() {
-        let rpc = test_rpc();
-        let expired = Instant::now() - REGISTRATION_STALE_LIMIT - Duration::from_secs(1);
-        *rpc.cache.write().await = Some((true, expired));
-        let result = rpc.use_stale_cache_or_fail(TEST_SIGNER, "rpc down").await;
+    async fn healthz_returns_ok_when_valid() {
+        let (checker, rpc) = test_healthz_with_mock(MockRegistry::new(true));
+        checker.set_signer_for_test(TEST_SIGNER);
+        let result = HealthzApiServer::healthz(&rpc).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().version, "0.0.0");
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_error_when_not_valid() {
+        let (checker, rpc) = test_healthz_with_mock(MockRegistry::new(false));
+        checker.set_signer_for_test(TEST_SIGNER);
+        let result = HealthzApiServer::healthz(&rpc).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn stale_cache_fails_when_empty() {
-        let rpc = test_rpc();
-        let result = rpc.use_stale_cache_or_fail(TEST_SIGNER, "rpc down").await;
+    async fn healthz_latches_after_first_success() {
+        let registry = MockRegistry::new(true);
+        let (checker, rpc) = test_healthz_with_mock(registry.clone());
+        checker.set_signer_for_test(TEST_SIGNER);
+
+        let result = HealthzApiServer::healthz(&rpc).await;
+        assert!(result.is_ok());
+
+        registry.valid.store(false, Ordering::Relaxed);
+        registry.should_fail.store(true, Ordering::Relaxed);
+        checker.set_cache_for_test(None).await;
+
+        let result = HealthzApiServer::healthz(&rpc).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn healthz_errors_on_rpc_failure_before_latch() {
+        let registry = MockRegistry::new(false);
+        registry.should_fail.store(true, Ordering::Relaxed);
+        let (checker, rpc) = test_healthz_with_mock(registry);
+        checker.set_signer_for_test(TEST_SIGNER);
+        let result = HealthzApiServer::healthz(&rpc).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn cache_hit_within_ttl() {
-        let rpc = test_rpc();
-        rpc.signer.set(TEST_SIGNER).unwrap();
-        *rpc.cache.write().await = Some((true, Instant::now()));
-        let result = rpc.check_registration().await;
-        assert!(result.unwrap());
-    }
+    async fn healthz_rpc_call_count() {
+        let registry = MockRegistry::new(true);
+        let call_count = Arc::clone(&registry.call_count);
+        let (checker, rpc) = test_healthz_with_mock(registry);
+        checker.set_signer_for_test(TEST_SIGNER);
 
-    #[tokio::test]
-    async fn cache_hit_returns_false_when_not_registered() {
-        let rpc = test_rpc();
-        rpc.signer.set(TEST_SIGNER).unwrap();
-        *rpc.cache.write().await = Some((false, Instant::now()));
-        let result = rpc.check_registration().await;
-        assert!(!result.unwrap());
+        let _ = HealthzApiServer::healthz(&rpc).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+        let _ = HealthzApiServer::healthz(&rpc).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
     }
 }
