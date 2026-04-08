@@ -61,8 +61,8 @@ pub const DEFAULT_MAX_GAS_PRICE: u128 = 1_000_000_000_000;
 /// Configuration for a load test run.
 #[derive(Debug, Clone)]
 pub struct LoadConfig {
-    /// RPC endpoint URL.
-    pub rpc_url: Url,
+    /// HTTP JSON-RPC endpoint URL.
+    pub rpc_http_url: Url,
     /// Chain ID.
     pub chain_id: u64,
     /// Number of test accounts to create.
@@ -87,13 +87,17 @@ pub struct LoadConfig {
     pub batch_timeout: Duration,
     /// Maximum gas price cap to prevent overspending during congestion.
     pub max_gas_price: u128,
+    /// WebSocket JSON-RPC endpoint URL for block subscription.
+    pub rpc_ws_url: Url,
+    /// WebSocket URL for flashblocks subscription.
+    pub flashblocks_ws_url: Url,
 }
 
 impl LoadConfig {
     /// Creates a new load config for devnet.
     pub fn devnet() -> Self {
         Self {
-            rpc_url: "http://localhost:8545".parse().unwrap(),
+            rpc_http_url: "http://localhost:8545".parse().expect("valid default rpc_http_url"),
             chain_id: 1337,
             account_count: 10,
             seed: 42,
@@ -106,6 +110,10 @@ impl LoadConfig {
             batch_size: 5,
             batch_timeout: Duration::from_millis(50),
             max_gas_price: DEFAULT_MAX_GAS_PRICE,
+            rpc_ws_url: "ws://localhost:8546".parse().expect("valid default rpc_ws_url"),
+            flashblocks_ws_url: "ws://localhost:7111"
+                .parse()
+                .expect("valid default flashblocks_ws_url"),
         }
     }
 
@@ -131,9 +139,9 @@ impl LoadConfig {
         Ok(())
     }
 
-    /// Sets the RPC URL.
-    pub fn with_rpc_url(mut self, rpc_url: Url) -> Self {
-        self.rpc_url = rpc_url;
+    /// Sets the HTTP JSON-RPC URL.
+    pub fn with_rpc_http_url(mut self, url: Url) -> Self {
+        self.rpc_http_url = url;
         self
     }
 

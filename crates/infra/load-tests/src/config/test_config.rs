@@ -114,6 +114,13 @@ pub struct TestConfig {
     /// Address of the precompile looper contract (required when using iterations > 1).
     #[serde(default)]
     pub looper_contract: Option<String>,
+
+    /// WebSocket JSON-RPC endpoint URL for block subscription.
+    #[serde(default = "default_rpc_ws_url", alias = "ws_url")]
+    pub rpc_ws_url: Url,
+    /// WebSocket URL for flashblocks subscription.
+    #[serde(default = "default_flashblocks_ws_url", alias = "flashblocks_url")]
+    pub flashblocks_ws_url: Url,
 }
 
 impl Default for TestConfig {
@@ -131,6 +138,8 @@ impl Default for TestConfig {
             chain_id: None,
             transactions: vec![WeightedTxType { weight: 100, tx_type: TxTypeConfig::Transfer }],
             looper_contract: None,
+            rpc_ws_url: default_rpc_ws_url(),
+            flashblocks_ws_url: default_flashblocks_ws_url(),
         }
     }
 }
@@ -150,6 +159,8 @@ impl fmt::Debug for TestConfig {
             .field("chain_id", &self.chain_id)
             .field("transactions", &self.transactions)
             .field("looper_contract", &self.looper_contract)
+            .field("rpc_ws_url", &self.rpc_ws_url)
+            .field("flashblocks_ws_url", &self.flashblocks_ws_url)
             .finish()
     }
 }
@@ -228,6 +239,14 @@ const fn default_repeat_count() -> usize {
 
 const fn default_iterations() -> u32 {
     1
+}
+
+fn default_rpc_ws_url() -> Url {
+    Url::parse("ws://localhost:8546").expect("valid default rpc_ws_url")
+}
+
+fn default_flashblocks_ws_url() -> Url {
+    Url::parse("ws://localhost:7111").expect("valid default flashblocks_ws_url")
 }
 
 impl TestConfig {
@@ -310,7 +329,7 @@ impl TestConfig {
             BaselineError::Config("chain_id must be provided in config or fetched from RPC".into())
         })?;
 
-        let rpc_url = self.rpc.clone();
+        let rpc_http_url = self.rpc.clone();
 
         let duration = self.parse_duration()?;
 
@@ -321,7 +340,7 @@ impl TestConfig {
         };
 
         Ok(crate::runner::LoadConfig {
-            rpc_url,
+            rpc_http_url,
             chain_id: resolved_chain_id,
             account_count: self.sender_count as usize,
             seed: self.seed,
@@ -334,6 +353,8 @@ impl TestConfig {
             batch_size: 5,
             batch_timeout: Duration::from_millis(50),
             max_gas_price: crate::runner::DEFAULT_MAX_GAS_PRICE,
+            rpc_ws_url: self.rpc_ws_url.clone(),
+            flashblocks_ws_url: self.flashblocks_ws_url.clone(),
         })
     }
 

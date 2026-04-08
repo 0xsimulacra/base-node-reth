@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -15,12 +15,9 @@ use alloy_signer_local::PrivateKeySigner;
 use base_tx_manager::NonceManager;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
-
-/// Provider type for nonce management. Uses Ethereum network type because
-/// `NonceManager` only calls `get_transaction_count`, which returns the same
-/// response for both Ethereum and Base networks.
-type NonceProvider = RootProvider<Ethereum>;
+use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 /// Maximum number of concurrent RPC requests during funding/draining operations.
@@ -32,8 +29,8 @@ const FUNDING_CONCURRENCY: usize = 32;
 const FUNDING_BATCH_SIZE: usize = 16;
 
 use super::{
-    AdaptiveBackoff, Confirmer, ConfirmerHandle, DisplaySnapshot, LoadConfig, LoadTestDisplay,
-    RateLimiter, TxType,
+    AdaptiveBackoff, BlockFirstSeen, BlockWatcher, Confirmer, ConfirmerHandle, DisplaySnapshot,
+    FlashblockTimes, FlashblockTracker, LoadConfig, LoadTestDisplay, RateLimiter, TxType,
 };
 use crate::{
     BaselineError, Result,
@@ -45,6 +42,11 @@ use crate::{
         TransferPayload, WorkloadGenerator,
     },
 };
+
+/// Provider type for nonce management. Uses Ethereum network type because
+/// `NonceManager` only calls `get_transaction_count`, which returns the same
+/// response for both Ethereum and Base networks.
+type NonceProvider = RootProvider<Ethereum>;
 
 struct PreparedTx {
     from: Address,
@@ -67,18 +69,15 @@ pub struct LoadRunner {
     generator: WorkloadGenerator,
     collector: MetricsCollector,
     stop_flag: Arc<AtomicBool>,
+    cancel_token: CancellationToken,
     nonce_managers: HashMap<Address, NonceManager<NonceProvider>>,
     providers: HashMap<Address, WalletProvider>,
     gas_price: u128,
-    /// Optional live status display for TTY terminals.
     display: Option<LoadTestDisplay>,
     /// Optional watch channel for pushing live display snapshots to a TUI view.
     snapshot_tx: Option<watch::Sender<DisplaySnapshot>>,
-    /// Last observed total ETH across all sender accounts (formatted).
     last_total_eth: Option<String>,
-    /// Last observed minimum ETH in any single sender account (formatted).
     last_min_eth: Option<String>,
-    /// Whether any account was below the low-balance threshold on the last check.
     last_funds_low: bool,
     /// Checksummed address of the funder wallet; set by the caller after `fund_accounts`.
     funder_address: Option<String>,
@@ -88,11 +87,11 @@ pub struct LoadRunner {
 
 impl LoadRunner {
     /// Creates a new load runner with the given configuration.
-    #[instrument(skip_all, fields(rpc_url = %config.rpc_url, chain_id = config.chain_id))]
+    #[instrument(skip_all, fields(rpc_url = %config.rpc_http_url, chain_id = config.chain_id))]
     pub fn new(config: LoadConfig) -> Result<Self> {
         config.validate()?;
 
-        let client = RpcClient::new(config.rpc_url.clone());
+        let client = RpcClient::new(config.rpc_http_url.clone());
 
         let accounts = if let Some(mnemonic) = &config.mnemonic {
             info!(
@@ -111,7 +110,7 @@ impl LoadRunner {
             AccountPool::with_offset(config.seed, config.account_count, config.sender_offset)?
         };
 
-        let providers = Self::build_providers(&config.rpc_url, &accounts);
+        let providers = Self::build_providers(&config.rpc_http_url, &accounts);
         let sender_addresses = accounts.accounts().iter().map(|a| a.address.to_string()).collect();
 
         let workload_config = WorkloadConfig::new("load-test").with_seed(config.seed);
@@ -130,6 +129,7 @@ impl LoadRunner {
             generator,
             collector: MetricsCollector::new(),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            cancel_token: CancellationToken::new(),
             nonce_managers: HashMap::new(),
             providers,
             gas_price: 0,
@@ -243,7 +243,7 @@ impl LoadRunner {
     ) -> Result<()> {
         let total_accounts = self.accounts.len();
         let client = self.client.clone();
-        let rpc_url = self.config.rpc_url.clone();
+        let rpc_url = self.config.rpc_http_url.clone();
         let chain_id = self.config.chain_id;
         let max_gas_price = self.config.max_gas_price;
 
@@ -486,7 +486,7 @@ impl LoadRunner {
             account.balance = balance;
             account.nonce = account_nonce;
 
-            let provider = NonceProvider::new_http(rpc_url.clone());
+            let provider = NonceProvider::new_http(self.config.rpc_http_url.clone());
             let nonce_manager = NonceManager::new(provider, addr, NONCE_RPC_TIMEOUT);
             self.nonce_managers.insert(addr, nonce_manager);
 
@@ -503,13 +503,14 @@ impl LoadRunner {
         self.collector.reset();
         self.collector.start();
         self.stop_flag.store(false, Ordering::SeqCst);
+        self.cancel_token = CancellationToken::new();
 
         self.gas_price = self.client.get_gas_price().await?;
         info!(gas_price = self.gas_price, "fetched current gas price");
 
         for account in self.accounts.accounts() {
             if !self.nonce_managers.contains_key(&account.address) {
-                let provider = NonceProvider::new_http(self.config.rpc_url.clone());
+                let provider = NonceProvider::new_http(self.config.rpc_http_url.clone());
                 let nonce_manager = NonceManager::new(provider, account.address, NONCE_RPC_TIMEOUT);
                 self.nonce_managers.insert(account.address, nonce_manager);
             }
@@ -531,13 +532,37 @@ impl LoadRunner {
         let (metrics_tx, mut metrics_rx) =
             mpsc::channel::<TransactionMetrics>(METRICS_CHANNEL_BUFFER);
 
+        let flashblock_times: FlashblockTimes = Arc::new(RwLock::new(HashMap::new()));
+        let block_first_seen: BlockFirstSeen = Arc::new(RwLock::new(BTreeMap::new()));
+
+        info!(url = %self.config.flashblocks_ws_url, "starting flashblock tracker");
+        let flashblock_tracker_task = FlashblockTracker::new(
+            self.config.flashblocks_ws_url.clone(),
+            Arc::clone(&flashblock_times),
+            self.cancel_token.clone(),
+        )
+        .start();
+
+        info!(url = %self.config.rpc_ws_url, "starting block watcher");
+        let block_watcher_task = BlockWatcher::new(
+            self.config.rpc_ws_url.clone(),
+            Arc::clone(&block_first_seen),
+            self.cancel_token.clone(),
+        )
+        .start();
+
         let sender_addresses: Vec<_> = self.accounts.accounts().iter().map(|a| a.address).collect();
-        let mut confirmer =
-            Confirmer::new(&sender_addresses, metrics_tx, Arc::clone(&self.stop_flag));
+        let mut confirmer = Confirmer::with_timing_data(
+            &sender_addresses,
+            metrics_tx,
+            Arc::clone(&self.stop_flag),
+            Arc::clone(&flashblock_times),
+            Arc::clone(&block_first_seen),
+        );
         let confirmer_handle = confirmer.handle();
         let confirmer_handle_for_run = confirmer_handle.clone();
 
-        let confirmer_client = RpcClient::new(self.config.rpc_url.clone());
+        let confirmer_client = RpcClient::new(self.config.rpc_http_url.clone());
         let confirmer_task = tokio::spawn(async move {
             confirmer.run(confirmer_client, &confirmer_handle_for_run).await
         });
@@ -669,6 +694,8 @@ impl LoadRunner {
             if use_live_display || use_snapshot_tx {
                 if last_progress_report.elapsed() >= DISPLAY_RENDER_INTERVAL {
                     let (p50, p99) = self.collector.rolling_p50_p99();
+                    let (flashblocks_p50, flashblocks_p99) =
+                        self.collector.rolling_flashblocks_p50_p99();
                     let snap = DisplaySnapshot {
                         elapsed: start.elapsed(),
                         duration: self.config.duration,
@@ -683,6 +710,8 @@ impl LoadRunner {
                         rolling_gps: self.collector.rolling_gps(),
                         p50_latency: p50,
                         p99_latency: p99,
+                        flashblocks_p50_latency: flashblocks_p50,
+                        flashblocks_p99_latency: flashblocks_p99,
                         gas_price_gwei: self.gas_price as f64 / 1e9,
                         total_eth: self.last_total_eth.clone(),
                         min_eth: self.last_min_eth.clone(),
@@ -705,6 +734,9 @@ impl LoadRunner {
                 let failed = self.collector.failed_count();
                 let in_flight = confirmer_handle.total_in_flight();
                 let senders_blocked = confirmer_handle.senders_at_limit(max_in_flight_per_sender);
+                let (p50, p99) = self.collector.rolling_p50_p99();
+                let (flashblocks_p50, flashblocks_p99) =
+                    self.collector.rolling_flashblocks_p50_p99();
                 info!(
                     elapsed_secs,
                     submitted,
@@ -713,6 +745,10 @@ impl LoadRunner {
                     in_flight,
                     senders_blocked,
                     gas_price = self.gas_price,
+                    p50_ms = p50.as_millis() as u64,
+                    p99_ms = p99.as_millis() as u64,
+                    flashblocks_p50_ms = flashblocks_p50.as_millis() as u64,
+                    flashblocks_p99_ms = flashblocks_p99.as_millis() as u64,
                     "progress"
                 );
                 last_progress_report = Instant::now();
@@ -767,7 +803,27 @@ impl LoadRunner {
             }
         }
 
-        confirmer_task.abort();
+        // Let the confirmer finish gracefully (stop_flag is already set).
+        // Block watcher stays alive so deferred block latencies can still resolve.
+        if tokio::time::timeout(Duration::from_secs(2), confirmer_task).await.is_err() {
+            warn!("confirmer did not shut down in time");
+        }
+
+        while let Ok(metrics) = metrics_rx.try_recv() {
+            self.collector.record_confirmed(metrics);
+        }
+
+        // Now safe to stop WebSocket tasks — confirmer is done.
+        self.cancel_token.cancel();
+
+        match tokio::time::timeout(Duration::from_secs(2), flashblock_tracker_task).await {
+            Ok(Err(e)) if e.is_panic() => warn!(error = %e, "flashblock tracker panicked"),
+            _ => {}
+        }
+        match tokio::time::timeout(Duration::from_secs(2), block_watcher_task).await {
+            Ok(Err(e)) if e.is_panic() => warn!(error = %e, "block watcher panicked"),
+            _ => {}
+        }
 
         let confirmed = self.collector.confirmed_count();
         info!(confirmed, submitted, "confirmation collection complete");
@@ -900,7 +956,7 @@ impl LoadRunner {
     pub async fn drain_accounts(&self, funding_key: PrivateKeySigner) -> Result<U256> {
         let funder_address = funding_key.address();
         let client = self.client.clone();
-        let rpc_url = self.config.rpc_url.clone();
+        let rpc_url = self.config.rpc_http_url.clone();
         let chain_id = self.config.chain_id;
 
         let gas_price = client.get_gas_price().await?;
@@ -1127,7 +1183,11 @@ impl LoadRunner {
         }
     }
 
-    /// Signals the load test to stop.
+    /// Signals the load test to stop gracefully.
+    ///
+    /// Only sets `stop_flag` — does **not** cancel WebSocket tasks or clean up
+    /// resources. The caller must ensure [`run()`](Self::run) completes, which
+    /// handles draining confirmations and cancelling background tasks.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
     }

@@ -19,9 +19,6 @@ use crate::utils::{BaselineError, Result};
 /// This trait abstracts the RPC calls needed by the confirmer, enabling
 /// mock implementations for testing.
 pub trait ReceiptProvider: Send + Sync {
-    /// Fetches the current block number.
-    fn get_block_number(&self) -> impl Future<Output = Result<u64>> + Send;
-
     /// Fetches transaction hashes from the pending block.
     fn get_pending_block_tx_hashes(&self) -> impl Future<Output = Result<Vec<TxHash>>> + Send;
 
@@ -102,12 +99,6 @@ impl RpcClient {
             .map_err(|e| BaselineError::Rpc(e.to_string()))
     }
 
-    /// Fetches the current block number.
-    #[instrument(skip(self))]
-    pub async fn get_block_number(&self) -> Result<u64> {
-        self.provider.get_block_number().await.map_err(|e| BaselineError::Rpc(e.to_string()))
-    }
-
     /// Fetches the transaction receipt for a given hash.
     #[instrument(skip(self), fields(tx_hash = %tx_hash))]
     pub async fn get_transaction_receipt(
@@ -147,10 +138,6 @@ impl std::fmt::Debug for RpcClient {
 }
 
 impl ReceiptProvider for RpcClient {
-    async fn get_block_number(&self) -> Result<u64> {
-        self.get_block_number().await
-    }
-
     async fn get_pending_block_tx_hashes(&self) -> Result<Vec<TxHash>> {
         self.get_pending_block_tx_hashes().await
     }
