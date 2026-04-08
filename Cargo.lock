@@ -2716,6 +2716,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-balance-monitor"
+version = "0.0.0"
+dependencies = [
+ "alloy-network",
+ "alloy-node-bindings",
+ "alloy-primitives",
+ "alloy-provider",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "base-batcher-admin"
 version = "0.0.0"
 dependencies = [
@@ -3077,6 +3090,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-trie",
  "async-trait",
+ "base-balance-monitor",
  "base-challenger",
  "base-cli-utils",
  "base-health",
@@ -4816,6 +4830,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-ec2",
  "aws-sdk-elasticloadbalancingv2",
+ "base-balance-monitor",
  "base-cli-utils",
  "base-health",
  "base-proof-tee-nitro-attestation-prover",
@@ -4871,6 +4886,7 @@ dependencies = [
  "backon",
  "base-alloy-consensus",
  "base-alloy-network",
+ "base-balance-monitor",
  "base-cli-utils",
  "base-common-rpc-types",
  "base-consensus-genesis",

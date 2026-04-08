@@ -10,8 +10,9 @@ use std::{
 };
 
 use alloy_primitives::Address;
-use alloy_provider::RootProvider;
+use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
+use base_balance_monitor::BalanceMonitorLayer;
 use base_cli_utils::RuntimeManager;
 use base_health::HealthServer;
 use base_proof_tee_nitro_attestation_prover::{
@@ -403,6 +404,7 @@ impl Cli {
         let signal_handle = RuntimeManager::install_signal_handler(cancel.clone());
 
         // ── 2. Metrics recorder (if enabled) ─────────────────────────────────
+        let metrics_enabled = metrics_config.enabled;
         metrics_config
             .init_with(|| {
                 base_cli_utils::register_version_metrics!();
@@ -411,7 +413,46 @@ impl Cli {
             .wrap_err("failed to install Prometheus recorder")?;
 
         // ── 3. Build L1 provider and tx manager ──────────────────────────────
-        let provider = RootProvider::new_http(config.l1_rpc_url.clone());
+        let l1_addr = config.signing.address();
+        let provider = if metrics_enabled {
+            let (layer, balance_rx) = BalanceMonitorLayer::new(
+                l1_addr,
+                cancel.clone(),
+                BalanceMonitorLayer::DEFAULT_POLL_INTERVAL,
+            );
+            let provider =
+                ProviderBuilder::new().layer(layer).connect_http(config.l1_rpc_url.clone());
+            tokio::spawn(async move {
+                let mut rx = balance_rx;
+                while rx.changed().await.is_ok() {
+                    RegistrarMetrics::account_balance_wei().set(f64::from(*rx.borrow_and_update()));
+                }
+            });
+            info!(%l1_addr, "L1 balance monitor started");
+
+            if let ProvingConfig::Boundless(ref boundless) = config.proving {
+                let bl_addr = boundless.signer.address();
+                let (bl_layer, bl_balance_rx) = BalanceMonitorLayer::new(
+                    bl_addr,
+                    cancel.clone(),
+                    BalanceMonitorLayer::DEFAULT_POLL_INTERVAL,
+                );
+                let _bl_provider =
+                    ProviderBuilder::new().layer(bl_layer).connect_http(boundless.rpc_url.clone());
+                tokio::spawn(async move {
+                    let mut rx = bl_balance_rx;
+                    while rx.changed().await.is_ok() {
+                        RegistrarMetrics::boundless_balance_wei()
+                            .set(f64::from(*rx.borrow_and_update()));
+                    }
+                });
+                info!(%bl_addr, "Boundless balance monitor started");
+            }
+
+            provider
+        } else {
+            ProviderBuilder::new().connect_http(config.l1_rpc_url.clone())
+        };
 
         let tx_manager = SimpleTxManager::new(
             provider,

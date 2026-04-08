@@ -5,7 +5,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use alloy_provider::{Provider, RootProvider};
+use alloy_provider::{Provider, ProviderBuilder, RootProvider};
+use base_balance_monitor::BalanceMonitorLayer;
 use base_cli_utils::RuntimeManager;
 use base_health::HealthServer;
 use base_proof_contracts::{
@@ -71,8 +72,29 @@ impl ChallengerService {
             .map_err(|e| eyre::eyre!("failed to install Prometheus recorder: {e}"))?;
 
         // ── 3. Construct tx-manager and challenge submitter ──────────────────
-        let l1_provider = RootProvider::new_http(config.l1_eth_rpc.as_ref().clone());
         let signer_config = config.signing;
+        let sender_addr = signer_config.address();
+        let l1_provider = if config.metrics.enabled {
+            let (layer, balance_rx) = BalanceMonitorLayer::new(
+                sender_addr,
+                cancel.clone(),
+                BalanceMonitorLayer::DEFAULT_POLL_INTERVAL,
+            );
+            let provider = ProviderBuilder::new()
+                .layer(layer)
+                .connect_http(config.l1_eth_rpc.as_ref().clone());
+            tokio::spawn(async move {
+                let mut rx = balance_rx;
+                while rx.changed().await.is_ok() {
+                    ChallengerMetrics::account_balance_wei()
+                        .set(f64::from(*rx.borrow_and_update()));
+                }
+            });
+            info!(%sender_addr, "Balance monitor started");
+            provider
+        } else {
+            ProviderBuilder::new().connect_http(config.l1_eth_rpc.as_ref().clone())
+        };
         let chain_id = l1_provider
             .get_chain_id()
             .await
