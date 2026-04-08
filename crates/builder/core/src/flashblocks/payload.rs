@@ -988,17 +988,14 @@ where
     if calculate_state_root {
         let state_provider = state.database.as_ref();
         hashed_state = state_provider.hashed_post_state(&state.bundle_state);
-        (state_root, trie_output) = {
-            state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
-                |err| {
-                    warn!(target: "payload_builder",
+        (state_root, trie_output) =
+            state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
+                warn!(target: "payload_builder",
                     parent_header=%ctx.parent().hash(),
-                        %err,
-                        "failed to calculate state root for payload"
-                    );
-                },
-            )?
-        };
+                    %err,
+                    "failed to calculate state root for payload"
+                );
+            })?;
         let state_root_calculation_time = state_root_start_time.elapsed();
         BuilderMetrics::state_root_calculation_duration().record(state_root_calculation_time);
         BuilderMetrics::state_root_calculation_gauge().set(state_root_calculation_time);
