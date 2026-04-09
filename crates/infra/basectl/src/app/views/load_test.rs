@@ -801,6 +801,10 @@ impl View for LoadTestView {
         self.edit.is_some() || self.strategy_modal.is_some()
     }
 
+    fn captures_char_input(&self) -> bool {
+        self.edit.is_some()
+    }
+
     fn tick(&mut self, resources: &mut Resources) -> Action {
         self.ensure_initialized(resources);
 
