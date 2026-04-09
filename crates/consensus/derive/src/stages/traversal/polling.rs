@@ -157,7 +157,7 @@ impl<F: ChainProvider + Send> StageReset for PollingTraversal<F> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(super) mod tests {
     use alloc::vec;
 
     use alloy_eips::BlockNumHash;
