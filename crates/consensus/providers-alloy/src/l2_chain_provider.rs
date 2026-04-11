@@ -112,11 +112,18 @@ impl AlloyL2ChainProvider {
 
         Metrics::l2_chain_requests(method_name).increment(1);
 
+        let raw_block = base_metrics::time!(Metrics::request_duration(method_name), {
+            match &id {
+                BlockId::Number(num) => self.inner.get_block_by_number(*num).full().await,
+                BlockId::Hash(hash) => self.inner.get_block_by_hash(hash.block_hash).full().await,
+            }
+        });
+
         let result = async {
             let block = match id {
-                BlockId::Number(num) => self.inner.get_block_by_number(num).full().await?,
+                BlockId::Number(_) => raw_block?,
                 BlockId::Hash(hash) => {
-                    let block = self.inner.get_block_by_hash(hash.block_hash).full().await?;
+                    let block = raw_block?;
 
                     // Verify block hash matches if we fetched by hash
                     if let Some(ref b) = block {
@@ -232,18 +239,16 @@ impl BatchValidationProvider for AlloyL2ChainProvider {
 
         Metrics::l2_chain_requests("l2_block_ref_by_number").increment(1);
 
-        let block = self
-            .inner
-            .get_block_by_number(number.into())
-            .full()
-            .await
-            .map_err(|e| {
-                Metrics::l2_chain_errors("l2_block_ref_by_number").increment(1);
-                AlloyL2ChainProviderError::Transport(e)
-            })?
-            .ok_or(AlloyL2ChainProviderError::BlockNotFound(number))?
-            .into_consensus()
-            .map_transactions(|t| t.inner.inner.into_inner());
+        let block = base_metrics::time!(Metrics::request_duration("l2_block_ref_by_number"), {
+            self.inner.get_block_by_number(number.into()).full().await
+        })
+        .map_err(|e| {
+            Metrics::l2_chain_errors("l2_block_ref_by_number").increment(1);
+            AlloyL2ChainProviderError::Transport(e)
+        })?
+        .ok_or(AlloyL2ChainProviderError::BlockNotFound(number))?
+        .into_consensus()
+        .map_transactions(|t| t.inner.inner.into_inner());
 
         self.block_by_number_cache.put(number, block.clone());
         Ok(block)

@@ -6,10 +6,11 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B64, B256};
 use base_alloy_chains::BaseUpgrades;
 use base_alloy_consensus::{OpPooledTransaction, OpPrimitives};
+use base_alloy_rpc_jsonrpsee::MinerApiExtServer;
 use base_alloy_rpc_types_engine::{OpExecutionData, OpPayloadAttributes};
-use base_execution_chainspec::OpChainSpec;
+use base_execution_chainspec::BaseChainSpec;
 use base_execution_consensus::OpBeaconConsensus;
-use base_execution_evm::{OpEvmConfig, OpRethReceiptBuilder};
+use base_execution_evm::{BaseEvmConfig, OpRethReceiptBuilder};
 use base_execution_payload_builder::{
     Attributes, OpBuiltPayload, PayloadPrimitives,
     builder::BasePayloadTransactions,
@@ -18,8 +19,8 @@ use base_execution_payload_builder::{
 use base_execution_rpc::{
     config::{BaseEthConfigApiServer, BaseEthConfigHandler},
     eth::OpEthApiBuilder,
-    miner::{MinerApiExtServer, OpMinerExtApi},
-    witness::{DebugExecutionWitnessApiServer, OpDebugWitnessApi},
+    miner::OpMinerExtApi,
+    witness::OpDebugWitnessApi,
 };
 use base_execution_storage::OpStorage;
 use base_execution_txpool::{
@@ -52,7 +53,7 @@ use reth_node_builder::{
 };
 use reth_primitives_traits::{SealedHeader, header::HeaderMut};
 use reth_provider::providers::ProviderFactoryBuilder;
-use reth_rpc_api::{DebugApiServer, eth::RpcTypes};
+use reth_rpc_api::{DebugApiServer, DebugExecutionWitnessApiServer, eth::RpcTypes};
 use reth_rpc_server_types::RethRpcModule;
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{
@@ -69,13 +70,13 @@ use crate::{
 };
 
 /// Marker trait for Base node types with standard engine, chain spec, and primitives.
-pub trait OpNodeTypes:
-    NodeTypes<Payload = OpEngineTypes, ChainSpec = OpChainSpec, Primitives = OpPrimitives>
+pub trait BaseNodeTypes:
+    NodeTypes<Payload = OpEngineTypes, ChainSpec = BaseChainSpec, Primitives = OpPrimitives>
 {
 }
 /// Blanket impl for all node types that conform to the Base spec.
-impl<N> OpNodeTypes for N where
-    N: NodeTypes<Payload = OpEngineTypes, ChainSpec = OpChainSpec, Primitives = OpPrimitives>
+impl<N> BaseNodeTypes for N where
+    N: NodeTypes<Payload = OpEngineTypes, ChainSpec = BaseChainSpec, Primitives = OpPrimitives>
 {
 }
 
@@ -83,7 +84,7 @@ impl<N> OpNodeTypes for N where
 /// data.
 pub trait BaseFullNodeTypes:
     NodeTypes<
-        ChainSpec = OpChainSpec,
+        ChainSpec = BaseChainSpec,
         Primitives: PayloadPrimitives,
         Storage = OpStorage,
         Payload: EngineTypes<ExecutionData = OpExecutionData>,
@@ -93,7 +94,7 @@ pub trait BaseFullNodeTypes:
 
 impl<N> BaseFullNodeTypes for N where
     N: NodeTypes<
-            ChainSpec = OpChainSpec,
+            ChainSpec = BaseChainSpec,
             Primitives: PayloadPrimitives,
             Storage = OpStorage,
             Payload: EngineTypes<ExecutionData = OpExecutionData>,
@@ -108,12 +109,12 @@ impl<N> BaseFullNodeTypes for N where
 /// `base_alloy_rpc_types_engine::OpPayloadAttributes`.
 #[derive(Debug)]
 pub struct BaseLocalPayloadAttributesBuilder {
-    chain_spec: Arc<OpChainSpec>,
+    chain_spec: Arc<BaseChainSpec>,
 }
 
 impl BaseLocalPayloadAttributesBuilder {
     /// Creates a new builder.
-    pub const fn new(chain_spec: Arc<OpChainSpec>) -> Self {
+    pub const fn new(chain_spec: Arc<BaseChainSpec>) -> Self {
         Self { chain_spec }
     }
 }
@@ -172,7 +173,7 @@ impl PayloadAttributesBuilder<OpPayloadAttributes> for BaseLocalPayloadAttribute
 /// Type configuration for a regular Base node.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
-pub struct OpNode {
+pub struct BaseNode {
     /// Additional Base args
     pub args: RollupArgs,
     /// Data availability configuration for the OP builder.
@@ -198,7 +199,7 @@ pub type OpNodeComponentBuilder<Node, Payload = OpPayloadBuilder> = ComponentsBu
     OpConsensusBuilder,
 >;
 
-impl OpNode {
+impl BaseNode {
     /// Creates a new instance of the Base node type.
     pub fn new(args: RollupArgs) -> Self {
         Self { args, da_config: OpDAConfig::default(), gas_limit_config: GasLimitConfig::default() }
@@ -219,7 +220,7 @@ impl OpNode {
     /// Returns the components for the given [`RollupArgs`].
     pub fn components<Node>(&self) -> OpNodeComponentBuilder<Node>
     where
-        Node: FullNodeTypes<Types: OpNodeTypes>,
+        Node: FullNodeTypes<Types: BaseNodeTypes>,
     {
         let RollupArgs {
             disable_txpool_gossip,
@@ -264,10 +265,10 @@ impl OpNode {
     ///
     /// ```no_run
     /// use base_execution_chainspec::BASE_MAINNET;
-    /// use base_node_core::OpNode;
+    /// use base_node_core::BaseNode;
     ///
     /// fn demo(runtime: reth_tasks::Runtime) {
-    ///     let factory = OpNode::provider_factory_builder()
+    ///     let factory = BaseNode::provider_factory_builder()
     ///         .open_read_only(BASE_MAINNET.clone(), "datadir", runtime)
     ///         .unwrap();
     /// }
@@ -276,14 +277,14 @@ impl OpNode {
     /// # Open a Providerfactory with custom config
     ///
     /// ```no_run
-    /// use base_execution_chainspec::OpChainSpecBuilder;
-    /// use base_node_core::OpNode;
+    /// use base_execution_chainspec::BaseChainSpecBuilder;
+    /// use base_node_core::BaseNode;
     /// use reth_provider::providers::ReadOnlyConfig;
     ///
     /// fn demo(runtime: reth_tasks::Runtime) {
-    ///     let factory = OpNode::provider_factory_builder()
+    ///     let factory = BaseNode::provider_factory_builder()
     ///         .open_read_only(
-    ///             OpChainSpecBuilder::base_mainnet().build().into(),
+    ///             BaseChainSpecBuilder::base_mainnet().build().into(),
     ///             ReadOnlyConfig::from_datadir("datadir").no_watch(),
     ///             runtime,
     ///         )
@@ -295,9 +296,9 @@ impl OpNode {
     }
 }
 
-impl<N> Node<N> for OpNode
+impl<N> Node<N> for BaseNode
 where
-    N: FullNodeTypes<Types: BaseFullNodeTypes + OpNodeTypes>,
+    N: FullNodeTypes<Types: BaseFullNodeTypes + BaseNodeTypes>,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -325,7 +326,7 @@ where
     }
 }
 
-impl<N> DebugNode<N> for OpNode
+impl<N> DebugNode<N> for BaseNode
 where
     N: FullNodeComponents<Types = Self>,
 {
@@ -342,9 +343,9 @@ where
     }
 }
 
-impl NodeTypes for OpNode {
+impl NodeTypes for BaseNode {
     type Primitives = OpPrimitives;
-    type ChainSpec = OpChainSpec;
+    type ChainSpec = BaseChainSpec;
     type Storage = OpStorage;
     type Payload = OpEngineTypes;
 }
@@ -405,7 +406,7 @@ where
 
 impl<N> Default for OpAddOns<N, OpEthApiBuilder, OpEngineValidatorBuilder>
 where
-    N: FullNodeComponents<Types: OpNodeTypes>,
+    N: FullNodeComponents<Types: BaseNodeTypes>,
     OpEthApiBuilder: EthApiBuilder<N>,
 {
     fn default() -> Self {
@@ -422,7 +423,7 @@ impl<N, NetworkT, RpcMiddleware>
         RpcMiddleware,
     >
 where
-    N: FullNodeComponents<Types: OpNodeTypes>,
+    N: FullNodeComponents<Types: BaseNodeTypes>,
     OpEthApiBuilder<NetworkT>: EthApiBuilder<N>,
 {
     /// Build a [`OpAddOns`] using [`OpAddOnsBuilder`].
@@ -536,9 +537,10 @@ impl<N, EthB, PVB, EB, EVB, Attrs, RpcMiddleware> NodeAddOns<N>
     for OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
     N: FullNodeComponents<
-            Types: OpNodeTypes + NodeTypes<Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>>,
+            Types: BaseNodeTypes
+                       + NodeTypes<Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>>,
             Evm: ConfigureEvm<
-                NextBlockEnvCtx: BuildNextEnv<Attrs, HeaderTy<N::Types>, OpChainSpec>,
+                NextBlockEnvCtx: BuildNextEnv<Attrs, HeaderTy<N::Types>, BaseChainSpec>,
             >,
             Pool: TransactionPool<Transaction: OpPooledTx>,
         >,
@@ -611,9 +613,10 @@ impl<N, EthB, PVB, EB, EVB, Attrs, RpcMiddleware> RethRpcAddOns<N>
     for OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
     N: FullNodeComponents<
-            Types: OpNodeTypes + NodeTypes<Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>>,
+            Types: BaseNodeTypes
+                       + NodeTypes<Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>>,
             Evm: ConfigureEvm<
-                NextBlockEnvCtx: BuildNextEnv<Attrs, HeaderTy<N::Types>, OpChainSpec>,
+                NextBlockEnvCtx: BuildNextEnv<Attrs, HeaderTy<N::Types>, BaseChainSpec>,
             >,
         >,
     <<N as FullNodeComponents>::Pool as TransactionPool>::Transaction: OpPooledTx,
@@ -802,13 +805,15 @@ pub struct OpExecutorBuilder;
 
 impl<Node> ExecutorBuilder<Node> for OpExecutorBuilder
 where
-    Node: FullNodeTypes<Types: OpNodeTypes>,
+    Node: FullNodeTypes<Types: BaseNodeTypes>,
 {
-    type EVM =
-        OpEvmConfig<<Node::Types as NodeTypes>::ChainSpec, <Node::Types as NodeTypes>::Primitives>;
+    type EVM = BaseEvmConfig<
+        <Node::Types as NodeTypes>::ChainSpec,
+        <Node::Types as NodeTypes>::Primitives,
+    >;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let evm_config = OpEvmConfig::new(ctx.chain_spec(), OpRethReceiptBuilder::default());
+        let evm_config = BaseEvmConfig::new(ctx.chain_spec(), OpRethReceiptBuilder::default());
 
         Ok(evm_config)
     }
@@ -867,7 +872,7 @@ impl<T> OpPoolBuilder<T> {
 
 impl<Node, T, Evm> PoolBuilder<Node, Evm> for OpPoolBuilder<T>
 where
-    Node: FullNodeTypes<Types: OpNodeTypes>,
+    Node: FullNodeTypes<Types: BaseNodeTypes>,
     T: EthPoolTransaction<Consensus = TxTy<Node::Types>> + OpPooledTx + TimestampedTransaction,
     Evm: ConfigureEvm<Primitives = PrimitivesTy<Node::Types>> + Clone + 'static,
 {
@@ -1128,7 +1133,7 @@ pub struct OpConsensusBuilder;
 
 impl<Node> ConsensusBuilder<Node> for OpConsensusBuilder
 where
-    Node: FullNodeTypes<Types: OpNodeTypes>,
+    Node: FullNodeTypes<Types: BaseNodeTypes>,
 {
     type Consensus = Arc<OpBeaconConsensus>;
 

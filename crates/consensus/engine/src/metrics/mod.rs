@@ -8,6 +8,9 @@ base_metrics::define_metrics! {
     #[describe("Blockchain head labels")]
     #[label(label)]
     block_labels: gauge,
+    #[describe("Seconds behind wall clock for each blockchain head ref")]
+    #[label(label)]
+    block_refs_latency: gauge,
     #[describe("Engine tasks successfully executed")]
     #[label(
         name = "task",
@@ -28,6 +31,10 @@ base_metrics::define_metrics! {
     engine_reset_count: counter,
     #[describe("Payloads dropped because unsafe head changed between build and seal")]
     sequencer_unsafe_head_changed_total: counter,
+    #[describe("Total duration of the finalize task in seconds")]
+    engine_finalize_duration_seconds: histogram,
+    #[describe("Number of tasks currently pending in the engine task queue")]
+    engine_task_queue_depth: gauge,
 }
 
 impl Metrics {

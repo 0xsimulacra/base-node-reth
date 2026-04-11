@@ -5,9 +5,9 @@ use std::{boxed::Box, collections::HashMap, format, string::String, vec::Vec};
 use alloy_eips::eip4844::{env_settings::EnvKzgSettings, kzg_to_versioned_hash};
 use alloy_primitives::{B256, FixedBytes};
 use alloy_rpc_types_beacon::sidecar::GetBlobsResponse;
-use alloy_transport_http::reqwest::{self, Client};
 use async_trait::async_trait;
 use c_kzg::Blob;
+use reqwest::{self, Client};
 use thiserror::Error;
 
 use crate::{Metrics, blobs::BoxedBlob};
@@ -228,11 +228,13 @@ impl BeaconClient for OnlineBeaconClient {
             return Ok(APIConfigResponse::new(l1_slot_duration));
         }
 
-        let result = async {
-            let first = self.inner.get(format!("{}/{}", self.base, SPEC_METHOD)).send().await?;
-            first.json::<APIConfigResponse>().await
-        }
-        .await;
+        let result = base_metrics::time!(Metrics::request_duration("spec"), {
+            async {
+                let first = self.inner.get(format!("{}/{}", self.base, SPEC_METHOD)).send().await?;
+                first.json::<APIConfigResponse>().await
+            }
+            .await
+        });
 
         if result.is_err() {
             Metrics::beacon_errors("spec").increment(1);
@@ -244,11 +246,14 @@ impl BeaconClient for OnlineBeaconClient {
     async fn genesis_time(&self) -> Result<APIGenesisResponse, Self::Error> {
         Metrics::beacon_requests("genesis").increment(1);
 
-        let result = async {
-            let first = self.inner.get(format!("{}/{}", self.base, GENESIS_METHOD)).send().await?;
-            first.json::<APIGenesisResponse>().await
-        }
-        .await;
+        let result = base_metrics::time!(Metrics::request_duration("genesis"), {
+            async {
+                let first =
+                    self.inner.get(format!("{}/{}", self.base, GENESIS_METHOD)).send().await?;
+                first.json::<APIGenesisResponse>().await
+            }
+            .await
+        });
 
         if result.is_err() {
             Metrics::beacon_errors("genesis").increment(1);
@@ -265,7 +270,9 @@ impl BeaconClient for OnlineBeaconClient {
         Metrics::beacon_requests("blobs").increment(1);
 
         // Try to get the blobs from the blobs endpoint.
-        let result = self.filtered_beacon_blobs(slot, blob_hashes).await;
+        let result = base_metrics::time!(Metrics::request_duration("blobs"), {
+            self.filtered_beacon_blobs(slot, blob_hashes).await
+        });
 
         if result.is_err() {
             Metrics::beacon_errors("blobs").increment(1);

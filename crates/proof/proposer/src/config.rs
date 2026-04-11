@@ -74,8 +74,6 @@ pub struct ProposerConfig {
     pub rollup_rpc: Url,
     /// Skip TLS certificate verification.
     pub skip_tls_verify: bool,
-    /// Wait for node sync before starting.
-    pub wait_node_sync: bool,
     /// Logging configuration (from base-cli-utils).
     pub log: LogConfig,
     /// Metrics server configuration.
@@ -95,8 +93,6 @@ pub struct ProposerConfig {
     /// Maximum number of concurrent proof tasks.
     /// When > 1, uses the parallel proving pipeline instead of the sequential driver.
     pub max_parallel_proofs: usize,
-    /// Maximum number of games to scan backwards when recovering state on startup.
-    pub max_game_recovery_lookback: u64,
     /// Optional address of the `TEEProverRegistry` contract on L1.
     /// When set, the proposer validates signers before on-chain submission.
     pub tee_prover_registry_address: Option<Address>,
@@ -120,11 +116,14 @@ impl ProposerConfig {
             });
         }
 
-        if cli.proposer.max_game_recovery_lookback == 0 {
+        // The anchor state registry address is used as the "no parent"
+        // sentinel for the first game from anchor state. A zero address
+        // would be indistinguishable from an unconfigured value.
+        if cli.proposer.anchor_state_registry_addr == Address::ZERO {
             return Err(ConfigError::OutOfRange {
-                field: "max-game-recovery-lookback",
-                constraint: "at least 1",
-                value: "0".to_string(),
+                field: "anchor-state-registry-addr",
+                constraint: "non-zero address",
+                value: format!("{}", Address::ZERO),
             });
         }
 
@@ -186,9 +185,7 @@ impl ProposerConfig {
             tx_manager,
             rollup_rpc: cli.proposer.rollup_rpc,
             skip_tls_verify: cli.proposer.skip_tls_verify,
-            wait_node_sync: cli.proposer.wait_node_sync,
             max_parallel_proofs: cli.proposer.max_parallel_proofs,
-            max_game_recovery_lookback: cli.proposer.max_game_recovery_lookback,
             tee_prover_registry_address: cli.proposer.tee_prover_registry_address,
             log: LogConfig::from(cli.logging),
             metrics: cli.metrics.into(),
@@ -250,7 +247,6 @@ mod tests {
                 rpc_timeout: Duration::from_secs(30),
                 rollup_rpc: Url::parse("http://localhost:7545").unwrap(),
                 skip_tls_verify: false,
-                wait_node_sync: false,
                 rpc_max_retries: 5,
                 rpc_retry_initial_delay: Duration::from_millis(100),
                 rpc_retry_max_delay: Duration::from_secs(10),
@@ -263,7 +259,6 @@ mod tests {
                     signer_address: None,
                 },
                 max_parallel_proofs: 1,
-                max_game_recovery_lookback: 5000,
                 tee_prover_registry_address: None,
                 tx_manager: TxManagerCli::default(),
             },
@@ -515,28 +510,13 @@ mod tests {
     }
 
     #[test]
-    fn test_max_game_recovery_lookback_zero_rejected() {
+    fn test_anchor_state_registry_zero_rejected() {
         let mut cli = minimal_cli();
-        cli.proposer.max_game_recovery_lookback = 0;
+        cli.proposer.anchor_state_registry_addr = Address::ZERO;
         let result = ProposerConfig::from_cli(cli);
         assert!(matches!(
             result,
-            Err(ConfigError::OutOfRange { field: "max-game-recovery-lookback", .. })
+            Err(ConfigError::OutOfRange { field: "anchor-state-registry-addr", .. })
         ));
-    }
-
-    #[test]
-    fn test_max_game_recovery_lookback_default() {
-        let cli = minimal_cli();
-        let config = ProposerConfig::from_cli(cli).unwrap();
-        assert_eq!(config.max_game_recovery_lookback, 5000);
-    }
-
-    #[test]
-    fn test_max_game_recovery_lookback_custom() {
-        let mut cli = minimal_cli();
-        cli.proposer.max_game_recovery_lookback = 10000;
-        let config = ProposerConfig::from_cli(cli).unwrap();
-        assert_eq!(config.max_game_recovery_lookback, 10000);
     }
 }

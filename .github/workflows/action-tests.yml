@@ -12,6 +12,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 permissions:
   contents: read
@@ -34,7 +36,10 @@ jobs:
           free-disk: "true"
           native-deps: "true"
           mold: "true"
+          foundry: "true"
           tools: cargo-nextest
           rust-cache-shared-key: "stable"
+      - name: Build test contracts
+        run: just build-contracts
       - name: Run action tests
         run: just actions::test

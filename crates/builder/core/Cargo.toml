@@ -44,7 +44,7 @@ reth-network-peers.workspace = true
 reth-tracing-otlp.workspace = true
 base-execution-evm.workspace = true
 reth-node-ethereum.workspace = true
-base-execution-forks.workspace = true
+base-execution-upgrades.workspace = true
 reth-cli-commands.workspace = true
 reth-rpc-eth-types.workspace = true
 reth-execution-types.workspace = true
@@ -160,17 +160,25 @@ tikv-jemallocator = { workspace = true, optional = true }
 [dev-dependencies]
 # workspace
 base-builder-core = { path = ".", features = ["test-utils"] }
+base-test-utils.workspace = true
 
 # reth
 reth-ipc.workspace = true
 reth-testing-utils.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
 
+# trie
+base-execution-trie.workspace = true
+reth-trie-common.workspace = true
+
 # metrics
 metrics-exporter-prometheus.workspace = true
 
 # alloy
 alloy-provider = { workspace = true, default-features = true, features = ["txpool-api"] }
+
+# bench
+criterion = { workspace = true, features = ["html_reports"] }
 
 # misc
 ctor.workspace = true
@@ -228,3 +236,7 @@ test-utils = [
 	"rlimit",
 	"testcontainers",
 ]
+
+[[bench]]
+name = "state_root"
+harness = false

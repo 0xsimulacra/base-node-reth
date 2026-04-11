@@ -20,7 +20,7 @@ use base_alloy_flashblocks::{
 };
 use base_builder_publish::WebSocketPublisher;
 use base_execution_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
-use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use base_execution_evm::{BaseEvmConfig, OpNextBlockEnvAttributes};
 use base_execution_payload_builder::{OpBuiltPayload, OpPayloadBuilderAttributes};
 use either::Either;
 use eyre::WrapErr as _;
@@ -88,7 +88,7 @@ pub struct FlashblocksExecutionInfo {
 #[derive(Debug, Clone)]
 pub(super) struct OpPayloadBuilder<Pool, Client> {
     /// The type responsible for creating the evm.
-    pub evm_config: OpEvmConfig,
+    pub evm_config: BaseEvmConfig,
     /// The transaction pool
     pub pool: Pool,
     /// Node client
@@ -106,7 +106,7 @@ pub(super) struct OpPayloadBuilder<Pool, Client> {
 impl<Pool, Client> OpPayloadBuilder<Pool, Client> {
     /// `OpPayloadBuilder` constructor.
     pub(super) const fn new(
-        evm_config: OpEvmConfig,
+        evm_config: BaseEvmConfig,
         pool: Pool,
         client: Client,
         config: BuilderConfig,
@@ -376,9 +376,12 @@ where
         ctx = ctx.with_cancel(fb_cancel.clone()).with_extra_ctx(extra);
 
         // Create best_transaction iterator
-        let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
-            self.pool.best_transactions_with_attributes(ctx.best_transaction_attributes()),
-        ));
+        let mut best_txs = BestFlashblocksTxs::new(
+            BestPayloadTransactions::new(
+                self.pool.best_transactions_with_attributes(ctx.best_transaction_attributes()),
+            ),
+            self.config.rejection_cache.clone(),
+        );
         let interval = self.config.flashblocks_interval;
         let (tx, mut rx) = mpsc::channel((self.config.flashblocks_per_block() + 1) as usize);
 
@@ -589,6 +592,21 @@ where
         let diag = ctx
             .execute_best_transactions(info, state, best_txs, &limits)
             .wrap_err("failed to execute best transactions")?;
+
+        // Evict permanently rejected transactions from the iterator and pool.
+        // The rejection cache (inside best_txs) prevents re-entry on P2P re-gossip.
+        if !diag.permanently_rejected_txs.is_empty() {
+            let rejected_count = diag.permanently_rejected_txs.len();
+            best_txs.mark_rejected(&diag.permanently_rejected_txs);
+            self.config.metering_provider.remove(&diag.permanently_rejected_txs);
+            self.pool.remove_transactions(diag.permanently_rejected_txs.clone());
+            info!(
+                target: "payload_builder",
+                count = rejected_count,
+                "evicted permanently rejected transactions from pool",
+            );
+        }
+
         // Extract last transactions
         let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
             .iter()
@@ -970,17 +988,14 @@ where
     if calculate_state_root {
         let state_provider = state.database.as_ref();
         hashed_state = state_provider.hashed_post_state(&state.bundle_state);
-        (state_root, trie_output) = {
-            state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
-                |err| {
-                    warn!(target: "payload_builder",
+        (state_root, trie_output) =
+            state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
+                warn!(target: "payload_builder",
                     parent_header=%ctx.parent().hash(),
-                        %err,
-                        "failed to calculate state root for payload"
-                    );
-                },
-            )?
-        };
+                    %err,
+                    "failed to calculate state root for payload"
+                );
+            })?;
         let state_root_calculation_time = state_root_start_time.elapsed();
         BuilderMetrics::state_root_calculation_duration().record(state_root_calculation_time);
         BuilderMetrics::state_root_calculation_gauge().set(state_root_calculation_time);
@@ -1171,7 +1186,7 @@ mod tests {
     use alloy_primitives::{Address, B256, Log, U256, map::foldhash::HashMap};
     use base_alloy_consensus::OpReceipt;
     use base_alloy_flashblocks::Metadata;
-    use base_execution_chainspec::OpChainSpec;
+    use base_execution_chainspec::BaseChainSpec;
     use reth_chainspec::ChainSpec;
     use reth_primitives_traits::SealedHeader;
     use reth_provider::noop::NoopProvider;
@@ -1180,13 +1195,13 @@ mod tests {
     use super::{FlashblocksMetadata, build_block};
     use crate::{ExecutionInfo, flashblocks::context::OpPayloadBuilderCtx};
 
-    /// Creates a minimal [`OpChainSpec`] with all L1 hardforks through Cancun
+    /// Creates a minimal [`BaseChainSpec`] with all L1 hardforks through Cancun
     /// active at genesis but **no** OP-specific hardforks (Bedrock, Canyon,
     /// Ecotone, Holocene, Isthmus, Jovian are all absent).
     ///
     /// This keeps `build_block` on the simplest code paths: no blob fields,
     /// default extra data, no withdrawals root calculation.
-    fn minimal_chain_spec() -> Arc<OpChainSpec> {
+    fn minimal_chain_spec() -> Arc<BaseChainSpec> {
         let genesis: serde_json::Value = serde_json::json!({
             "config": { "chainId": 901 },
             "gasLimit": "0x1C9C380",
@@ -1197,7 +1212,7 @@ mod tests {
         let inner =
             ChainSpec::builder().chain(901.into()).genesis(genesis).cancun_activated().build();
 
-        Arc::new(OpChainSpec { inner })
+        Arc::new(BaseChainSpec { inner })
     }
 
     /// Builds a sealed genesis header consistent with [`minimal_chain_spec`].

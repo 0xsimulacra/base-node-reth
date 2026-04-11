@@ -11,15 +11,15 @@ mod devnet;
 pub use devnet::{HARDHAT_TEST_KEYS, devnet_funder, ensure_funder_balance, is_local_rpc};
 
 mod utils;
-pub use utils::{BaselineError, Result, init_tracing};
+pub use utils::{BaselineError, Result};
 
 mod rpc;
 pub use rpc::{ReceiptProvider, RpcClient, WalletProvider, create_wallet_provider};
 
 mod metrics;
 pub use metrics::{
-    GasMetrics, LatencyMetrics, MetricsAggregator, MetricsCollector, MetricsSummary, RollingWindow,
-    ThroughputMetrics, TransactionMetrics,
+    FlashblocksLatencyMetrics, GasMetrics, LatencyMetrics, MetricsAggregator, MetricsCollector,
+    MetricsSummary, RollingWindow, ThroughputMetrics, TransactionMetrics,
 };
 
 mod workload;
@@ -31,6 +31,7 @@ pub use workload::{
 
 mod runner;
 pub use runner::{
-    AdaptiveBackoff, Confirmer, ConfirmerHandle, DEFAULT_MAX_GAS_PRICE, DisplaySnapshot,
-    LoadConfig, LoadRunner, LoadTestDisplay, RateLimiter, TxConfig, TxType,
+    AdaptiveBackoff, BlockFirstSeen, BlockWatcher, Confirmer, ConfirmerHandle,
+    DEFAULT_MAX_GAS_PRICE, DisplaySnapshot, FlashblockTimes, FlashblockTracker, LoadConfig,
+    LoadRunner, LoadTestDisplay, RateLimiter, TxConfig, TxType,
 };

@@ -44,7 +44,8 @@ fn sanitize_system_contracts_for_fork(
         // Base does not support L1-style deposit, consolidation, or withdrawal request contracts.
         SystemContract::ConsolidationRequestPredeploy
         | SystemContract::DepositContract
-        | SystemContract::WithdrawalRequestPredeploy => false,
+        | SystemContract::WithdrawalRequestPredeploy
+        | SystemContract::Other(_) => false,
     });
 }
 
@@ -132,7 +133,7 @@ mod tests {
         eip4844::BLOB_TX_MIN_BLOB_GASPRICE,
         eip7910::{EthForkConfig, SystemContract},
     };
-    use base_execution_chainspec::OpChainSpecBuilder;
+    use base_execution_chainspec::BaseChainSpecBuilder;
 
     use super::{sanitize_system_contracts_for_fork, zero_blob_params};
 
@@ -153,26 +154,26 @@ mod tests {
 
     #[test]
     fn ecotone_only_keeps_beacon_roots() {
-        let chain_spec = OpChainSpecBuilder::base_mainnet().ecotone_activated().build();
+        let chain_spec = BaseChainSpecBuilder::base_mainnet().ecotone_activated().build();
         let mut fork_config = fork_config(0);
 
         sanitize_system_contracts_for_fork(&chain_spec, &mut fork_config);
 
         assert_eq!(
-            fork_config.system_contracts.keys().copied().collect::<Vec<_>>(),
+            fork_config.system_contracts.keys().cloned().collect::<Vec<_>>(),
             vec![SystemContract::BeaconRoots]
         );
     }
 
     #[test]
     fn isthmus_keeps_beacon_roots_and_history_storage() {
-        let chain_spec = OpChainSpecBuilder::base_mainnet().isthmus_activated().build();
+        let chain_spec = BaseChainSpecBuilder::base_mainnet().isthmus_activated().build();
         let mut fork_config = fork_config(0);
 
         sanitize_system_contracts_for_fork(&chain_spec, &mut fork_config);
 
         assert_eq!(
-            fork_config.system_contracts.keys().copied().collect::<Vec<_>>(),
+            fork_config.system_contracts.keys().cloned().collect::<Vec<_>>(),
             vec![SystemContract::BeaconRoots, SystemContract::HistoryStorage]
         );
     }

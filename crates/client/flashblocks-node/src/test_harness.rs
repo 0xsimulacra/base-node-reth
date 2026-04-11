@@ -22,7 +22,7 @@ use base_alloy_consensus::{BaseBlock, OpDepositReceipt, OpReceipt, OpTransaction
 use base_alloy_flashblocks::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
 };
-use base_execution_chainspec::OpChainSpec;
+use base_execution_chainspec::BaseChainSpec;
 use base_flashblocks::{
     EthApiExt, EthApiOverrideServer, EthPubSub, EthPubSubApiServer, FlashblocksAPI,
     FlashblocksReceiver, FlashblocksState, PendingBlocksAPI,
@@ -30,11 +30,11 @@ use base_flashblocks::{
 use base_node_runner::{
     BaseNodeExtension, NodeHooks,
     test_utils::{
-        Account, L1_BLOCK_INFO_DEPOSIT_TX, L1_BLOCK_INFO_DEPOSIT_TX_HASH, LocalNode,
-        LocalNodeProvider, NODE_STARTUP_DELAY_MS, TestHarness, build_test_genesis,
-        init_silenced_tracing,
+        L1_BLOCK_INFO_DEPOSIT_TX, L1_BLOCK_INFO_DEPOSIT_TX_HASH, LocalNode, LocalNodeProvider,
+        NODE_STARTUP_DELAY_MS, TestHarness, init_silenced_tracing,
     },
 };
+use base_test_utils::{Account, build_test_genesis};
 use derive_more::Deref;
 use eyre::Result;
 use reth_chain_state::CanonStateSubscriptions;
@@ -240,7 +240,7 @@ impl FlashblocksLocalNode {
     async fn with_options(process_canonical: bool) -> Result<Self> {
         // Build default chain spec programmatically
         let genesis = build_test_genesis();
-        let chain_spec = Arc::new(OpChainSpec::from_genesis(genesis));
+        let chain_spec = Arc::new(BaseChainSpec::from_genesis(genesis));
 
         let extension = FlashblocksTestExtension::new(process_canonical);
         let parts_source = extension.clone();
@@ -299,7 +299,7 @@ impl FlashblocksHarness {
 
         // Build default chain spec programmatically
         let genesis = build_test_genesis();
-        let chain_spec = Arc::new(OpChainSpec::from_genesis(genesis));
+        let chain_spec = Arc::new(BaseChainSpec::from_genesis(genesis));
 
         // Create the extension and keep a reference to get parts after launch
         let extension = FlashblocksTestExtension::new(process_canonical);

@@ -7,14 +7,14 @@ use std::{
 use alloy_consensus::{Eip658Value, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_primitives::{B256, BlockHash, Bytes, U256};
+use alloy_primitives::{B256, BlockHash, Bytes, TxHash, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use base_access_lists::FBALBuilderDb;
 use base_alloy_chains::BaseUpgrades;
 use base_alloy_consensus::{OpDepositReceipt, OpReceipt, OpTransactionSigned, OpTxType};
 use base_alloy_evm::OpReceiptBuilder;
-use base_execution_chainspec::OpChainSpec;
-use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use base_execution_chainspec::BaseChainSpec;
+use base_execution_evm::{BaseEvmConfig, OpNextBlockEnvAttributes};
 use base_execution_payload_builder::{OpPayloadBuilderAttributes, error::BasePayloadBuilderError};
 use base_execution_txpool::{
     BundleTransaction, TimestampedTransaction, estimated_da_size::DataAvailabilitySized,
@@ -124,6 +124,10 @@ pub struct FlashblockDiagnostics {
     pub txs_rejected_other: u64,
     /// Minimum effective priority fee (tip per gas) among included transactions.
     pub min_priority_fee: Option<u64>,
+    /// Transaction hashes permanently rejected due to per-tx intrinsic limits
+    /// (e.g. tx DA size exceeded, tx execution time exceeded). These will never
+    /// be includable and should be evicted from the pool.
+    pub permanently_rejected_txs: Vec<TxHash>,
 }
 
 impl FlashblockDiagnostics {
@@ -272,9 +276,9 @@ impl FlashblocksExtraCtx {
 #[derive(Debug)]
 pub struct OpPayloadBuilderCtx {
     /// The type that knows how to perform system calls and configure the evm.
-    pub evm_config: OpEvmConfig,
+    pub evm_config: BaseEvmConfig,
     /// The chainspec
-    pub chain_spec: Arc<OpChainSpec>,
+    pub chain_spec: Arc<BaseChainSpec>,
     /// How to build the payload.
     pub config: PayloadConfig<OpPayloadBuilderAttributes<OpTransactionSigned>>,
     /// Evm Settings
@@ -761,6 +765,9 @@ impl OpPayloadBuilderCtx {
                     if !dry_run {
                         diag.record_rejection(&err);
                         record_rejected_tx_priority_fee(&err, priority_fee);
+                        if err.is_permanent() {
+                            diag.permanently_rejected_txs.push(tx_hash);
+                        }
                         log_txn(Err(err));
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
                         continue;
@@ -773,6 +780,9 @@ impl OpPayloadBuilderCtx {
                     let priority_fee = tx.effective_tip_per_gas(base_fee).unwrap_or(0) as f64;
                     record_rejected_tx_priority_fee(&err, priority_fee);
 
+                    if err.is_permanent() {
+                        diag.permanently_rejected_txs.push(tx_hash);
+                    }
                     log_txn(Err(err));
                     best_txs.mark_invalid(tx.signer(), tx.nonce());
                     continue;
@@ -1028,8 +1038,8 @@ impl OpPayloadBuilderCtx {
     ///
     /// Derives the EVM environment from the given chain spec and parent header,
     /// using default builder attributes and a no-op cancellation token.
-    pub fn for_test(chain_spec: Arc<OpChainSpec>, parent: Arc<SealedHeader>) -> Self {
-        let evm_config = OpEvmConfig::optimism(Arc::clone(&chain_spec));
+    pub fn for_test(chain_spec: Arc<BaseChainSpec>, parent: Arc<SealedHeader>) -> Self {
+        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
         let timestamp = parent.timestamp + 2;
 
         let attributes = OpPayloadBuilderAttributes {

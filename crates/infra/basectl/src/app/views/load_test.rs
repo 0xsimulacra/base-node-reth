@@ -9,7 +9,7 @@ use std::{
 
 use base_load_tests::{
     DisplaySnapshot, LoadRunner, MetricsSummary, OsakaTarget, PrecompileTarget, RpcClient,
-    TestConfig, TxTypeConfig, devnet_funder, ensure_funder_balance, is_local_rpc,
+    TestConfig, TxTypeConfig, WeightedTxType, devnet_funder, ensure_funder_balance, is_local_rpc,
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, mpsc::error::TryRecvError, watch};
 use url::Url;
 
 use crate::{
-    app::{Action, Resources, View},
+    app::{Action, LoadTestTask, Resources, View},
     commands::common::COLOR_BASE_BLUE,
     tui::{Keybinding, Toast},
 };
@@ -34,6 +34,7 @@ const KEYBINDINGS_IDLE: &[Keybinding] = &[
     Keybinding { key: "←/→", description: "Select network" },
     Keybinding { key: "b", description: "Begin test" },
     Keybinding { key: "c", description: "Continuous mode" },
+    Keybinding { key: "t", description: "Strategy" },
     Keybinding { key: "e", description: "Edit config" },
     Keybinding { key: "Esc", description: "Back" },
     Keybinding { key: "?", description: "Toggle help" },
@@ -85,10 +86,18 @@ enum RunState {
     Idle,
     Running {
         start: Instant,
+        /// When the actual test run began (after bootstrap/funding). Used for the
+        /// progress bar so that bootstrap/funding time does not count against the
+        /// configured duration.
+        run_start: Option<Instant>,
         run_count: u32,
         stop_flag: Arc<AtomicBool>,
+        /// Shared with the background task; storing `false` causes the loop to
+        /// stop after the current run completes rather than starting another.
+        continuous_flag: Arc<AtomicBool>,
         phase_rx: watch::Receiver<RunPhase>,
         snap_rx: watch::Receiver<DisplaySnapshot>,
+        run_count_rx: watch::Receiver<u32>,
         done_rx: mpsc::Receiver<Result<MetricsSummary, String>>,
         current_snap: DisplaySnapshot,
         current_phase: RunPhase,
@@ -105,10 +114,197 @@ impl std::fmt::Debug for RunState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Idle => write!(f, "Idle"),
-            Self::Running { run_count, .. } => write!(f, "Running(run={run_count})"),
+            Self::Running { run_count, run_start, .. } => {
+                write!(f, "Running(run={run_count}, started={})", run_start.is_some())
+            }
             Self::Complete { run_count, .. } => write!(f, "Complete(run={run_count})"),
             Self::Error(e) => write!(f, "Error({e})"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy multiselect
+// ---------------------------------------------------------------------------
+
+/// Flat enumeration of all individually-selectable load strategies shown in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrategyOption {
+    Transfer,
+    Calldata,
+    Ecrecover,
+    Sha256,
+    Ripemd160,
+    Identity,
+    Modexp,
+    Bn254Add,
+    Bn254Mul,
+    Bn254Pairing,
+    Blake2f,
+    Kzg,
+    OsakaClz,
+    OsakaP256verify,
+    OsakaModexp,
+}
+
+const ALL_STRATEGIES: &[StrategyOption] = &[
+    StrategyOption::Transfer,
+    StrategyOption::Calldata,
+    StrategyOption::Ecrecover,
+    StrategyOption::Sha256,
+    StrategyOption::Ripemd160,
+    StrategyOption::Identity,
+    StrategyOption::Modexp,
+    StrategyOption::Bn254Add,
+    StrategyOption::Bn254Mul,
+    StrategyOption::Bn254Pairing,
+    StrategyOption::Blake2f,
+    StrategyOption::Kzg,
+    StrategyOption::OsakaClz,
+    StrategyOption::OsakaP256verify,
+    StrategyOption::OsakaModexp,
+];
+
+impl StrategyOption {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Transfer => "transfer",
+            Self::Calldata => "calldata",
+            Self::Ecrecover => "precompile  ecrecover",
+            Self::Sha256 => "precompile  sha256",
+            Self::Ripemd160 => "precompile  ripemd160",
+            Self::Identity => "precompile  identity",
+            Self::Modexp => "precompile  modexp",
+            Self::Bn254Add => "precompile  bn254_add",
+            Self::Bn254Mul => "precompile  bn254_mul",
+            Self::Bn254Pairing => "precompile  bn254_pairing",
+            Self::Blake2f => "precompile  blake2f",
+            Self::Kzg => "precompile  kzg",
+            Self::OsakaClz => "osaka  clz",
+            Self::OsakaP256verify => "osaka  p256verify",
+            Self::OsakaModexp => "osaka  modexp",
+        }
+    }
+
+    const fn to_tx_type(self) -> TxTypeConfig {
+        match self {
+            Self::Transfer => TxTypeConfig::Transfer,
+            Self::Calldata => TxTypeConfig::Calldata { max_size: 128, repeat_count: 1 },
+            Self::Ecrecover => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Ecrecover, iterations: 1 }
+            }
+            Self::Sha256 => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Sha256, iterations: 1 }
+            }
+            Self::Ripemd160 => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Ripemd160, iterations: 1 }
+            }
+            Self::Identity => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Identity, iterations: 1 }
+            }
+            Self::Modexp => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Modexp, iterations: 1 }
+            }
+            Self::Bn254Add => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Bn254Add, iterations: 1 }
+            }
+            Self::Bn254Mul => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Bn254Mul, iterations: 1 }
+            }
+            Self::Bn254Pairing => {
+                TxTypeConfig::Precompile { target: PrecompileTarget::Bn254Pairing, iterations: 1 }
+            }
+            Self::Blake2f => TxTypeConfig::Precompile {
+                target: PrecompileTarget::Blake2f { rounds: None },
+                iterations: 1,
+            },
+            Self::Kzg => TxTypeConfig::Precompile {
+                target: PrecompileTarget::KzgPointEvaluation,
+                iterations: 1,
+            },
+            Self::OsakaClz => TxTypeConfig::Osaka { target: OsakaTarget::Clz },
+            Self::OsakaP256verify => TxTypeConfig::Osaka { target: OsakaTarget::P256verifyOsaka },
+            Self::OsakaModexp => TxTypeConfig::Osaka { target: OsakaTarget::ModexpOsaka },
+        }
+    }
+
+    const fn matches_tx_type(self, tx: &TxTypeConfig) -> bool {
+        matches!(
+            (self, tx),
+            (Self::Transfer, TxTypeConfig::Transfer)
+                | (Self::Calldata, TxTypeConfig::Calldata { .. })
+                | (
+                    Self::Ecrecover,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Ecrecover, .. }
+                )
+                | (Self::Sha256, TxTypeConfig::Precompile { target: PrecompileTarget::Sha256, .. })
+                | (
+                    Self::Ripemd160,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Ripemd160, .. }
+                )
+                | (
+                    Self::Identity,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Identity, .. }
+                )
+                | (Self::Modexp, TxTypeConfig::Precompile { target: PrecompileTarget::Modexp, .. })
+                | (
+                    Self::Bn254Add,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Bn254Add, .. }
+                )
+                | (
+                    Self::Bn254Mul,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Bn254Mul, .. }
+                )
+                | (
+                    Self::Bn254Pairing,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Bn254Pairing, .. }
+                )
+                | (
+                    Self::Blake2f,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::Blake2f { .. }, .. }
+                )
+                | (
+                    Self::Kzg,
+                    TxTypeConfig::Precompile { target: PrecompileTarget::KzgPointEvaluation, .. }
+                )
+                | (Self::OsakaClz, TxTypeConfig::Osaka { target: OsakaTarget::Clz })
+                | (
+                    Self::OsakaP256verify,
+                    TxTypeConfig::Osaka { target: OsakaTarget::P256verifyOsaka }
+                )
+                | (Self::OsakaModexp, TxTypeConfig::Osaka { target: OsakaTarget::ModexpOsaka })
+        )
+    }
+}
+
+#[derive(Debug)]
+struct StrategyModal {
+    /// Index of the currently highlighted strategy.
+    cursor: usize,
+    /// Which strategies are currently enabled.
+    enabled: Vec<bool>,
+}
+
+impl StrategyModal {
+    fn from_config(transactions: &[WeightedTxType]) -> Self {
+        let mut enabled = vec![false; ALL_STRATEGIES.len()];
+        for (i, &strategy) in ALL_STRATEGIES.iter().enumerate() {
+            enabled[i] = transactions.iter().any(|t| strategy.matches_tx_type(&t.tx_type));
+        }
+        // Default to transfer if nothing matched.
+        if !enabled.iter().any(|&e| e) {
+            enabled[0] = true;
+        }
+        Self { cursor: 0, enabled }
+    }
+
+    fn to_transactions(&self) -> Vec<WeightedTxType> {
+        ALL_STRATEGIES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.enabled[*i])
+            .map(|(_, &strategy)| WeightedTxType { weight: 1, tx_type: strategy.to_tx_type() })
+            .collect()
     }
 }
 
@@ -156,6 +352,8 @@ pub(crate) struct LoadTestView {
     state: RunState,
     /// Edit modal; `None` when the modal is closed.
     edit: Option<EditModal>,
+    /// Strategy multiselect modal; `None` when the modal is closed.
+    strategy_modal: Option<StrategyModal>,
     /// In-memory funder private key override (raw 0x-prefixed hex).
     /// When set, takes precedence over the `FUNDER_KEY` env var.
     funder_key_override: Option<String>,
@@ -172,6 +370,7 @@ impl LoadTestView {
             continuous: false,
             state: RunState::Idle,
             edit: None,
+            strategy_modal: None,
             funder_key_override: None,
         }
     }
@@ -270,9 +469,13 @@ impl LoadTestView {
 
         let (phase_tx, phase_rx) = watch::channel(RunPhase::Bootstrap);
         let (snap_tx, snap_rx) = watch::channel(DisplaySnapshot::default());
+        let (run_count_tx, run_count_rx) = watch::channel(run_count);
         let (done_tx, done_rx) = mpsc::channel(1);
 
-        tokio::spawn(async move {
+        let continuous_flag = Arc::new(AtomicBool::new(self.continuous));
+        let continuous_for_task = Arc::clone(&continuous_flag);
+
+        let task_handle = tokio::spawn(async move {
             // Fetch chain_id from the network's RPC — required for transaction signing.
             let client = RpcClient::new(cfg.rpc.clone());
             let chain_id = client.chain_id().await.ok();
@@ -306,7 +509,7 @@ impl LoadTestView {
                 }
             };
 
-            runner.replace_stop_flag(stop_flag_for_runner);
+            runner.replace_stop_flag(Arc::clone(&stop_flag_for_runner));
             runner.set_snapshot_tx(snap_tx);
 
             let is_local = is_local_rpc(&cfg.rpc);
@@ -323,53 +526,84 @@ impl LoadTestView {
 
             if let Some(ref funder) = funder {
                 runner.set_funder_address(funder.address().to_string());
+            }
 
-                // On local devnets, top up the funder from Hardhat reserve accounts if needed.
-                if is_local {
-                    let _ = phase_tx.send(RunPhase::Bootstrap);
-                    if let Err(e) = ensure_funder_balance(
-                        &client,
-                        cfg.rpc.clone(),
-                        funder.address(),
-                        funding_amount,
-                        sender_count,
-                        chain_id_val,
-                        max_gas_price,
-                    )
-                    .await
-                    {
-                        // Non-fatal: fund_accounts will surface a clearer error if truly short.
-                        let _ = phase_tx.send(RunPhase::Funding);
-                        let _ = done_tx.send(Err(format!("devnet bootstrap failed: {e}"))).await;
+            let mut current_run = run_count;
+            let mut last_result: Result<MetricsSummary, String>;
+
+            loop {
+                let _ = run_count_tx.send(current_run);
+
+                if let Some(ref funder) = funder {
+                    // On local devnets, top up the funder from Hardhat reserve accounts if
+                    // needed. This runs each iteration so the funder stays topped up over long
+                    // continuous sessions.
+                    if is_local {
+                        let _ = phase_tx.send(RunPhase::Bootstrap);
+                        if let Err(e) = ensure_funder_balance(
+                            &client,
+                            cfg.rpc.clone(),
+                            funder.address(),
+                            funding_amount,
+                            sender_count,
+                            chain_id_val,
+                            max_gas_price,
+                        )
+                        .await
+                        {
+                            // Non-fatal: fund_accounts will surface a clearer error if truly
+                            // short.
+                            let _ =
+                                done_tx.send(Err(format!("devnet bootstrap failed: {e}"))).await;
+                            return;
+                        }
+                    }
+
+                    let _ = phase_tx.send(RunPhase::Funding);
+                    if let Err(e) = runner.fund_accounts(funder.clone(), funding_amount).await {
+                        let _ = done_tx.send(Err(format!("funding failed: {e}"))).await;
                         return;
                     }
                 }
 
-                let _ = phase_tx.send(RunPhase::Funding);
-                if let Err(e) = runner.fund_accounts(funder.clone(), funding_amount).await {
-                    let _ = done_tx.send(Err(format!("funding failed: {e}"))).await;
-                    return;
+                let _ = phase_tx.send(RunPhase::Running);
+                let result = runner.run().await;
+                // run() always sets stop_flag=true on exit to signal the confirmer.
+                // Reset it here so the next iteration's run() starts clean, and so
+                // the break condition below only fires on a user-initiated stop
+                // (which stores false into continuous_for_task via stop_run()).
+                stop_flag_for_runner.store(false, Ordering::SeqCst);
+
+                // Drain accounts back to funder regardless of run outcome.
+                if let Some(ref funder) = funder {
+                    let _ = phase_tx.send(RunPhase::Draining);
+                    runner.drain_accounts(funder.clone()).await.ok();
                 }
+
+                last_result = result.map_err(|e| e.to_string());
+
+                if last_result.is_err() || !continuous_for_task.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                current_run += 1;
             }
 
-            let _ = phase_tx.send(RunPhase::Running);
-            let result = runner.run().await;
-
-            // Drain accounts back to funder regardless of run outcome.
-            if let Some(funder) = funder {
-                let _ = phase_tx.send(RunPhase::Draining);
-                runner.drain_accounts(funder).await.ok();
-            }
-
-            let _ = done_tx.send(result.map_err(|e| e.to_string())).await;
+            let _ = done_tx.send(last_result).await;
         });
+
+        resources.load_test_task =
+            Some(LoadTestTask { stop_flag: Arc::clone(&stop_flag), handle: task_handle });
 
         self.state = RunState::Running {
             start: Instant::now(),
+            run_start: None,
             run_count,
             stop_flag,
+            continuous_flag,
             phase_rx,
             snap_rx,
+            run_count_rx,
             done_rx,
             current_snap: DisplaySnapshot::default(),
             current_phase: RunPhase::Bootstrap,
@@ -383,9 +617,9 @@ impl LoadTestView {
     }
 
     fn stop_run(&mut self) {
-        if let RunState::Running { ref stop_flag, .. } = self.state {
+        if let RunState::Running { ref stop_flag, ref continuous_flag, .. } = self.state {
             stop_flag.store(true, Ordering::SeqCst);
-            // Mark continuous off so the completion handler does not restart.
+            continuous_flag.store(false, Ordering::SeqCst);
             self.continuous = false;
         }
     }
@@ -509,6 +743,44 @@ impl LoadTestView {
             }
         }
     }
+
+    fn handle_strategy_key(&mut self, key: KeyEvent) {
+        let n = ALL_STRATEGIES.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(ref mut modal) = self.strategy_modal {
+                    modal.cursor = modal.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(ref mut modal) = self.strategy_modal
+                    && modal.cursor + 1 < n
+                {
+                    modal.cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(ref mut modal) = self.strategy_modal {
+                    let i = modal.cursor;
+                    modal.enabled[i] = !modal.enabled[i];
+                }
+            }
+            KeyCode::Enter => {
+                let transactions = self.strategy_modal.as_ref().map(|m| m.to_transactions());
+                if let Some(txs) = transactions
+                    && !txs.is_empty()
+                    && let Some(cfg) = self.effective_config_mut()
+                {
+                    cfg.transactions = txs;
+                }
+                self.strategy_modal = None;
+            }
+            KeyCode::Esc => {
+                self.strategy_modal = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,11 +831,15 @@ impl View for LoadTestView {
     }
 
     fn consumes_esc(&self) -> bool {
-        // Consume Esc ourselves when the edit modal is open.
-        self.edit.is_some()
+        // Consume Esc ourselves when a modal is open.
+        self.edit.is_some() || self.strategy_modal.is_some()
     }
 
     fn consumes_quit(&self) -> bool {
+        self.edit.is_some() || self.strategy_modal.is_some()
+    }
+
+    fn captures_char_input(&self) -> bool {
         self.edit.is_some()
     }
 
@@ -574,25 +850,40 @@ impl View for LoadTestView {
         let done = if let RunState::Running {
             ref mut snap_rx,
             ref mut phase_rx,
+            ref mut run_count_rx,
             ref mut done_rx,
             ref mut current_snap,
             ref mut current_phase,
-            run_count,
+            ref mut run_start,
+            ref mut run_count,
             start,
             ..
         } = self.state
         {
             if phase_rx.has_changed().unwrap_or(false) {
-                *current_phase = phase_rx.borrow_and_update().clone();
+                let new_phase = phase_rx.borrow_and_update().clone();
+                // A new Bootstrap phase signals the start of the next loop iteration —
+                // reset run_start so the progress bar tracks only the current run.
+                if matches!(new_phase, RunPhase::Bootstrap) {
+                    *run_start = None;
+                }
+                if matches!(new_phase, RunPhase::Running) && run_start.is_none() {
+                    *run_start = Some(Instant::now());
+                }
+                *current_phase = new_phase;
             }
             // Update snapshot (non-blocking — take latest value).
             if snap_rx.has_changed().unwrap_or(false) {
                 *current_snap = snap_rx.borrow_and_update().clone();
             }
+            // Update run count from the background task loop.
+            if run_count_rx.has_changed().unwrap_or(false) {
+                *run_count = *run_count_rx.borrow_and_update();
+            }
 
             // Check for completion.
             match done_rx.try_recv() {
-                Ok(Ok(summary)) => Some(Ok((summary, start.elapsed(), run_count))),
+                Ok(Ok(summary)) => Some(Ok((summary, start.elapsed(), *run_count))),
                 Ok(Err(e)) => Some(Err(e)),
                 Err(TryRecvError::Disconnected) => {
                     Some(Err("load test task exited unexpectedly".into()))
@@ -606,21 +897,17 @@ impl View for LoadTestView {
         if let Some(result) = done {
             match result {
                 Ok((summary, elapsed, run_count)) => {
-                    if self.continuous {
-                        // Restart immediately for the next run.
-                        self.state = RunState::Idle;
-                        self.start_run(run_count + 1, resources);
-                    } else {
-                        resources.toasts.push(Toast::info(format!(
-                            "Load test complete in {:.1}s — {:.1} TPS / {:.0} GPS",
-                            elapsed.as_secs_f64(),
-                            summary.throughput.tps,
-                            summary.throughput.gps,
-                        )));
-                        self.state = RunState::Complete { summary, elapsed, run_count };
-                    }
+                    resources.load_test_task = None;
+                    resources.toasts.push(Toast::info(format!(
+                        "Load test complete in {:.1}s — {:.1} TPS / {:.0} GPS",
+                        elapsed.as_secs_f64(),
+                        summary.throughput.tps,
+                        summary.throughput.gps,
+                    )));
+                    self.state = RunState::Complete { summary, elapsed, run_count };
                 }
                 Err(e) => {
+                    resources.load_test_task = None;
                     resources.toasts.push(Toast::warning(format!("Load test error: {e}")));
                     self.state = RunState::Error(e);
                 }
@@ -634,6 +921,12 @@ impl View for LoadTestView {
         // Route keys into the edit modal when it is open.
         if self.edit.is_some() {
             self.handle_edit_key(key);
+            return Action::None;
+        }
+
+        // Route keys into the strategy modal when it is open.
+        if self.strategy_modal.is_some() {
+            self.handle_strategy_key(key);
             return Action::None;
         }
 
@@ -678,6 +971,16 @@ impl View for LoadTestView {
                 if matches!(self.state, RunState::Running { .. }) =>
             {
                 self.stop_run();
+            }
+
+            // Open strategy multiselect modal.
+            KeyCode::Char('t')
+                if matches!(self.state, RunState::Idle | RunState::Complete { .. })
+                    && !self.configs.is_empty() =>
+            {
+                let txs =
+                    self.effective_config().map(|c| c.transactions.clone()).unwrap_or_default();
+                self.strategy_modal = Some(StrategyModal::from_config(&txs));
             }
 
             // Open edit modal.
@@ -725,6 +1028,11 @@ impl View for LoadTestView {
         // Overlay the edit modal on top of everything.
         if self.edit.is_some() {
             render_edit_modal(frame, area, &self.edit, self);
+        }
+
+        // Overlay the strategy modal on top of everything.
+        if let Some(ref modal) = self.strategy_modal {
+            render_strategy_modal(frame, area, modal);
         }
     }
 }
@@ -816,7 +1124,7 @@ impl LoadTestView {
         ]));
 
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled("  Tx mix", label_style)]));
+        lines.push(Line::from(vec![Span::styled("  Strategy", label_style)]));
 
         let total_weight: u32 = cfg.transactions.iter().map(|t| t.weight).sum();
         for wtx in &cfg.transactions {
@@ -865,7 +1173,8 @@ impl LoadTestView {
 
         if matches!(self.state, RunState::Idle | RunState::Complete { .. }) {
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled("  [e] edit config in memory", dim_style)]));
+            lines
+                .push(Line::from(vec![Span::styled("  [t] strategy  [e] edit config", dim_style)]));
         }
 
         let p = Paragraph::new(lines);
@@ -883,11 +1192,17 @@ impl LoadTestView {
 
         match &self.state {
             RunState::Idle => render_idle_status(frame, inner, self.continuous),
-            RunState::Running { start, run_count, current_snap, current_phase, .. } => {
+            RunState::Running {
+                start, run_start, run_count, current_snap, current_phase, ..
+            } => {
                 let run_duration = self
                     .effective_config()
                     .and_then(|c: &TestConfig| c.parse_duration().ok())
                     .flatten();
+                // Use the actual test start time (after bootstrap/funding) for the
+                // progress bar so that funding time doesn't count against the duration.
+                // Fall back to task spawn time while still in bootstrap/funding phases.
+                let elapsed = run_start.map_or_else(|| start.elapsed(), |t| t.elapsed());
                 render_running_status(
                     frame,
                     inner,
@@ -896,7 +1211,7 @@ impl LoadTestView {
                     RunProgress {
                         run_count: *run_count,
                         continuous: self.continuous,
-                        elapsed: start.elapsed(),
+                        elapsed,
                         duration: run_duration,
                     },
                 );
@@ -1069,13 +1384,25 @@ fn render_live_metrics(frame: &mut Frame<'_>, area: Rect, snap: &DisplaySnapshot
     lines.push(Line::from(""));
 
     // Latency.
-    lines.push(Line::from(Span::styled("  LATENCY (rolling 30s)", label)));
+    lines.push(Line::from(Span::styled("  BLOCK LATENCY (rolling 30s)", label)));
     lines.push(Line::from(vec![
         Span::styled("    p50  ", label),
         Span::styled(fmt_dur(snap.p50_latency), value),
         Span::styled("    p99  ", label),
         Span::styled(fmt_dur(snap.p99_latency), value),
     ]));
+    if snap.flashblocks_p50_latency > Duration::ZERO
+        || snap.flashblocks_p99_latency > Duration::ZERO
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  FLASHBLOCKS LATENCY (rolling 30s)", label)));
+        lines.push(Line::from(vec![
+            Span::styled("    p50  ", label),
+            Span::styled(fmt_dur(snap.flashblocks_p50_latency), value),
+            Span::styled("    p99  ", label),
+            Span::styled(fmt_dur(snap.flashblocks_p99_latency), value),
+        ]));
+    }
 
     lines.push(Line::from(""));
 
@@ -1199,16 +1526,26 @@ fn render_complete_status(
 
     lines.push(Line::from(vec![
         Span::styled("    Latency p50  ", label),
-        Span::styled(fmt_dur(summary.latency.p50), value),
+        Span::styled(fmt_dur(summary.block_latency.p50), value),
         Span::styled("  p95  ", label),
-        Span::styled(fmt_dur(summary.latency.p95), value),
+        Span::styled(fmt_dur(summary.block_latency.p95), value),
     ]));
     lines.push(Line::from(vec![
         Span::styled("    Latency p99  ", label),
-        Span::styled(fmt_dur(summary.latency.p99), value),
+        Span::styled(fmt_dur(summary.block_latency.p99), value),
         Span::styled("  max  ", label),
-        Span::styled(fmt_dur(summary.latency.max), value),
+        Span::styled(fmt_dur(summary.block_latency.max), value),
     ]));
+    if summary.flashblocks_latency.count > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("    FB p50     ", label),
+            Span::styled(fmt_dur(summary.flashblocks_latency.p50), value),
+            Span::styled("  p90  ", label),
+            Span::styled(fmt_dur(summary.flashblocks_latency.p90), value),
+            Span::styled("  p99  ", label),
+            Span::styled(fmt_dur(summary.flashblocks_latency.p99), value),
+        ]));
+    }
     lines.push(Line::from(""));
 
     if summary.gas.avg_gas > 0 {
@@ -1324,6 +1661,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &RunState, continuous
             spans.push(Span::styled("stop", dim));
 
             spans.push(sep.clone());
+            spans.push(Span::styled("[t]", key));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("strategy", desc));
+
+            spans.push(sep.clone());
             spans.push(Span::styled("[e]", key));
             spans.push(Span::raw(" "));
             spans.push(Span::styled("edit config", desc));
@@ -1417,6 +1759,67 @@ fn render_edit_modal(
             hint_style,
         )]));
     }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy modal renderer
+// ---------------------------------------------------------------------------
+
+fn render_strategy_modal(frame: &mut Frame<'_>, parent: Rect, modal: &StrategyModal) {
+    let n = ALL_STRATEGIES.len();
+    let popup_w = 46u16.min(parent.width.saturating_sub(4));
+    let popup_h = (n as u16 + 5).min(parent.height.saturating_sub(4));
+    let x = parent.x + parent.width.saturating_sub(popup_w) / 2;
+    let y = parent.y + parent.height.saturating_sub(popup_h) / 2;
+    let popup = Rect { x, y, width: popup_w, height: popup_h };
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Strategy ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(COLOR_BASE_BLUE));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let label_style = Style::default().fg(Color::White);
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let selected_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let check_on_style = Style::default().fg(COLOR_BASE_BLUE);
+    let hint_style = Style::default().fg(Color::DarkGray);
+
+    // Compute scroll offset so the cursor is always visible.
+    let content_overhead: usize = 3; // blank top + blank before hint + hint line
+    let visible_rows = (inner.height as usize).saturating_sub(content_overhead);
+    let scroll = if modal.cursor >= visible_rows { modal.cursor - visible_rows + 1 } else { 0 };
+
+    let mut lines: Vec<Line<'_>> = vec![Line::from("")];
+
+    let end = (scroll + visible_rows).min(n);
+    for (i, &strategy) in ALL_STRATEGIES.iter().enumerate().take(end).skip(scroll) {
+        let is_selected = i == modal.cursor;
+        let is_enabled = modal.enabled[i];
+
+        let selector = if is_selected { "▸ " } else { "  " };
+        let selector_style = if is_selected { selected_style } else { dim_style };
+        let checkbox = if is_enabled { "[x] " } else { "[ ] " };
+        let check_style = if is_enabled { check_on_style } else { dim_style };
+        let label_sty = if is_selected { selected_style } else { label_style };
+
+        lines.push(Line::from(vec![
+            Span::styled(selector, selector_style),
+            Span::styled(checkbox, check_style),
+            Span::styled(strategy.label(), label_sty),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  ↑/↓ move  Space toggle  Enter confirm  Esc cancel",
+        hint_style,
+    )]));
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
