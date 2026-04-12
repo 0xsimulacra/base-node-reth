@@ -6,7 +6,6 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B64, B256};
 use base_common_chains::BaseUpgrades;
 use base_common_consensus::BasePrimitives;
-use base_common_rpc_jsonrpsee::MinerApiExtServer;
 use base_common_rpc_types_engine::{BasePayloadAttributes, ExecutionData};
 use base_execution_chainspec::BaseChainSpec;
 use base_execution_consensus::OpBeaconConsensus;
@@ -17,6 +16,7 @@ use base_execution_payload_builder::{
     config::{BaseBuilderConfig, GasLimitConfig, OpDAConfig},
 };
 use base_execution_rpc::{
+    MinerApiExtServer,
     config::{BaseEthConfigApiServer, BaseEthConfigHandler},
     eth::OpEthApiBuilder,
     miner::OpMinerExtApi,
