@@ -36,7 +36,7 @@ use std::{
 use alloy_primitives::{Address, B256, Signature, keccak256};
 use alloy_sol_types::SolCall;
 use base_proof_contracts::{
-    AggregateVerifierClient, AnchorRoot, AnchorStateRegistryClient, DisputeGameFactoryClient,
+    AggregateVerifierClient, AnchorStateRegistryClient, DisputeGameFactoryClient,
     ITEEProverRegistry, encode_extra_data,
 };
 use base_proof_primitives::{ProofJournal, ProofRequest, ProofResult, ProverClient};
@@ -71,15 +71,22 @@ pub struct PipelineConfig {
 
 /// Cached result from the last successful recovery.
 ///
-/// The cache is keyed by `(game_count, anchor_root)`. When both match,
-/// the cached `RecoveredState` is returned immediately (zero RPCs).
-/// When either changes, the forward walk is re-executed.
+/// The cache is keyed by `game_count`. When `game_count` is unchanged
+/// and the anchor has not advanced past the cached tip, the cached
+/// `RecoveredState` is returned immediately (zero additional RPCs).
+///
+/// When `game_count` increases (and the anchor is still at or behind the
+/// cached tip), the walk resumes from the cached tip (incremental —
+/// typically 1–2 steps).
+///
+/// A full re-walk from the anchor is only needed when:
+/// - No cache exists (cold start / pipeline reset).
+/// - The anchor advanced past the cached tip (governance intervention).
+/// - `game_count` decreased (L1 reorg removed games).
 #[derive(Debug, Clone, Copy)]
 struct CachedRecovery {
     /// Factory `game_count` at the time of the last walk.
     game_count: u64,
-    /// Anchor root hash used for this walk.
-    anchor_root: B256,
     /// The recovered on-chain state from the walk.
     state: RecoveredState,
 }
@@ -650,10 +657,16 @@ where
             .await
             .map_err(|e| ProposerError::Contract(format!("get_anchor_root failed: {e}")))?;
 
-        // Fast path: both game_count and anchor_root unchanged → return
-        // the cached state with zero additional RPCs.
+        // The cached tip is valid as long as the anchor hasn't advanced past
+        // it. The anchor advances when games resolve (~every 20 min after the
+        // dispute window elapses), but it always stays behind the chain tip.
+        let tip_still_valid =
+            |cached: &CachedRecovery| anchor.l2_block_number <= cached.state.l2_block_number;
+
+        // Fast path: game_count unchanged and anchor still behind tip →
+        // return the cached state with zero additional RPCs.
         if let Some(cached) = cache.as_ref()
-            && cached.anchor_root == anchor.root
+            && tip_still_valid(cached)
             && cached.game_count == count
         {
             debug!(game_count = count, "No changes since last recovery, returning cached state");
@@ -661,14 +674,44 @@ where
         }
 
         // ── Forward walk ────────────────────────────────────────────────
-        let state = self.forward_walk(&anchor).await?;
+        //
+        // When game_count increased and the anchor is still at or behind
+        // the cached tip, resume from the tip instead of re-walking from
+        // the anchor. This turns post-submission recovery from O(K) to
+        // O(1).
+        //
+        // A full walk from the anchor is required when:
+        // - No cache exists (cold start / pipeline reset).
+        // - The anchor advanced past the cached tip (governance / anomaly).
+        // - game_count decreased (L1 reorg removed games).
+        let start = match cache.as_ref() {
+            Some(cached) if tip_still_valid(cached) && count > cached.game_count => {
+                debug!(
+                    cached_block = cached.state.l2_block_number,
+                    old_count = cached.game_count,
+                    new_count = count,
+                    "Resuming forward walk from cached tip"
+                );
+                cached.state
+            }
+            _ => RecoveredState {
+                parent_address: self.config.driver.anchor_state_registry_address,
+                output_root: anchor.root,
+                l2_block_number: anchor.l2_block_number,
+            },
+        };
 
-        *cache = Some(CachedRecovery { game_count: count, anchor_root: anchor.root, state });
+        let state = self.forward_walk(&start).await?;
+
+        *cache = Some(CachedRecovery { game_count: count, state });
         Ok(state)
     }
 
-    /// Performs a deterministic forward walk from the anchor to find the latest
-    /// verified game using UUID-based `games()` lookups.
+    /// Performs a deterministic forward walk to find the latest verified game
+    /// using UUID-based `games()` lookups.
+    ///
+    /// The walk starts from `start`, which is either the anchor state (full
+    /// walk) or the cached tip from a previous walk (incremental).
     ///
     /// At each step:
     /// 1. Compute the expected block number: `parent_block + block_interval`.
@@ -689,16 +732,15 @@ where
     /// The walk is sequential (each step needs the previous proxy address for
     /// `extraData`), but each step requires only two RPCs: one
     /// `fetch_canonical_roots` batch and one `games()` lookup.
-    async fn forward_walk(&self, anchor: &AnchorRoot) -> Result<RecoveredState, ProposerError> {
+    async fn forward_walk(&self, start: &RecoveredState) -> Result<RecoveredState, ProposerError> {
         let block_interval = self.config.driver.block_interval;
-        let anchor_state_registry_address = self.config.driver.anchor_state_registry_address;
         let game_type = self.config.driver.game_type;
 
         let log_interval = (block_interval / 5).max(1);
 
-        let mut parent_address = anchor_state_registry_address;
-        let mut parent_output_root = anchor.root;
-        let mut parent_block = anchor.l2_block_number;
+        let mut parent_address = start.parent_address;
+        let mut parent_output_root = start.output_root;
+        let mut parent_block = start.l2_block_number;
         let mut steps: u64 = 0;
 
         while let Some(expected_block) = parent_block.checked_add(block_interval) {
@@ -1602,14 +1644,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn test_recovery_cache_invalidated_by_count_change() {
-        // Seed cache with game_count=1. Factory now has 2 games.
-        // The cache should be invalidated and a fresh walk performed.
+    async fn test_recovery_cache_incremental_on_count_increase() {
+        // Seed cache with game_count=1, state at game 0. Factory now has 2
+        // games. Anchor is still at block 0 (behind the cached tip at
+        // TEST_BLOCK_INTERVAL), so the walk resumes from the cached tip
+        // and only needs to discover game 1.
         let (factory, output_roots) = game_chain(2);
 
         let mut cache = Some(CachedRecovery {
             game_count: 1,
-            anchor_root: B256::ZERO, // matches test_anchor_root
             state: RecoveredState {
                 parent_address: proxy_addr(0),
                 output_root: B256::repeat_byte(0x01),
@@ -1620,9 +1663,72 @@ mod tests {
         let pipeline = recovery_pipeline(factory, output_roots);
         let state = pipeline.recover_latest_state(&mut cache).await.unwrap();
 
-        assert_eq!(state.parent_address, proxy_addr(1), "should walk through both games");
+        assert_eq!(state.parent_address, proxy_addr(1), "should find game 1 incrementally");
         assert_eq!(state.l2_block_number, TEST_BLOCK_INTERVAL * 2);
         assert_eq!(cache.as_ref().unwrap().game_count, 2, "cache should reflect new count");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_recovery_cache_incremental_resumes_mid_chain() {
+        // Build a chain of 5 games. Seed cache at game 2 (game_count=3).
+        // Factory now has 5 games. The walk should resume from game 2's
+        // tip and discover games 3 and 4 without re-walking games 0–2.
+        let (factory, output_roots) = game_chain(5);
+
+        let mut cache = Some(CachedRecovery {
+            game_count: 3,
+            state: RecoveredState {
+                parent_address: proxy_addr(2),
+                output_root: B256::repeat_byte(0x03),
+                l2_block_number: TEST_BLOCK_INTERVAL * 3,
+            },
+        });
+
+        let pipeline = recovery_pipeline(factory, output_roots);
+        let state = pipeline.recover_latest_state(&mut cache).await.unwrap();
+
+        assert_eq!(state.parent_address, proxy_addr(4), "should reach game 4 from cached tip");
+        assert_eq!(state.l2_block_number, TEST_BLOCK_INTERVAL * 5);
+        assert_eq!(cache.as_ref().unwrap().game_count, 5);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_recovery_cache_incremental_unrelated_games() {
+        // game_count increased (1 → 2) but the new game is not in our
+        // chain (no UUID entry at the next expected block). The incremental
+        // walk resumes from the cached tip, finds nothing, and returns the
+        // same state. This happens when another proposer creates a game
+        // with different parameters.
+        let (factory, output_roots) = game_chain(1);
+        // factory has game_count=1, but we'll seed cache as game_count=0
+        // so the code sees an increase (0 → 1). The walk from the anchor
+        // will find game 0. But to test the "unrelated game" path, we need
+        // game_count > cached_count and no new UUID at the next block.
+        //
+        // Seed cache at game 0, pretend game_count was 1. Factory reports
+        // game_count=2 (simulating someone else's unrelated game), but
+        // there's no UUID entry at block 2*TEST_BLOCK_INTERVAL.
+        let mut factory_with_extra_count = factory;
+        factory_with_extra_count.game_count_override = Some(2);
+
+        let pipeline = recovery_pipeline(factory_with_extra_count, output_roots);
+
+        let mut cache = Some(CachedRecovery {
+            game_count: 1,
+            state: RecoveredState {
+                parent_address: proxy_addr(0),
+                output_root: B256::repeat_byte(0x01),
+                l2_block_number: TEST_BLOCK_INTERVAL,
+            },
+        });
+
+        let state = pipeline.recover_latest_state(&mut cache).await.unwrap();
+
+        // Walk resumed from game 0, found no game at the next block,
+        // returned the same state.
+        assert_eq!(state.parent_address, proxy_addr(0), "should remain at game 0");
+        assert_eq!(state.l2_block_number, TEST_BLOCK_INTERVAL);
+        assert_eq!(cache.as_ref().unwrap().game_count, 2, "cache updated to new count");
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1632,7 +1738,6 @@ mod tests {
 
         let mut cache = Some(CachedRecovery {
             game_count: 5,
-            anchor_root: B256::ZERO,
             state: RecoveredState {
                 parent_address: proxy_addr(99),
                 output_root: B256::repeat_byte(0xDD),
@@ -1649,27 +1754,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn test_recovery_cache_invalidated_by_anchor_root_change() {
-        let (factory, output_roots) = game_chain(1);
+    async fn test_recovery_cache_full_walk_when_anchor_past_tip() {
+        // Anchor is at block 2048 (past the cached tip at block 512).
+        // This simulates a governance intervention that advanced the
+        // anchor past the cached tip. A full walk from the new anchor
+        // is required.
+        let anchor_block = TEST_BLOCK_INTERVAL * 4; // block 2048
+        let (factory, output_roots) =
+            game_chain_full(1, anchor_block, TEST_BLOCK_INTERVAL, TEST_BLOCK_INTERVAL);
 
-        // Seed cache with same game_count but a DIFFERENT anchor root.
         let mut cache = Some(CachedRecovery {
-            game_count: 1,
-            anchor_root: B256::repeat_byte(0xAA), // different from test_anchor_root
+            game_count: 0,
             state: RecoveredState {
                 parent_address: proxy_addr(99), // stale — will be recomputed
                 output_root: B256::repeat_byte(0xDD),
-                l2_block_number: 9999,
+                l2_block_number: TEST_BLOCK_INTERVAL, // tip at 512, anchor at 2048
             },
         });
 
-        let pipeline = recovery_pipeline(factory, output_roots);
+        let pipeline = recovery_pipeline_full(
+            factory,
+            output_roots,
+            anchor_block,
+            TEST_BLOCK_INTERVAL,
+            TEST_BLOCK_INTERVAL,
+        );
         let state = pipeline.recover_latest_state(&mut cache).await.unwrap();
 
-        // Anchor root changed → cache invalidated, fresh walk.
+        // Anchor past cached tip → full walk from new anchor.
         assert_eq!(state.parent_address, proxy_addr(0));
-        assert_eq!(state.l2_block_number, TEST_BLOCK_INTERVAL);
-        assert_eq!(cache.as_ref().unwrap().anchor_root, B256::ZERO);
+        assert_eq!(state.l2_block_number, anchor_block + TEST_BLOCK_INTERVAL);
     }
 
     // ---- Recovery: intermediate roots with multiple checkpoints ----
@@ -1740,7 +1854,6 @@ mod tests {
         let mut state = PipelineState::new();
         state.cached_recovery = Some(CachedRecovery {
             game_count: 10,
-            anchor_root: B256::ZERO,
             state: RecoveredState {
                 parent_address: proxy_addr(5),
                 output_root: B256::repeat_byte(0x11),
