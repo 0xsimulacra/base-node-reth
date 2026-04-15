@@ -6,7 +6,7 @@
 extern crate alloc;
 
 mod spec;
-pub use spec::{OpSpecId, name};
+pub use spec::OpSpecId;
 
 mod constants;
 pub use constants::*;
