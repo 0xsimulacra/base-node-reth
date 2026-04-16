@@ -8,8 +8,12 @@ use alloy_eips::{
     eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718},
     eip2930::AccessList,
 };
+#[cfg(feature = "alloy-compat")]
+use alloy_network::{UnknownTxEnvelope, UnknownTypedTransaction};
 use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxHash, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
+#[cfg(feature = "alloy-compat")]
+use alloy_rpc_types_eth::ConversionError;
 
 use super::OpTxType;
 
@@ -329,6 +333,30 @@ impl Decodable for TxDeposit {
 impl Sealable for TxDeposit {
     fn hash_slow(&self) -> B256 {
         self.tx_hash()
+    }
+}
+
+#[cfg(feature = "alloy-compat")]
+impl TryFrom<UnknownTxEnvelope> for TxDeposit {
+    type Error = ConversionError;
+
+    fn try_from(value: UnknownTxEnvelope) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+#[cfg(feature = "alloy-compat")]
+impl TryFrom<UnknownTypedTransaction> for TxDeposit {
+    type Error = ConversionError;
+
+    fn try_from(value: UnknownTypedTransaction) -> Result<Self, Self::Error> {
+        if !value.is_type(OpTxType::Deposit as u8) {
+            return Err(ConversionError::Custom("invalid transaction type".to_string()));
+        }
+        value
+            .fields
+            .deserialize_into()
+            .map_err(|_| ConversionError::Custom("invalid transaction data".to_string()))
     }
 }
 
