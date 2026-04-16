@@ -8,12 +8,16 @@ use alloy_eips::{
     eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718},
     eip2930::AccessList,
 };
+#[cfg(feature = "evm")]
+use alloy_evm::FromRecoveredTx;
 #[cfg(feature = "alloy-compat")]
 use alloy_network::{UnknownTxEnvelope, UnknownTypedTransaction};
 use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxHash, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 #[cfg(feature = "alloy-compat")]
 use alloy_rpc_types_eth::ConversionError;
+#[cfg(feature = "evm")]
+use revm::context::TxEnv;
 
 use super::OpTxType;
 
@@ -380,6 +384,31 @@ impl From<TxDeposit> for alloy_rpc_types_eth::TransactionRequest {
             value: Some(value),
             gas: Some(gas_limit),
             input: input.into(),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(feature = "evm")]
+impl FromRecoveredTx<TxDeposit> for TxEnv {
+    fn from_recovered_tx(tx: &TxDeposit, caller: alloy_primitives::Address) -> Self {
+        let TxDeposit {
+            to,
+            value,
+            gas_limit,
+            input,
+            source_hash: _,
+            from: _,
+            mint: _,
+            is_system_transaction: _,
+        } = tx;
+        Self {
+            tx_type: tx.ty(),
+            caller,
+            gas_limit: *gas_limit,
+            kind: *to,
+            value: *value,
+            data: input.clone(),
             ..Default::default()
         }
     }

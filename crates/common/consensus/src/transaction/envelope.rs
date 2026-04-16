@@ -5,6 +5,8 @@ use alloy_consensus::{
     transaction::{TransactionInfo, TxHashRef},
 };
 use alloy_eips::eip2718::Encodable2718;
+#[cfg(feature = "evm")]
+use alloy_evm::{FromRecoveredTx, FromTxWithEncoded};
 #[cfg(feature = "alloy-compat")]
 use alloy_network::{AnyRpcTransaction, AnyTxEnvelope};
 use alloy_primitives::{B256, Bytes, Signature, TxHash};
@@ -12,6 +14,8 @@ use alloy_primitives::{B256, Bytes, Signature, TxHash};
 use alloy_rpc_types_eth::{ConversionError, Transaction as AlloyRpcTransaction};
 #[cfg(feature = "alloy-compat")]
 use alloy_serde::WithOtherFields;
+#[cfg(feature = "evm")]
+use revm::context::TxEnv;
 
 use crate::{
     BasePooledTransaction, TxDeposit,
@@ -183,6 +187,30 @@ impl TryFrom<BaseTxEnvelope> for TxEnvelope {
 
     fn try_from(value: BaseTxEnvelope) -> Result<Self, Self::Error> {
         value.try_into_eth_envelope()
+    }
+}
+
+#[cfg(feature = "evm")]
+impl FromRecoveredTx<BaseTxEnvelope> for TxEnv {
+    fn from_recovered_tx(tx: &BaseTxEnvelope, caller: alloy_primitives::Address) -> Self {
+        match tx {
+            BaseTxEnvelope::Legacy(tx) => Self::from_recovered_tx(tx.tx(), caller),
+            BaseTxEnvelope::Eip1559(tx) => Self::from_recovered_tx(tx.tx(), caller),
+            BaseTxEnvelope::Eip2930(tx) => Self::from_recovered_tx(tx.tx(), caller),
+            BaseTxEnvelope::Eip7702(tx) => Self::from_recovered_tx(tx.tx(), caller),
+            BaseTxEnvelope::Deposit(tx) => Self::from_recovered_tx(tx.inner(), caller),
+        }
+    }
+}
+
+#[cfg(feature = "evm")]
+impl FromTxWithEncoded<BaseTxEnvelope> for TxEnv {
+    fn from_encoded_tx(
+        tx: &BaseTxEnvelope,
+        caller: alloy_primitives::Address,
+        _encoded: alloy_primitives::Bytes,
+    ) -> Self {
+        Self::from_recovered_tx(tx, caller)
     }
 }
 
