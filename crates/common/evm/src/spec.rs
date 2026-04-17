@@ -51,9 +51,9 @@ pub enum OpSpecId {
     /// Jovian spec id.
     #[strum(serialize = "Jovian")]
     JOVIAN,
-    /// Base V1 spec id.
-    #[strum(serialize = "V1")]
-    BASE_V1,
+    /// Base Azul spec id.
+    #[strum(serialize = "Azul")]
+    AZUL,
 }
 
 impl OpSpecId {
@@ -64,7 +64,7 @@ impl OpSpecId {
             Self::CANYON => SpecId::SHANGHAI,
             Self::ECOTONE | Self::FJORD | Self::GRANITE | Self::HOLOCENE => SpecId::CANCUN,
             Self::ISTHMUS | Self::JOVIAN => SpecId::PRAGUE,
-            Self::BASE_V1 => SpecId::OSAKA,
+            Self::AZUL => SpecId::OSAKA,
         }
     }
 
@@ -85,8 +85,8 @@ impl OpSpecId {
     /// This is only intended to be used after the Bedrock, when hardforks are activated by
     /// timestamp.
     pub fn from_timestamp(chain_spec: impl Upgrades, timestamp: u64) -> Self {
-        if chain_spec.is_base_v1_active_at_timestamp(timestamp) {
-            Self::BASE_V1
+        if chain_spec.is_base_azul_active_at_timestamp(timestamp) {
+            Self::AZUL
         } else if chain_spec.is_jovian_active_at_timestamp(timestamp) {
             Self::JOVIAN
         } else if chain_spec.is_isthmus_active_at_timestamp(timestamp) {
@@ -209,7 +209,7 @@ mod tests {
                 ],
             ),
             (
-                OpSpecId::BASE_V1,
+                OpSpecId::AZUL,
                 vec![
                     (SpecId::OSAKA, true),
                     (SpecId::PRAGUE, true),

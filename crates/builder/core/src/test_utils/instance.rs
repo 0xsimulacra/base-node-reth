@@ -310,22 +310,22 @@ pub fn chain_spec() -> Arc<BaseChainSpec> {
 }
 
 /// Returns a chain spec identical to the default test chain spec but with
-/// `BaseUpgrade::V1` activated at genesis (timestamp 0).
-pub fn chain_spec_with_base_v1() -> Arc<BaseChainSpec> {
+/// `BaseUpgrade::Azul` activated at genesis (timestamp 0).
+pub fn chain_spec_with_azul() -> Arc<BaseChainSpec> {
     use base_common_chains::BaseUpgrade;
     use reth_chainspec::ForkCondition;
 
     let genesis = include_str!("./artifacts/genesis.json.tmpl");
     let genesis = serde_json::from_str(genesis).expect("invalid genesis JSON");
     let mut spec = BaseChainSpec::from_genesis(genesis);
-    spec.inner.hardforks.insert(BaseUpgrade::V1, ForkCondition::Timestamp(0));
+    spec.inner.hardforks.insert(BaseUpgrade::Azul, ForkCondition::Timestamp(0));
     Arc::new(spec)
 }
 
-/// Returns a node config using a chain spec with `BaseUpgrade::V1` activated
+/// Returns a node config using a chain spec with `BaseUpgrade::Azul` activated
 /// at genesis.
-pub fn default_node_config_with_base_v1() -> NodeConfig<BaseChainSpec> {
-    node_config_with_chain_spec(chain_spec_with_base_v1())
+pub fn default_node_config_with_azul() -> NodeConfig<BaseChainSpec> {
+    node_config_with_chain_spec(chain_spec_with_azul())
 }
 
 fn node_config_with_chain_spec(spec: Arc<BaseChainSpec>) -> NodeConfig<BaseChainSpec> {
