@@ -2499,7 +2499,6 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-transport",
- "alloy-transport-http",
  "async-trait",
  "base-batcher-core",
  "base-batcher-encoder",
@@ -3130,12 +3129,12 @@ dependencies = [
 name = "base-common-provider"
 version = "0.0.0"
 dependencies = [
- "alloy-network",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-types-engine",
  "alloy-transport",
  "async-trait",
+ "base-common-network",
  "base-common-rpc-types-engine",
 ]
 
@@ -4157,7 +4156,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-types-engine",
- "alloy-transport-http",
  "backon",
  "base-common-network",
  "base-common-provider",
