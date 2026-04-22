@@ -16,6 +16,8 @@ mod load-test 'crates/infra/load-tests'
 mod check 'etc/just/check.just'
 # Cargo build targets and contract compilation
 mod build 'etc/just/build.just'
+# SP1 / succinct ELF builds and proving helpers
+mod succinct 'crates/succinct'
 
 alias t := test
 alias f := fix
