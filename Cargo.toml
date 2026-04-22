@@ -169,6 +169,7 @@ base-common-rpc-types = { path = "crates/common/rpc-types" }
 base-common-flashblocks = { path = "crates/common/flashblocks" }
 base-common-evm = { path = "crates/common/evm", default-features = false }
 base-common-flz = { path = "crates/common/flz", default-features = false }
+base-common-genesis = { path = "crates/common/genesis", default-features = false }
 base-common-consensus = { path = "crates/common/consensus", default-features = false }
 base-common-rpc-types-engine = { path = "crates/common/rpc-types-engine", default-features = false }
 
@@ -197,8 +198,6 @@ base-consensus-derive = { path = "crates/consensus/derive", default-features = f
 base-consensus-engine = { path = "crates/consensus/engine", default-features = false }
 base-consensus-gossip = { path = "crates/consensus/gossip", default-features = false }
 base-consensus-sources = { path = "crates/consensus/sources", default-features = false }
-base-consensus-genesis = { path = "crates/consensus/genesis", default-features = false }
-base-consensus-registry = { path = "crates/consensus/registry", default-features = false }
 base-consensus-upgrades = { path = "crates/consensus/upgrades", default-features = false }
 base-consensus-providers = { path = "crates/consensus/providers", default-features = false }
 
@@ -351,10 +350,13 @@ reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-codecs = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-db-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-discv4 = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-discv5 = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-trie-db = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-network = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-net-nat = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
@@ -369,6 +371,7 @@ reth-cli-runner = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3"
 reth-tokio-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-rpc-convert = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-network-p2p = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
