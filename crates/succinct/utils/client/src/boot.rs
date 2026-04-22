@@ -3,7 +3,7 @@
 
 use alloy_primitives::{B256, Bytes};
 use alloy_sol_types::sol;
-use base_consensus_genesis::RollupConfig;
+use base_common_genesis::RollupConfig;
 use base_proof::BootInfo;
 use base_proof_primitives::PerChainConfig;
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,7 @@ impl BootInfoStruct {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::b256;
-    use base_consensus_registry::Registry;
+    use base_common_chains::Registry;
 
     use super::*;
 

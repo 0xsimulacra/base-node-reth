@@ -31,7 +31,7 @@ base-proof.workspace = true
 base-proof-executor.workspace = true
 base-proof-driver.workspace = true
 base-protocol.workspace = true
-base-consensus-genesis.workspace = true
+base-common-genesis.workspace = true
 
 # general
 anyhow.workspace = true
@@ -48,7 +48,7 @@ kzg-rs = { workspace = true, features = ["serde", "rkyv"] }
 cfg-if.workspace = true
 
 [dev-dependencies]
-base-consensus-registry.workspace = true
+base-common-chains.workspace = true
 
 [lints]
 workspace = true

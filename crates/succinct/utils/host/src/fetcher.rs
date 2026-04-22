@@ -16,9 +16,8 @@ use alloy_rlp::Decodable;
 use alloy_sol_types::SolValue;
 use anyhow::{Context, Result, anyhow, bail};
 use base_common_consensus::BaseBlock;
+use base_common_genesis::RollupConfig;
 use base_common_network::Base;
-use base_consensus_genesis::RollupConfig;
-use base_consensus_registry::Registry;
 use base_proof_host::HostConfig;
 use base_protocol::L2BlockInfo;
 use base_succinct_client_utils::{
@@ -406,16 +405,17 @@ impl OPSuccinctDataFetcher {
         }
 
         // Lookup the L1 config from the registry.
-        let l1_config = Registry::l1_config(rollup_config.l1_chain_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "No built-in L1 config exists for chain ID {}.\n\
+        let l1_config =
+            base_common_chains::l1_config(rollup_config.l1_chain_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No built-in L1 config exists for chain ID {}.\n\
                  To proceed, either:\n\
                  • Create a config file at: {}\n\
                  • Or set L1_CONFIG_DIR to the directory containing <chain_id>.json",
-                rollup_config.l1_chain_id,
-                l1_config_path.display()
-            )
-        })?;
+                    rollup_config.l1_chain_id,
+                    l1_config_path.display()
+                )
+            })?;
 
         tracing::debug!(
             "Fetched L1 config for chain ID {} from registry: {:?}",
@@ -787,7 +787,7 @@ impl OPSuccinctDataFetcher {
             let file = fs::File::open(l1_config_path)?;
             serde_json::from_reader(file)?
         } else {
-            Registry::l1_config(rollup_config.l1_chain_id)
+            base_common_chains::l1_config(rollup_config.l1_chain_id)
                 .ok_or_else(|| {
                     anyhow::anyhow!("No L1 config for chain ID {}", rollup_config.l1_chain_id)
                 })?

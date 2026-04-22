@@ -16,8 +16,6 @@ DISALLOWED_DEPS=(
 # Allowed exceptions: "dep_name" entries here are excluded from all rules.
 # These are foundational consensus protocol crates that are local path deps under crates/consensus/.
 ALLOWED_DEPS=(
-  "base-consensus-genesis"
-  "base-consensus-registry"
   "base-consensus-engine"
 )
 

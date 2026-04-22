@@ -26,12 +26,12 @@ base-common-network.workspace = true
 
 # base proof/consensus
 base-consensus-derive.workspace = true
-base-consensus-genesis.workspace = true
+base-common-genesis.workspace = true
 base-proof-host.workspace = true
 base-proof-preimage.workspace = true
 base-proof.workspace = true
 base-protocol = { workspace = true, features = ["serde"] }
-base-consensus-registry.workspace = true
+base-common-chains.workspace = true
 base-proof-primitives.workspace = true
 
 # alloy
