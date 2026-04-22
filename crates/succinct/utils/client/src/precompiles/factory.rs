@@ -2,18 +2,19 @@
 
 use alloy_evm::{Database, EvmEnv, EvmFactory};
 use base_common_evm::{
-    BaseEvm, DefaultOp, OpContext, OpHaltReason, OpSpecId, OpTransaction, OpTransactionError,
+    BaseContext, BaseEvm, BaseHaltReason, BaseTransaction, BaseTransactionError, Builder,
+    DefaultBase, OpSpecId,
 };
 use revm::{
     Context, Inspector,
-    context::{BlockEnv, Evm as RevmEvm, TxEnv, result::EVMError},
-    handler::instructions::EthInstructions,
+    context::{BlockEnv, TxEnv},
+    context_interface::result::EVMError,
     inspector::NoOpInspector,
 };
 
 use super::OpZkvmPrecompiles;
 
-/// Factory producing [`OpEvm`]s with FPVM-accelerated precompile overrides enabled.
+/// Factory producing [`BaseEvm`]s with ZKVM-accelerated precompile overrides enabled.
 #[derive(Debug, Clone)]
 pub struct ZkvmOpEvmFactory {}
 
@@ -31,12 +32,12 @@ impl Default for ZkvmOpEvmFactory {
 }
 
 impl EvmFactory for ZkvmOpEvmFactory {
-    type Evm<DB: Database, I: Inspector<OpContext<DB>>> = BaseEvm<DB, I, OpZkvmPrecompiles>;
-    type Context<DB: Database> = OpContext<DB>;
-    type Tx = OpTransaction<TxEnv>;
+    type Evm<DB: Database, I: Inspector<BaseContext<DB>>> = BaseEvm<DB, I, OpZkvmPrecompiles>;
+    type Context<DB: Database> = BaseContext<DB>;
+    type Tx = BaseTransaction<TxEnv>;
     type Error<DBError: core::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, OpTransactionError>;
-    type HaltReason = OpHaltReason;
+        EVMError<DBError, BaseTransactionError>;
+    type HaltReason = BaseHaltReason;
     type Spec = OpSpecId;
     type BlockEnv = BlockEnv;
     type Precompiles = OpZkvmPrecompiles;
@@ -46,17 +47,14 @@ impl EvmFactory for ZkvmOpEvmFactory {
         db: DB,
         input: EvmEnv<OpSpecId>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let spec_id = *input.spec_id();
-        let ctx = Context::op().with_db(db).with_block(input.block_env).with_cfg(input.cfg_env);
-        let inner = RevmEvm {
-            ctx,
-            inspector: NoOpInspector {},
-            instruction: EthInstructions::new_mainnet(),
-            precompiles: OpZkvmPrecompiles::new_with_spec(spec_id),
-            frame_stack: Default::default(),
-        };
-
-        BaseEvm::new(inner, false)
+        let spec_id = input.cfg_env.spec;
+        Context::base()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_base()
+            .with_inspector(NoOpInspector {})
+            .with_precompiles(OpZkvmPrecompiles::new_with_spec(spec_id))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -65,16 +63,12 @@ impl EvmFactory for ZkvmOpEvmFactory {
         input: EvmEnv<OpSpecId>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let spec_id = *input.spec_id();
-        let ctx = Context::op().with_db(db).with_block(input.block_env).with_cfg(input.cfg_env);
-        let inner = RevmEvm {
-            ctx,
-            inspector,
-            instruction: EthInstructions::new_mainnet(),
-            precompiles: OpZkvmPrecompiles::new_with_spec(spec_id),
-            frame_stack: Default::default(),
-        };
-
-        BaseEvm::new(inner, true)
+        let spec_id = input.cfg_env.spec;
+        Context::base()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_with_inspector(inspector)
+            .with_precompiles(OpZkvmPrecompiles::new_with_spec(spec_id))
     }
 }

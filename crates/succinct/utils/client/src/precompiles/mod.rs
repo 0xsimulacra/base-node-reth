@@ -221,7 +221,7 @@ where
 #[cfg(test)]
 mod tests {
     use alloy_primitives::U256;
-    use base_common_evm::{DefaultOp as _, OpContext};
+    use base_common_evm::{BaseContext, DefaultBase as _};
     use revm::{
         Context,
         database::EmptyDB,
@@ -232,7 +232,7 @@ mod tests {
 
     use super::*;
 
-    type TestContext = OpContext<EmptyDB>;
+    type TestContext = BaseContext<EmptyDB>;
 
     /// Creates a [`CallInputs`] with `bytecode_address` set to the given address
     /// and `target_address` set to zero, simulating a DELEGATECALL scenario.
@@ -252,7 +252,7 @@ mod tests {
     }
 
     fn create_test_context() -> TestContext {
-        Context::op().with_db(EmptyDB::new())
+        Context::base().with_db(EmptyDB::new())
     }
 
     // ===== Precompile Provider Functional Tests =====
