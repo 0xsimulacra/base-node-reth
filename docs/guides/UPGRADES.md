@@ -391,4 +391,4 @@ forks.push((BaseUpgrade::Azul.boxed(), self[BaseUpgrade::Azul]));  // <-- add
 - [ ] Precompile match arm updated (or new precompile set added)
 - [ ] `spec_by_timestamp_after_bedrock` updated (`common/evm/src/spec.rs`)
 - [ ] `RollupConfig::spec_id` updated (`consensus/genesis/src/rollup.rs`)
-- [ ] `to_chain_hardforks` updated (`execution/upgrades/src/chain.rs`)
+- [ ] `to_chain_hardforks` updated (`common/chains/src/hardforks.rs`)
