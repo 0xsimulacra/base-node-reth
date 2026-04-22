@@ -87,9 +87,9 @@ pub struct LoadConfig {
     pub batch_timeout: Duration,
     /// Maximum gas price cap to prevent overspending during congestion.
     pub max_gas_price: u128,
-    /// WebSocket JSON-RPC endpoint URL for block subscription (enables block latency tracking).
-    pub rpc_ws_url: Option<Url>,
-    /// WebSocket URL for flashblocks subscription (enables flashblock latency tracking).
+    /// JSON-RPC endpoint for block tracking (WebSocket subscription or HTTP polling).
+    pub block_watcher_url: Option<Url>,
+    /// WebSocket URL for flashblocks subscription.
     pub flashblocks_ws_url: Option<Url>,
 }
 
@@ -110,7 +110,9 @@ impl LoadConfig {
             batch_size: 5,
             batch_timeout: Duration::from_millis(50),
             max_gas_price: DEFAULT_MAX_GAS_PRICE,
-            rpc_ws_url: Some("ws://localhost:8546".parse().expect("valid default rpc_ws_url")),
+            block_watcher_url: Some(
+                "ws://localhost:8546".parse().expect("valid default block_watcher_url"),
+            ),
             flashblocks_ws_url: Some(
                 "ws://localhost:7111".parse().expect("valid default flashblocks_ws_url"),
             ),

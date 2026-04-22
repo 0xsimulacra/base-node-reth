@@ -24,7 +24,7 @@ pub type FlashblockTimes = Arc<RwLock<HashMap<TxHash, Instant>>>;
 const PENDING_CHANNEL_BUFFER: usize = 2000;
 
 /// Maximum number of concurrent receipt lookups per poll cycle.
-const MAX_RECEIPT_LOOKUPS: usize = 50;
+const MAX_RECEIPT_LOOKUPS: usize = 200;
 
 /// Tracks pending transactions and collects confirmation metrics.
 pub struct Confirmer {
@@ -35,13 +35,19 @@ pub struct Confirmer {
     stop_flag: Arc<AtomicBool>,
     poll_interval: Duration,
     max_pending_age: Duration,
-    straggler_age: Duration,
+    /// How long to wait before polling receipts for transactions not yet
+    /// detected in a pending block. On L2s (e.g. Base Sepolia)
+    /// `eth_getBlockByNumber("pending")` often returns the latest finalised
+    /// block, so the pending-block fast-path never fires. This age ensures
+    /// receipt lookups start after roughly one block time rather than waiting
+    /// for the full `max_pending_age` timeout.
+    receipt_check_age: Duration,
     pending_rx: Option<mpsc::Receiver<PendingTx>>,
     pending_tx: mpsc::Sender<PendingTx>,
     flashblock_times: FlashblockTimes,
     block_first_seen: BlockFirstSeen,
     deferred_block_latencies: Vec<DeferredBlockLatency>,
-    block_ws_enabled: bool,
+    block_watcher_enabled: bool,
 }
 
 /// A confirmed tx whose block latency could not be computed yet because
@@ -55,7 +61,7 @@ struct DeferredBlockLatency {
 }
 
 /// Max wait for a block to appear before sending metrics without block latency.
-const BLOCK_LATENCY_DEFER_TIMEOUT: Duration = Duration::from_secs(5);
+const BLOCK_LATENCY_DEFER_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl std::fmt::Debug for Confirmer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -136,16 +142,16 @@ impl ConfirmerHandle {
 impl Confirmer {
     /// Creates a confirmer with shared timing data.
     ///
-    /// Set `block_ws_enabled` to `true` when the `BlockWatcher` is running (WebSocket
-    /// available). When `false`, block latency is calculated from block timestamps
-    /// fetched via RPC.
+    /// Set `block_watcher_enabled` to `true` when a `BlockWatcher` is running.
+    /// When `false`, block latency is calculated from block timestamps fetched
+    /// via RPC.
     pub fn new(
         sender_addresses: &[Address],
         metrics_tx: mpsc::Sender<TransactionMetrics>,
         stop_flag: Arc<AtomicBool>,
         flashblock_times: FlashblockTimes,
         block_first_seen: BlockFirstSeen,
-        block_ws_enabled: bool,
+        block_watcher_enabled: bool,
     ) -> Self {
         let mut in_flight_map = HashMap::new();
         for addr in sender_addresses {
@@ -162,13 +168,13 @@ impl Confirmer {
             stop_flag,
             poll_interval: Duration::from_millis(100),
             max_pending_age: Duration::from_secs(60),
-            straggler_age: Duration::from_secs(10),
+            receipt_check_age: Duration::from_secs(2),
             pending_rx: Some(pending_rx),
             pending_tx,
             flashblock_times,
             block_first_seen,
             deferred_block_latencies: Vec::new(),
-            block_ws_enabled,
+            block_watcher_enabled,
         }
     }
 
@@ -258,8 +264,8 @@ impl Confirmer {
             }
         }
 
-        self.check_pending_block(client).await;
         self.fetch_receipts(client, &mut confirmed).await;
+        self.check_pending_block(client).await;
 
         let confirmed_hashes: HashSet<TxHash> = confirmed.iter().map(|(hash, _)| *hash).collect();
 
@@ -321,7 +327,7 @@ impl Confirmer {
             .iter()
             .filter(|(_, pending)| {
                 pending.included_at.is_some()
-                    || now.duration_since(pending.submit_time) > self.straggler_age
+                    || now.duration_since(pending.submit_time) > self.receipt_check_age
             })
             .take(MAX_RECEIPT_LOOKUPS)
             .map(|(hash, _)| *hash)
@@ -400,7 +406,7 @@ impl Confirmer {
         let mut to_send = Vec::new();
 
         for mut deferred in self.deferred_block_latencies.drain(..) {
-            if self.block_ws_enabled {
+            if self.block_watcher_enabled {
                 let block_latency = self
                     .block_first_seen
                     .read()
