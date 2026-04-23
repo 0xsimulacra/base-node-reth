@@ -8,6 +8,7 @@ use ExecutionMeteringLimitExceeded::{
     BlockStateRootGas, FlashblockExecutionTime, TransactionExecutionTime,
 };
 use alloy_primitives::{Address, U256};
+use base_bundles::RejectedTransaction;
 use base_common_consensus::{BaseReceipt, BaseTransactionSigned};
 use base_common_evm::BaseTransactionError;
 use derive_more::Display;
@@ -238,6 +239,8 @@ pub struct ExecutionInfo {
     pub extra: FlashblocksExecutionInfo,
     /// DA Footprint Scalar for Jovian
     pub da_footprint_scalar: Option<u16>,
+    /// Rejected transactions accumulated during block building, flushed after finalization.
+    pub rejected_txs: Vec<RejectedTransaction>,
 }
 
 impl ExecutionInfo {
@@ -255,6 +258,7 @@ impl ExecutionInfo {
             total_fees: U256::ZERO,
             extra: Default::default(),
             da_footprint_scalar: None,
+            rejected_txs: Vec::new(),
         }
     }
 

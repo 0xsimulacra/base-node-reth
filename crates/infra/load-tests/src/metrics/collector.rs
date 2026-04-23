@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alloy_primitives::TxHash;
 use tracing::debug;
@@ -8,7 +8,6 @@ use super::{MetricsAggregator, MetricsSummary, RollingWindow, TransactionMetrics
 /// Collects transaction metrics during test execution.
 #[derive(Debug)]
 pub struct MetricsCollector {
-    start_time: Option<Instant>,
     transactions: Vec<TransactionMetrics>,
     submitted_count: u64,
     failed_count: u64,
@@ -20,19 +19,12 @@ impl MetricsCollector {
     /// Creates a new metrics collector.
     pub const fn new() -> Self {
         Self {
-            start_time: None,
             transactions: Vec::new(),
             submitted_count: 0,
             failed_count: 0,
             rolling: RollingWindow::new(),
             flashblocks_rolling: RollingWindow::new(),
         }
-    }
-
-    /// Starts the metrics collection timer.
-    pub fn start(&mut self) {
-        self.start_time = Some(Instant::now());
-        debug!("metrics collection started");
     }
 
     /// Records a submitted transaction.
@@ -45,6 +37,8 @@ impl MetricsCollector {
         debug!(tx_hash = %metrics.tx_hash, block_latency_ms = ?metrics.block_latency.map(|d| d.as_millis()), "tx confirmed");
         if let Some(latency) = metrics.block_latency {
             self.rolling.push(metrics.gas_used, latency);
+        } else {
+            self.rolling.push_gas(metrics.gas_used);
         }
         if let Some(flashblocks_latency) = metrics.flashblocks_latency {
             self.flashblocks_rolling.push_latency(flashblocks_latency);
@@ -55,11 +49,6 @@ impl MetricsCollector {
     /// Records a failed transaction.
     pub const fn record_failed(&mut self, _tx_hash: TxHash, _reason: &str) {
         self.failed_count += 1;
-    }
-
-    /// Returns the elapsed time since start.
-    pub fn elapsed(&self) -> Duration {
-        self.start_time.map(|t| t.elapsed()).unwrap_or_default()
     }
 
     /// Returns the number of confirmed transactions.
@@ -78,14 +67,17 @@ impl MetricsCollector {
     }
 
     /// Generates a summary of collected metrics.
-    pub fn summarize(&self) -> MetricsSummary {
+    ///
+    /// `active_duration` should cover only the active submission window
+    /// (first tx submitted → last tx submitted), excluding setup and
+    /// confirmation-drain phases.
+    pub fn summarize(&self, active_duration: Duration) -> MetricsSummary {
         let aggregator = MetricsAggregator::new(&self.transactions);
-        aggregator.summarize(self.elapsed(), self.submitted_count, self.failed_count)
+        aggregator.summarize(active_duration, self.submitted_count, self.failed_count)
     }
 
     /// Resets the collector for reuse.
     pub fn reset(&mut self) {
-        self.start_time = None;
         self.transactions.clear();
         self.submitted_count = 0;
         self.failed_count = 0;

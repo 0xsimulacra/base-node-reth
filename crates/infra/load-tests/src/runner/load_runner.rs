@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    panic::AssertUnwindSafe,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -13,10 +14,14 @@ use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_types::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
 use base_tx_manager::NonceManager;
-use futures::stream::{self, StreamExt};
+use futures::{
+    FutureExt as _,
+    stream::{self, StreamExt},
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, watch};
+use revm::precompile::PrecompileId;
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -56,6 +61,23 @@ struct PreparedTx {
     gas_limit: u64,
 }
 
+enum SubmitEvent {
+    Submitted(TxHash),
+    Failed,
+}
+
+/// Shared context cloned into each `submit_batch` spawned task.
+#[derive(Clone)]
+struct BatchSubmitCtx {
+    providers: Arc<HashMap<Address, WalletProvider>>,
+    nonce_managers: Arc<HashMap<Address, NonceManager<NonceProvider>>>,
+    confirmer_handle: ConfirmerHandle,
+    submit_event_tx: mpsc::Sender<SubmitEvent>,
+    gas_price: u128,
+    chain_id: u64,
+    max_gas_price: u128,
+}
+
 const NONCE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Warn when any account drops below 0.001 ETH.
@@ -70,8 +92,8 @@ pub struct LoadRunner {
     collector: MetricsCollector,
     stop_flag: Arc<AtomicBool>,
     cancel_token: CancellationToken,
-    nonce_managers: HashMap<Address, NonceManager<NonceProvider>>,
-    providers: HashMap<Address, WalletProvider>,
+    nonce_managers: Arc<HashMap<Address, NonceManager<NonceProvider>>>,
+    providers: Arc<HashMap<Address, WalletProvider>>,
     gas_price: u128,
     display: Option<LoadTestDisplay>,
     /// Optional watch channel for pushing live display snapshots to a TUI view.
@@ -110,7 +132,7 @@ impl LoadRunner {
             AccountPool::with_offset(config.seed, config.account_count, config.sender_offset)?
         };
 
-        let providers = Self::build_providers(&config.rpc_http_url, &accounts);
+        let providers = Arc::new(Self::build_providers(&config.rpc_http_url, &accounts));
         let sender_addresses = accounts.accounts().iter().map(|a| a.address.to_string()).collect();
 
         let workload_config = WorkloadConfig::new("load-test").with_seed(config.seed);
@@ -130,7 +152,7 @@ impl LoadRunner {
             collector: MetricsCollector::new(),
             stop_flag: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
-            nonce_managers: HashMap::new(),
+            nonce_managers: Arc::new(HashMap::new()),
             providers,
             gas_price: 0,
             display: None,
@@ -218,11 +240,33 @@ impl LoadRunner {
 
         let mut weighted_gas = 0u64;
         for tx_config in &self.config.transactions {
+            // Estimates actual gas_used (not gas_limit). For precompiles,
+            // execution cost on small inputs is negligible compared to
+            // the 21K intrinsic + calldata overhead, so the estimate is
+            // much lower than the generous gas_limit set on the tx.
             let gas_estimate = match &tx_config.tx_type {
                 TxType::Transfer => 21_000,
                 TxType::Calldata { max_size, .. } => 21_000 + (*max_size as u64 * 16),
                 TxType::Erc20 { .. } => 65_000,
-                TxType::Precompile { iterations, .. } => 50_000 + 100_000 * (*iterations as u64),
+                TxType::Precompile { target, iterations, blake2f_rounds, .. } => {
+                    let per_call = match target {
+                        PrecompileId::Identity | PrecompileId::Bn254Add => 22_000,
+                        PrecompileId::Sha256 | PrecompileId::Ripemd160 => 23_000,
+                        PrecompileId::Bn254Mul => 28_000,
+                        PrecompileId::ModExp => 30_000,
+                        PrecompileId::Bn254Pairing => 45_000,
+                        PrecompileId::Blake2F => {
+                            30_000 + u64::from(blake2f_rounds.unwrap_or(1_000))
+                        }
+                        PrecompileId::KzgPointEvaluation => 55_000,
+                        _ => 25_000,
+                    };
+                    if *iterations > 1 {
+                        50_000 + per_call * (*iterations as u64)
+                    } else {
+                        per_call
+                    }
+                }
                 TxType::Osaka { target } => match target {
                     OsakaTarget::Clz => 80_000,
                     OsakaTarget::P256verifyOsaka | OsakaTarget::ModexpOsaka => 30_000,
@@ -488,7 +532,7 @@ impl LoadRunner {
 
             let provider = NonceProvider::new_http(self.config.rpc_http_url.clone());
             let nonce_manager = NonceManager::new(provider, addr, NONCE_RPC_TIMEOUT);
-            self.nonce_managers.insert(addr, nonce_manager);
+            Arc::make_mut(&mut self.nonce_managers).insert(addr, nonce_manager);
 
             debug!(address = %addr, balance = %balance, nonce = account_nonce, "account state refreshed");
         }
@@ -501,7 +545,6 @@ impl LoadRunner {
     #[instrument(skip(self), fields(target_gps = self.config.target_gps, continuous = self.config.duration.is_none(), duration = ?self.config.duration))]
     pub async fn run(&mut self) -> Result<MetricsSummary> {
         self.collector.reset();
-        self.collector.start();
         self.stop_flag.store(false, Ordering::SeqCst);
         self.cancel_token = CancellationToken::new();
 
@@ -512,11 +555,11 @@ impl LoadRunner {
             if !self.nonce_managers.contains_key(&account.address) {
                 let provider = NonceProvider::new_http(self.config.rpc_http_url.clone());
                 let nonce_manager = NonceManager::new(provider, account.address, NONCE_RPC_TIMEOUT);
-                self.nonce_managers.insert(account.address, nonce_manager);
+                Arc::make_mut(&mut self.nonce_managers).insert(account.address, nonce_manager);
             }
         }
 
-        for (address, nonce_manager) in &self.nonce_managers {
+        for (address, nonce_manager) in self.nonce_managers.iter() {
             match nonce_manager.next_nonce().await {
                 Ok(guard) => {
                     guard.rollback();
@@ -529,8 +572,12 @@ impl LoadRunner {
         }
 
         const METRICS_CHANNEL_BUFFER: usize = 2000;
+        const SUBMIT_CHANNEL_BUFFER: usize = 2000;
+        const SUBMIT_BATCH_CONCURRENCY: usize = 32;
         let (metrics_tx, mut metrics_rx) =
             mpsc::channel::<TransactionMetrics>(METRICS_CHANNEL_BUFFER);
+        let (submit_event_tx, mut submit_event_rx) =
+            mpsc::channel::<SubmitEvent>(SUBMIT_CHANNEL_BUFFER);
 
         let flashblock_times: FlashblockTimes = Arc::new(RwLock::new(HashMap::new()));
         let block_first_seen: BlockFirstSeen = Arc::new(RwLock::new(BTreeMap::new()));
@@ -550,7 +597,8 @@ impl LoadRunner {
             None
         };
 
-        let block_watcher_task = if let Some(url) = &self.config.rpc_ws_url {
+        let block_watcher_enabled = self.config.block_watcher_url.is_some();
+        let block_watcher_task = if let Some(url) = &self.config.block_watcher_url {
             info!(url = %url, "starting block watcher");
             Some(
                 BlockWatcher::new(
@@ -561,19 +609,18 @@ impl LoadRunner {
                 .start(),
             )
         } else {
-            info!("rpc_ws_url not configured, using block timestamps for latency");
+            info!("block_watcher_url not configured, using block timestamps for latency");
             None
         };
 
         let sender_addresses: Vec<_> = self.accounts.accounts().iter().map(|a| a.address).collect();
-        let block_ws_enabled = block_watcher_task.is_some();
         let mut confirmer = Confirmer::new(
             &sender_addresses,
             metrics_tx,
             Arc::clone(&self.stop_flag),
             Arc::clone(&flashblock_times),
             Arc::clone(&block_first_seen),
-            block_ws_enabled,
+            block_watcher_enabled,
         );
         let confirmer_handle = confirmer.handle();
         let confirmer_handle_for_run = confirmer_handle.clone();
@@ -606,7 +653,9 @@ impl LoadRunner {
 
         let mut pending_batch: Vec<PreparedTx> = Vec::with_capacity(batch_size);
         let mut batch_start = Instant::now();
-        let mut backoff = AdaptiveBackoff::default();
+        let semaphore = Arc::new(Semaphore::new(SUBMIT_BATCH_CONCURRENCY));
+        let providers = Arc::clone(&self.providers);
+        let nonce_managers = Arc::clone(&self.nonce_managers);
 
         let mut consecutive_at_limit = 0usize;
         let mut last_gas_price_refresh = Instant::now();
@@ -614,10 +663,10 @@ impl LoadRunner {
         let mut last_progress_report = Instant::now();
         let mut last_balance_check = Instant::now();
         const GAS_PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-        const RATE_LIMITER_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
+        const RATE_LIMITER_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
         const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(5);
         const DISPLAY_RENDER_INTERVAL: Duration = Duration::from_millis(500);
-        const BALANCE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+        const BALANCE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
         let use_live_display = self.display.as_ref().is_some_and(|d| d.is_active());
         let use_snapshot_tx = self.snapshot_tx.is_some();
@@ -689,11 +738,38 @@ impl LoadRunner {
 
             if should_flush && !pending_batch.is_empty() {
                 let batch = std::mem::replace(&mut pending_batch, Vec::with_capacity(batch_size));
+                let batch_len = batch.len();
                 batch_start = Instant::now();
-
-                let submitted = self.submit_batch(batch, &confirmer_handle, &mut backoff).await;
-
-                debug!(submitted, "batch submitted");
+                let permit = Arc::clone(&semaphore)
+                    .acquire_owned()
+                    .await
+                    .expect("submit batch semaphore closed");
+                let ctx = BatchSubmitCtx {
+                    providers: Arc::clone(&providers),
+                    nonce_managers: Arc::clone(&nonce_managers),
+                    confirmer_handle: confirmer_handle.clone(),
+                    submit_event_tx: submit_event_tx.clone(),
+                    gas_price: self.gas_price,
+                    chain_id: self.config.chain_id,
+                    max_gas_price: self.config.max_gas_price,
+                };
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    match AssertUnwindSafe(Self::submit_batch(ctx.clone(), batch))
+                        .catch_unwind()
+                        .await
+                    {
+                        Ok(submitted) => debug!(submitted, "batch submitted"),
+                        Err(_) => {
+                            error!(batch_len, "batch submission task panicked");
+                            // Send Failed events for accounting consistency so counters
+                            // don't leak when a panic prevents normal completion.
+                            for _ in 0..batch_len {
+                                let _ = ctx.submit_event_tx.send(SubmitEvent::Failed).await;
+                            }
+                        }
+                    }
+                });
             }
 
             if last_balance_check.elapsed() >= BALANCE_CHECK_INTERVAL {
@@ -705,6 +781,15 @@ impl LoadRunner {
             // current during the run (not just during the post-run drain).
             while let Ok(metrics) = metrics_rx.try_recv() {
                 self.collector.record_confirmed(metrics);
+            }
+
+            while let Ok(event) = submit_event_rx.try_recv() {
+                match event {
+                    SubmitEvent::Submitted(tx_hash) => self.collector.record_submitted(tx_hash),
+                    SubmitEvent::Failed => {
+                        self.collector.record_failed(TxHash::ZERO, "submission failed");
+                    }
+                }
             }
 
             if use_live_display || use_snapshot_tx {
@@ -772,9 +857,57 @@ impl LoadRunner {
         }
 
         if !pending_batch.is_empty() {
-            let submitted = self.submit_batch(pending_batch, &confirmer_handle, &mut backoff).await;
+            let batch_len = pending_batch.len();
+            let permit = Arc::clone(&semaphore)
+                .acquire_owned()
+                .await
+                .expect("submit batch semaphore closed");
+            let ctx = BatchSubmitCtx {
+                providers: Arc::clone(&providers),
+                nonce_managers: Arc::clone(&nonce_managers),
+                confirmer_handle: confirmer_handle.clone(),
+                submit_event_tx: submit_event_tx.clone(),
+                gas_price: self.gas_price,
+                chain_id: self.config.chain_id,
+                max_gas_price: self.config.max_gas_price,
+            };
+            tokio::spawn(async move {
+                let _permit = permit;
+                match AssertUnwindSafe(Self::submit_batch(ctx.clone(), pending_batch))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(submitted) => debug!(submitted, "final batch submitted"),
+                    Err(_) => {
+                        error!(batch_len, "final batch submission task panicked");
+                        for _ in 0..batch_len {
+                            let _ = ctx.submit_event_tx.send(SubmitEvent::Failed).await;
+                        }
+                    }
+                }
+            });
+        }
 
-            debug!(submitted, "final batch submitted");
+        let all_permits = Arc::clone(&semaphore)
+            .acquire_many_owned(SUBMIT_BATCH_CONCURRENCY as u32)
+            .await
+            .expect("submit batch semaphore closed");
+        drop(all_permits);
+
+        // Close the channel so the drain below cannot miss late events.
+        drop(submit_event_tx);
+
+        // Capture active_duration after all batches complete but before draining events,
+        // so throughput calculation (submitted/duration) uses consistent values.
+        let active_duration = start.elapsed();
+
+        while let Ok(event) = submit_event_rx.try_recv() {
+            match event {
+                SubmitEvent::Submitted(tx_hash) => self.collector.record_submitted(tx_hash),
+                SubmitEvent::Failed => {
+                    self.collector.record_failed(TxHash::ZERO, "submission failed");
+                }
+            }
         }
 
         self.stop_flag.store(true, Ordering::SeqCst);
@@ -848,124 +981,120 @@ impl LoadRunner {
         let confirmed = self.collector.confirmed_count();
         info!(confirmed, submitted, "confirmation collection complete");
 
-        Ok(self.collector.summarize())
+        Ok(self.collector.summarize(active_duration))
     }
 
-    async fn submit_batch(
-        &mut self,
-        batch: Vec<PreparedTx>,
-        confirmer_handle: &ConfirmerHandle,
-        backoff: &mut AdaptiveBackoff,
-    ) -> u64 {
-        let mut submitted_count = 0u64;
-        let chain_id = self.config.chain_id;
+    async fn submit_batch(ctx: BatchSubmitCtx, batch: Vec<PreparedTx>) -> u64 {
+        let max_fee = ctx.gas_price.saturating_mul(2).min(ctx.max_gas_price);
+        let priority_fee = (ctx.gas_price / 10).max(1);
+        let chain_id = ctx.chain_id;
+        let batch_len = batch.len();
 
-        for prepared in batch {
-            let Some(provider) = self.providers.get(&prepared.from) else {
-                warn!(from = %prepared.from, "no cached provider for sender");
-                continue;
-            };
+        let futs = batch.into_iter().map(|prepared| {
+            let providers = Arc::clone(&ctx.providers);
+            let nonce_managers = Arc::clone(&ctx.nonce_managers);
+            let confirmer_handle = ctx.confirmer_handle.clone();
+            let submit_tx = ctx.submit_event_tx.clone();
+            async move {
+                let Some(provider) = providers.get(&prepared.from) else {
+                    warn!(from = %prepared.from, "no cached provider for sender");
+                    return 0u64;
+                };
 
-            let Some(nonce_manager) = self.nonce_managers.get(&prepared.from) else {
-                warn!(from = %prepared.from, "no nonce manager for sender");
-                continue;
-            };
+                let Some(nonce_manager) = nonce_managers.get(&prepared.from) else {
+                    warn!(from = %prepared.from, "no nonce manager for sender");
+                    return 0;
+                };
 
-            let nonce_guard = match nonce_manager.next_nonce().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    warn!(from = %prepared.from, error = %e, "failed to acquire nonce");
-                    continue;
-                }
-            };
-            let nonce = nonce_guard.nonce();
-
-            let max_fee = self.gas_price.saturating_mul(2).min(self.config.max_gas_price);
-            let mut tx = TransactionRequest::default()
-                .with_from(prepared.from)
-                .with_value(prepared.value)
-                .with_input(prepared.data)
-                .with_nonce(nonce)
-                .with_chain_id(chain_id)
-                .with_max_fee_per_gas(max_fee)
-                .with_max_priority_fee_per_gas((self.gas_price / 10).max(1))
-                .with_gas_limit(prepared.gas_limit);
-            if let Some(to) = prepared.to {
-                tx = tx.with_to(to);
-            }
-
-            let mut attempts = 0;
-            let max_attempts = 3;
-            let mut should_rollback = false;
-
-            loop {
-                match provider.send_transaction(tx.clone()).await {
-                    Ok(pending) => {
-                        let tx_hash = *pending.tx_hash();
-                        confirmer_handle.record_submitted(tx_hash, prepared.from).await;
-                        self.collector.record_submitted(tx_hash);
-                        submitted_count += 1;
-                        backoff.record_success();
-
-                        debug!(
-                            tx_hash = %tx_hash,
-                            from = %prepared.from,
-                            nonce,
-                            "tx submitted"
-                        );
-
-                        break;
-                    }
+                let nonce_guard = match nonce_manager.next_nonce().await {
+                    Ok(guard) => guard,
                     Err(e) => {
-                        let error_str = e.to_string();
-                        attempts += 1;
+                        warn!(from = %prepared.from, error = %e, "failed to acquire nonce");
+                        return 0;
+                    }
+                };
+                let nonce = nonce_guard.nonce();
 
-                        let is_txpool_full = error_str.contains("txpool is full")
-                            || error_str.contains("transaction pool is full");
+                let mut tx = TransactionRequest::default()
+                    .with_from(prepared.from)
+                    .with_value(prepared.value)
+                    .with_input(prepared.data)
+                    .with_nonce(nonce)
+                    .with_chain_id(chain_id)
+                    .with_max_fee_per_gas(max_fee)
+                    .with_max_priority_fee_per_gas(priority_fee)
+                    .with_gas_limit(prepared.gas_limit);
+                if let Some(to) = prepared.to {
+                    tx = tx.with_to(to);
+                }
 
-                        if is_txpool_full && attempts < max_attempts {
-                            backoff.record_error();
-                            let delay = backoff.current();
+                let mut attempts = 0u32;
+                let max_attempts = 3u32;
+                let mut backoff = AdaptiveBackoff::default();
+
+                loop {
+                    match provider.send_transaction(tx.clone()).await {
+                        Ok(pending) => {
+                            let tx_hash = *pending.tx_hash();
+                            confirmer_handle.record_submitted(tx_hash, prepared.from).await;
+                            let _ = submit_tx.send(SubmitEvent::Submitted(tx_hash)).await;
+
                             debug!(
-                                attempt = attempts,
-                                backoff_ms = delay.as_millis(),
+                                tx_hash = %tx_hash,
                                 from = %prepared.from,
                                 nonce,
-                                "txpool full, retrying with adaptive backoff"
+                                "tx submitted"
                             );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
 
-                        if error_str.contains("nonce too low") {
+                            return 1;
+                        }
+                        Err(e) => {
+                            let error_str = e.to_string();
+                            attempts += 1;
+
+                            let is_txpool_full = error_str.contains("txpool is full")
+                                || error_str.contains("transaction pool is full");
+
+                            if is_txpool_full && attempts < max_attempts {
+                                backoff.record_error();
+                                let delay = backoff.current();
+                                debug!(
+                                    attempt = attempts,
+                                    backoff_ms = delay.as_millis(),
+                                    from = %prepared.from,
+                                    nonce,
+                                    "txpool full, retrying with adaptive backoff"
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+
+                            if error_str.contains("nonce too low") {
+                                debug!(
+                                    from = %prepared.from,
+                                    nonce,
+                                    "nonce too low, already confirmed on chain"
+                                );
+                                return 0;
+                            }
+
                             debug!(
                                 from = %prepared.from,
                                 nonce,
-                                "nonce too low, already confirmed on chain"
+                                error = %error_str,
+                                "tx submission failed"
                             );
-                            break;
+                            let _ = submit_tx.send(SubmitEvent::Failed).await;
+                            nonce_guard.rollback();
+                            return 0;
                         }
-
-                        debug!(
-                            from = %prepared.from,
-                            nonce,
-                            error = %error_str,
-                            "tx submission failed"
-                        );
-                        self.collector.record_failed(alloy_primitives::TxHash::ZERO, &error_str);
-                        backoff.record_error();
-                        should_rollback = true;
-                        break;
                     }
                 }
             }
+        });
 
-            if should_rollback {
-                nonce_guard.rollback();
-            }
-        }
-
-        submitted_count
+        let results: Vec<u64> = stream::iter(futs).buffer_unordered(batch_len).collect().await;
+        results.into_iter().sum()
     }
 
     /// Drains all test account balances back to the funder address.
