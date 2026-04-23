@@ -111,11 +111,11 @@ install-nextest:
     @command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked
 
 # Runs tests across workspace with all features enabled (excludes devnet)
-test: install-nextest build::contracts
+test: install-nextest build::contracts build::elfs
     cargo nextest run --workspace --all-features --exclude devnet --no-fail-fast
 
 # Runs tests only for crates affected by changes vs main (excludes devnet)
-test-affected base="main": install-nextest build::contracts
+test-affected base="main": install-nextest build::contracts build::elfs
     #!/usr/bin/env bash
     set -euo pipefail
     affected=$(python3 etc/scripts/local/affected-crates.py {{ base }} --exclude devnet)
@@ -131,11 +131,11 @@ test-affected base="main": install-nextest build::contracts
     cargo nextest run --all-features $pkg_args
 
 # Runs tests with ci profile for minimal disk usage
-test-ci: install-nextest build::contracts
+test-ci: install-nextest build::contracts build::elfs
     cargo nextest run --locked --workspace --all-features --exclude devnet --cargo-profile ci
 
 # Runs tests only for affected crates with ci profile (for PRs)
-test-affected-ci base="main": install-nextest build::contracts
+test-affected-ci base="main": install-nextest build::contracts build::elfs
     #!/usr/bin/env bash
     set -euo pipefail
     affected=$(python3 etc/scripts/local/affected-crates.py {{ base }} --exclude devnet)
@@ -163,12 +163,12 @@ hack:
 
 # Fixes any formatting issues
 format-fix:
-    {{_skip_kernels}} cargo fix --allow-dirty --allow-staged --workspace
+    {{_skip_kernels}} BASE_SUCCINCT_ELF_STUB=1 cargo fix --allow-dirty --allow-staged --workspace
     cargo +nightly fmt --all
 
 # Fixes any clippy issues
 clippy-fix:
-    {{_skip_kernels}} cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
+    {{_skip_kernels}} BASE_SUCCINCT_ELF_STUB=1 cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
 
 # Cleans the workspace
 clean:

@@ -7,12 +7,15 @@ release:
     cargo build --workspace --release
 
 # Builds all targets in debug mode
-all-targets: contracts
+all-targets: contracts elfs
     cargo build --workspace --all-targets
 
 # Builds all targets with ci profile
-ci: contracts
+ci: contracts elfs
     cargo build --locked --workspace --all-targets --profile ci
+
+elfs:
+    just succinct ensure-elfs
 
 # Builds the workspace with maxperf
 maxperf:
