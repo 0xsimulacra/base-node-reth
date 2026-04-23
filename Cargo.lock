@@ -4166,10 +4166,13 @@ dependencies = [
 name = "base-load-tests"
 version = "0.0.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-types",
+ "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
  "base-common-flashblocks",
@@ -4182,6 +4185,7 @@ dependencies = [
  "indicatif",
  "parking_lot",
  "rand 0.9.4",
+ "reqwest 0.13.2",
  "revm",
  "serde",
  "serde_json",
