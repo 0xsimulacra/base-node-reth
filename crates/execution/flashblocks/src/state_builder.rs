@@ -12,13 +12,12 @@ use alloy_evm::{
 use alloy_primitives::B256;
 use alloy_rpc_types::TransactionTrait;
 use alloy_rpc_types_eth::state::StateOverride;
-use base_alloy_chains::BaseUpgrades;
-use base_alloy_consensus::{OpPrimitives, OpReceipt, OpTxEnvelope};
-use base_alloy_evm::ensure_create2_deployer;
-use base_alloy_flz::tx_estimated_size_fjord as estimate_tx_compressed_size;
-use base_common_rpc_types::{OpTransactionReceipt, Transaction};
-use base_execution_rpc::OpReceiptBuilder as OpRpcReceiptBuilder;
-use base_revm::{L1_BLOCK_CONTRACT, L1BlockInfo, OpHaltReason};
+use base_common_chains::Upgrades;
+use base_common_consensus::{BasePrimitives, BaseReceipt, BaseTxEnvelope, Predeploys};
+use base_common_evm::{BaseHaltReason, L1BlockInfo, ensure_create2_deployer};
+use base_common_flz::tx_estimated_size_fjord as estimate_tx_compressed_size;
+use base_common_rpc_types::{BaseTransactionReceipt, Transaction};
+use base_execution_rpc::BaseReceiptBuilder as OpRpcReceiptBuilder;
 use reth_evm::{Evm, FromRecoveredTx};
 use reth_rpc_convert::transaction::ConvertReceiptInput;
 use revm::{
@@ -38,20 +37,20 @@ pub struct ExecutedPendingTransaction {
     /// The RPC transaction.
     pub rpc_transaction: Transaction,
     /// The receipt of the transaction.
-    pub receipt: OpTransactionReceipt,
+    pub receipt: BaseTransactionReceipt,
     /// The updated EVM state.
     pub state: EvmState,
     /// The execution result of the transaction.
-    pub result: ExecutionResult<OpHaltReason>,
+    pub result: ExecutionResult<BaseHaltReason>,
     /// Per-transaction EVM execution time, if known.
     pub execution_time_us: Option<u128>,
 }
 
 #[derive(Debug)]
 struct CachedTransactionExecution {
-    receipt: OpTransactionReceipt,
+    receipt: BaseTransactionReceipt,
     state: EvmState,
-    result: ExecutionResult<OpHaltReason>,
+    result: ExecutionResult<BaseHaltReason>,
     execution_time_us: Option<u128>,
 }
 
@@ -62,7 +61,7 @@ pub struct PendingStateBuilder<E, ChainSpec> {
     next_log_index: usize,
 
     evm: E,
-    pending_block: Block<OpTxEnvelope, Header>,
+    pending_block: Block<BaseTxEnvelope, Header>,
     l1_block_info: L1BlockInfo,
     receipt_builder: UnifiedReceiptBuilder<ChainSpec>,
     chain_spec: ChainSpec,
@@ -73,16 +72,16 @@ pub struct PendingStateBuilder<E, ChainSpec> {
 
 impl<E, ChainSpec, DB> PendingStateBuilder<E, ChainSpec>
 where
-    E: Evm<DB = DB, HaltReason = OpHaltReason>,
+    E: Evm<DB = DB, HaltReason = BaseHaltReason>,
     DB: Database + DatabaseCommit,
-    E::Tx: FromRecoveredTx<OpTxEnvelope>,
-    ChainSpec: BaseUpgrades + Clone,
+    E::Tx: FromRecoveredTx<BaseTxEnvelope>,
+    ChainSpec: Upgrades + Clone,
 {
     /// Creates a new pending state builder.
     pub fn new(
         chain_spec: ChainSpec,
         evm: E,
-        pending_block: Block<OpTxEnvelope, Header>,
+        pending_block: Block<BaseTxEnvelope, Header>,
         prev_pending_blocks: Option<Arc<PendingBlocks>>,
         l1_block_info: L1BlockInfo,
         state_overrides: StateOverride,
@@ -116,7 +115,7 @@ where
     pub fn execute_transaction(
         &mut self,
         idx: usize,
-        transaction: Recovered<OpTxEnvelope>,
+        transaction: Recovered<BaseTxEnvelope>,
     ) -> Result<ExecutedPendingTransaction, StateProcessorError> {
         let tx_hash = transaction.tx_hash();
 
@@ -154,7 +153,7 @@ where
     /// Applies EIP-4788, EIP-2935, and Canyon create2 deployer pre-execution changes to the EVM.
     ///
     /// Must be called once per block, before executing any transactions. This mirrors the
-    /// `apply_pre_execution_changes` behavior of [`base_alloy_evm::BaseBlockExecutor`] to ensure
+    /// `apply_pre_execution_changes` behavior of [`base_common_evm::BaseBlockExecutor`] to ensure
     /// that the cached execution results match what the validator computes.
     pub fn apply_pre_execution_changes(
         &mut self,
@@ -186,7 +185,7 @@ where
     /// Builds transaction result from cached receipt and state data.
     fn execute_with_cached_data(
         &mut self,
-        transaction: Recovered<OpTxEnvelope>,
+        transaction: Recovered<BaseTxEnvelope>,
         cached_execution: CachedTransactionExecution,
         idx: usize,
         effective_gas_price: u128,
@@ -195,7 +194,7 @@ where
             cached_execution;
 
         let (deposit_receipt_version, deposit_nonce) = if transaction.is_deposit() {
-            let OpReceipt::Deposit(deposit_receipt) = &receipt.inner.inner.receipt else {
+            let BaseReceipt::Deposit(deposit_receipt) = &receipt.inner.inner.receipt else {
                 return Err(ExecutionError::DepositReceiptMismatch.into());
             };
 
@@ -233,7 +232,7 @@ where
 
     fn jovian_da_footprint_estimation(
         &mut self,
-        tx_env: &Recovered<OpTxEnvelope>,
+        tx_env: &Recovered<BaseTxEnvelope>,
     ) -> Result<u64, StateProcessorError> {
         // Try to use the enveloped tx if it exists, otherwise use the encoded 2718 bytes
         let encoded = estimate_tx_compressed_size(tx_env.into_encoded().encoded_bytes())
@@ -241,7 +240,7 @@ where
 
         // Load the L1 block contract into the cache. If the L1 block contract is not pre-loaded the
         // database will panic when trying to fetch the DA footprint gas scalar.
-        self.evm.db_mut().basic(L1_BLOCK_CONTRACT).map_err(|err| {
+        self.evm.db_mut().basic(Predeploys::L1_BLOCK_INFO).map_err(|err| {
             StateProcessorError::Execution(ExecutionError::DaFootprintEstimation(err.to_string()))
         })?;
 
@@ -259,7 +258,7 @@ where
     /// Executes the transaction through the EVM and builds the result from scratch.
     fn execute_with_evm(
         &mut self,
-        transaction: Recovered<OpTxEnvelope>,
+        transaction: Recovered<BaseTxEnvelope>,
         idx: usize,
         effective_gas_price: u128,
     ) -> Result<ExecutedPendingTransaction, StateProcessorError> {
@@ -326,7 +325,7 @@ where
                 };
 
                 let sender = transaction.signer();
-                let input: ConvertReceiptInput<'_, OpPrimitives> = ConvertReceiptInput {
+                let input: ConvertReceiptInput<'_, BasePrimitives> = ConvertReceiptInput {
                     receipt: receipt.clone(),
                     tx: Recovered::new_unchecked(&transaction, sender),
                     gas_used,
@@ -346,7 +345,7 @@ where
                 self.next_log_index += receipt.logs().len();
 
                 let (deposit_receipt_version, deposit_nonce) = if transaction.is_deposit() {
-                    let OpReceipt::Deposit(deposit_receipt) = &op_receipt.inner.inner.receipt
+                    let BaseReceipt::Deposit(deposit_receipt) = &op_receipt.inner.inner.receipt
                     else {
                         return Err(ExecutionError::DepositReceiptMismatch.into());
                     };
@@ -395,13 +394,13 @@ mod tests {
     use alloy_eips::eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE};
     use alloy_primitives::{Address, B256, TxKind, U256, address, uint};
     use alloy_rpc_types_engine::PayloadId;
-    use base_alloy_consensus::OpTxEnvelope;
-    use base_alloy_flashblocks::{
+    use base_common_consensus::BaseTxEnvelope;
+    use base_common_evm::L1BlockInfo;
+    use base_common_flashblocks::{
         ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
     };
     use base_execution_chainspec::BaseChainSpecBuilder;
     use base_execution_evm::BaseEvmConfig;
-    use base_revm::L1BlockInfo;
     use reth_evm::ConfigureEvm;
     use reth_revm::State;
     use revm::{
@@ -434,13 +433,13 @@ mod tests {
         let db = make_db_with_beacon_roots_contract();
 
         let chain_spec = Arc::new(BaseChainSpecBuilder::base_mainnet().build());
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
         let header = Header { timestamp: POST_ECOTONE_TIMESTAMP, number: 1, ..Default::default() };
         let evm_env = evm_config.evm_env(&header).expect("failed to build evm env");
         let evm = evm_config.evm_with_env(db, evm_env);
         let pending_block = Block {
             header: Header { timestamp: POST_ECOTONE_TIMESTAMP, number: 1, ..Default::default() },
-            body: BlockBody::<OpTxEnvelope>::default(),
+            body: BlockBody::<BaseTxEnvelope>::default(),
         };
         let mut builder = PendingStateBuilder::new(
             chain_spec,
@@ -490,13 +489,13 @@ mod tests {
         let pre_ecotone_timestamp = BASE_MAINNET_ECOTONE_TIMESTAMP - 1;
 
         let chain_spec = Arc::new(BaseChainSpecBuilder::base_mainnet().build());
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
         let header = Header { timestamp: pre_ecotone_timestamp, number: 1, ..Default::default() };
         let evm_env = evm_config.evm_env(&header).expect("failed to build evm env");
         let evm = evm_config.evm_with_env(db, evm_env);
         let pending_block = Block {
             header: Header { timestamp: pre_ecotone_timestamp, number: 1, ..Default::default() },
-            body: BlockBody::<OpTxEnvelope>::default(),
+            body: BlockBody::<BaseTxEnvelope>::default(),
         };
         let mut builder = PendingStateBuilder::new(
             chain_spec,
@@ -528,7 +527,7 @@ mod tests {
 
     const DA_FOOTPRINT_GAS_SCALAR_SLOT: U256 = uint!(8_U256);
 
-    fn create_legacy_tx() -> alloy_consensus::transaction::Recovered<OpTxEnvelope> {
+    fn create_legacy_tx() -> alloy_consensus::transaction::Recovered<BaseTxEnvelope> {
         let tx = alloy_consensus::TxLegacy {
             chain_id: Some(8453),
             nonce: 0,
@@ -539,7 +538,7 @@ mod tests {
             input: Default::default(),
         };
 
-        let envelope = OpTxEnvelope::Legacy(Signed::new_unchecked(
+        let envelope = BaseTxEnvelope::Legacy(Signed::new_unchecked(
             tx,
             alloy_primitives::Signature::test_signature(),
             B256::ZERO,
@@ -551,7 +550,7 @@ mod tests {
     #[test]
     fn cached_execute_transaction_preserves_timing_from_prev_pending_blocks() {
         let chain_spec = Arc::new(BaseChainSpecBuilder::base_mainnet().build());
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
 
         let header = Header {
             number: 1,
@@ -673,7 +672,7 @@ mod tests {
             base_fee_per_gas: Some(1_000_000_000),
             ..Default::default()
         };
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
         let evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
         let evm = evm_config.evm_with_env(db, evm_env);
 
@@ -716,7 +715,7 @@ mod tests {
             base_fee_per_gas: Some(1_000_000_000),
             ..Default::default()
         };
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
         let evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
         let evm = evm_config.evm_with_env(db, evm_env);
 
@@ -772,7 +771,7 @@ mod tests {
             base_fee_per_gas: Some(1_000_000_000),
             ..Default::default()
         };
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
         let evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
         let evm = evm_config.evm_with_env(db, evm_env);
 
@@ -787,7 +786,7 @@ mod tests {
             StateOverride::default(),
         );
 
-        let deposit_tx = base_alloy_consensus::TxDeposit {
+        let deposit_tx = base_common_consensus::TxDeposit {
             source_hash: B256::ZERO,
             from: deposit_sender,
             to: TxKind::Call(Address::ZERO),
@@ -799,7 +798,7 @@ mod tests {
         };
 
         let sealed = alloy_consensus::Sealed::new_unchecked(deposit_tx, B256::ZERO);
-        let envelope = OpTxEnvelope::Deposit(sealed);
+        let envelope = BaseTxEnvelope::Deposit(sealed);
         let tx = alloy_consensus::transaction::Recovered::new_unchecked(envelope, deposit_sender);
 
         let result = builder.execute_transaction(0, tx).expect("deposit execution failed");

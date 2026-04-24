@@ -4,9 +4,9 @@ use std::sync::{
 };
 
 use alloy_consensus::{BlockHeader, Transaction};
-use base_alloy_chains::BaseUpgrades;
+use base_common_chains::Upgrades;
+use base_common_evm::L1BlockInfo;
 use base_execution_evm::RethL1BlockInfo;
-use base_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::ConfigureEvm;
@@ -20,18 +20,18 @@ use reth_transaction_pool::{
     TransactionValidator,
 };
 
-use crate::OpPooledTx;
+use crate::BasePooledTx;
 
 /// Tracks additional infos for the current block.
 #[derive(Debug, Default)]
-pub struct OpL1BlockInfo {
+pub struct BaseL1BlockInfo {
     /// The current L1 block info.
     l1_block_info: RwLock<L1BlockInfo>,
     /// Current block timestamp.
     timestamp: AtomicU64,
 }
 
-impl OpL1BlockInfo {
+impl BaseL1BlockInfo {
     /// Returns the most recent timestamp
     pub fn timestamp(&self) -> u64 {
         self.timestamp.load(Ordering::Relaxed)
@@ -40,18 +40,18 @@ impl OpL1BlockInfo {
 
 /// Validator for Base transactions.
 #[derive(Debug, Clone)]
-pub struct OpTransactionValidator<Client, Tx, Evm> {
+pub struct BaseTransactionValidator<Client, Tx, Evm> {
     /// The type that performs the actual validation.
     inner: Arc<EthTransactionValidator<Client, Tx, Evm>>,
     /// Additional block info required for validation.
-    block_info: Arc<OpL1BlockInfo>,
+    block_info: Arc<BaseL1BlockInfo>,
     /// If true, ensure that the transaction's sender has enough balance to cover the L1 gas fee
     /// derived from the tracked L1 block info that is extracted from the first transaction in the
     /// L2 block.
     require_l1_data_gas_fee: bool,
 }
 
-impl<Client, Tx, Evm> OpTransactionValidator<Client, Tx, Evm> {
+impl<Client, Tx, Evm> BaseTransactionValidator<Client, Tx, Evm> {
     /// Returns the configured chain spec
     pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
     where
@@ -83,16 +83,15 @@ impl<Client, Tx, Evm> OpTransactionValidator<Client, Tx, Evm> {
     }
 }
 
-impl<Client, Tx, Evm> OpTransactionValidator<Client, Tx, Evm>
+impl<Client, Tx, Evm> BaseTransactionValidator<Client, Tx, Evm>
 where
-    Client:
-        ChainSpecProvider<ChainSpec: BaseUpgrades> + StateProviderFactory + BlockReaderIdExt + Sync,
-    Tx: EthPoolTransaction + OpPooledTx,
+    Client: ChainSpecProvider<ChainSpec: Upgrades> + StateProviderFactory + BlockReaderIdExt + Sync,
+    Tx: EthPoolTransaction + BasePooledTx,
     Evm: ConfigureEvm,
 {
-    /// Create a new [`OpTransactionValidator`].
+    /// Create a new [`BaseTransactionValidator`].
     pub fn new(inner: EthTransactionValidator<Client, Tx, Evm>) -> Self {
-        let this = Self::with_block_info(inner, OpL1BlockInfo::default());
+        let this = Self::with_block_info(inner, BaseL1BlockInfo::default());
         if let Ok(Some(block)) =
             this.inner.client().block_by_number_or_tag(alloy_eips::BlockNumberOrTag::Latest)
         {
@@ -108,10 +107,10 @@ where
         this
     }
 
-    /// Create a new [`OpTransactionValidator`] with the given [`OpL1BlockInfo`].
+    /// Create a new [`BaseTransactionValidator`] with the given [`BaseL1BlockInfo`].
     pub fn with_block_info(
         inner: EthTransactionValidator<Client, Tx, Evm>,
-        block_info: OpL1BlockInfo,
+        block_info: BaseL1BlockInfo,
     ) -> Self {
         Self {
             inner: Arc::new(inner),
@@ -139,7 +138,7 @@ where
     ///
     /// See also [`TransactionValidator::validate_transaction`]
     ///
-    /// This behaves the same as [`OpTransactionValidator::validate_one_with_state`], but creates
+    /// This behaves the same as [`BaseTransactionValidator::validate_one_with_state`], but creates
     /// a new state provider internally.
     pub async fn validate_one(
         &self,
@@ -177,7 +176,7 @@ where
         self.apply_op_checks(outcome)
     }
 
-    /// Performs the necessary opstack specific checks based on top of the regular eth outcome.
+    /// Performs the necessary Base-specific checks based on top of the regular eth outcome.
     fn apply_op_checks(
         &self,
         outcome: TransactionValidationOutcome<Tx>,
@@ -237,11 +236,10 @@ where
     }
 }
 
-impl<Client, Tx, Evm> TransactionValidator for OpTransactionValidator<Client, Tx, Evm>
+impl<Client, Tx, Evm> TransactionValidator for BaseTransactionValidator<Client, Tx, Evm>
 where
-    Client:
-        ChainSpecProvider<ChainSpec: BaseUpgrades> + StateProviderFactory + BlockReaderIdExt + Sync,
-    Tx: EthPoolTransaction + OpPooledTx,
+    Client: ChainSpecProvider<ChainSpec: Upgrades> + StateProviderFactory + BlockReaderIdExt + Sync,
+    Tx: EthPoolTransaction + BasePooledTx,
     Evm: ConfigureEvm,
 {
     type Transaction = Tx;

@@ -5,7 +5,7 @@ use core::fmt::Debug;
 
 use alloy_eips::BlockNumHash;
 use async_trait::async_trait;
-use base_consensus_genesis::{RollupConfig, SystemConfig};
+use base_common_genesis::{RollupConfig, SystemConfig};
 use base_protocol::{
     Batch, BatchValidity, BatchWithInclusionBlock, BlockInfo, L2BlockInfo, SingleBatch, SpanBatch,
     SpanBatchError,
@@ -32,7 +32,7 @@ pub trait BatchStreamProvider {
 /// It slots in between the [`ChannelReader`] and [`BatchQueue`]
 /// stages, buffering span batches until they are validated.
 ///
-/// [`Holocene`]: https://specs.optimism.io/protocol/holocene/overview.html
+/// [`Holocene`]: https://specs.base.org/upgrades/holocene/overview
 /// [`ChannelReader`]: crate::stages::ChannelReader
 /// [`BatchQueue`]: crate::stages::BatchQueue
 #[derive(Debug)]
@@ -257,8 +257,8 @@ mod tests {
     use alloy_consensus::{BlockBody, Header};
     use alloy_eips::{BlockNumHash, NumHash};
     use alloy_primitives::{FixedBytes, b256};
-    use base_alloy_consensus::BaseBlock;
-    use base_consensus_genesis::{ChainGenesis, HardForkConfig, SystemConfig};
+    use base_common_consensus::BaseBlock;
+    use base_common_genesis::{ChainGenesis, HardForkConfig, SystemConfig};
     use base_protocol::{SingleBatch, SpanBatchElement};
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

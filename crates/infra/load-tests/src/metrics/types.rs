@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::TxHash;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,9 @@ pub struct TransactionMetrics {
     pub gas_price: u128,
     /// Block number where transaction was included.
     pub block_number: Option<u64>,
+    /// When the confirmer discovered the receipt (used by the rolling window).
+    #[serde(skip)]
+    pub confirmed_at: Option<Instant>,
 }
 
 impl TransactionMetrics {
@@ -30,7 +33,15 @@ impl TransactionMetrics {
         gas_price: u128,
         block_number: Option<u64>,
     ) -> Self {
-        Self { tx_hash, block_latency, flashblocks_latency, gas_used, gas_price, block_number }
+        Self {
+            tx_hash,
+            block_latency,
+            flashblocks_latency,
+            gas_used,
+            gas_price,
+            block_number,
+            confirmed_at: None,
+        }
     }
 
     /// Returns the transaction cost in wei.
@@ -83,6 +94,27 @@ impl ThroughputMetrics {
     }
 }
 
+/// Rolling-window throughput percentiles sampled during the run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThroughputPercentiles {
+    /// Median rolling TPS.
+    pub tps_p50: f64,
+    /// 90th percentile rolling TPS.
+    pub tps_p90: f64,
+    /// 99th percentile rolling TPS.
+    pub tps_p99: f64,
+    /// Peak rolling TPS observed.
+    pub tps_max: f64,
+    /// Median rolling GPS.
+    pub gps_p50: f64,
+    /// 90th percentile rolling GPS.
+    pub gps_p90: f64,
+    /// 99th percentile rolling GPS.
+    pub gps_p99: f64,
+    /// Peak rolling GPS observed.
+    pub gps_max: f64,
+}
+
 /// Aggregated gas metrics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GasMetrics {
@@ -101,10 +133,18 @@ pub struct GasMetrics {
 pub struct FlashblocksLatencyMetrics {
     /// Transactions with flashblocks data.
     pub count: u64,
+    /// Minimum latency observed.
+    pub min: Duration,
+    /// Maximum latency observed.
+    pub max: Duration,
+    /// Mean latency.
+    pub mean: Duration,
     /// Median latency.
     pub p50: Duration,
     /// 90th percentile latency.
     pub p90: Duration,
+    /// 95th percentile latency.
+    pub p95: Duration,
     /// 99th percentile latency.
     pub p99: Duration,
 }

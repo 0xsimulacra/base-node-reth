@@ -10,28 +10,22 @@
 
 extern crate alloc;
 
-#[cfg(feature = "alloy-compat")]
-mod alloy_compat;
-
-#[cfg(feature = "evm")]
-mod evm_compat;
-
 #[cfg(feature = "reth")]
 mod reth_compat;
 #[cfg(feature = "reth")]
-pub use reth_compat::{BaseBlockBody, CompactTxDeposit, DepositReceipt, OpPrimitives};
+pub use reth_compat::{BaseBlockBody, BasePrimitives, CompactTxDeposit, DepositReceiptExt};
 
 mod receipts;
 pub use receipts::{
-    OpDepositReceipt, OpDepositReceiptWithBloom, OpReceipt, OpReceiptEnvelope, OpTxReceipt,
+    BaseReceipt, BaseReceiptEnvelope, BaseTxReceipt, DepositReceipt, DepositReceiptWithBloom,
 };
 
 mod transaction;
 #[cfg(feature = "serde")]
 pub use transaction::serde_deposit_tx_rpc;
 pub use transaction::{
-    DEPOSIT_TX_TYPE_ID, DepositTransaction, OpDepositInfo, OpPooledTransaction, OpTransaction,
-    OpTransactionInfo, OpTxEnvelope, OpTxType, OpTypedTransaction, TxDeposit,
+    BasePooledTransaction, BaseTransaction, BaseTransactionInfo, BaseTxEnvelope,
+    BaseTypedTransaction, DEPOSIT_TX_TYPE_ID, DepositInfo, DepositTransaction, OpTxType, TxDeposit,
 };
 
 mod extra;
@@ -43,11 +37,14 @@ pub use source::{
     UserDepositSource,
 };
 
+mod predeploys;
+pub use predeploys::{Deployers, Predeploys, SystemAddresses};
+
 mod block;
 pub use block::BaseBlock;
 
-/// Signed transaction type alias for [`OpTxEnvelope`].
-pub type OpTransactionSigned = OpTxEnvelope;
+/// Signed transaction type alias for [`BaseTxEnvelope`].
+pub type BaseTransactionSigned = BaseTxEnvelope;
 
 /// Bincode-compatible serde implementations for consensus types.
 ///
@@ -59,7 +56,7 @@ pub type OpTransactionSigned = OpTxEnvelope;
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub mod serde_bincode_compat {
     pub use super::{
-        receipts::serde_bincode_compat::{OpDepositReceipt, OpReceipt},
+        receipts::serde_bincode_compat::{BaseReceipt, DepositReceipt},
         transaction::serde_bincode_compat::TxDeposit,
     };
 

@@ -6,9 +6,9 @@ use core::fmt::Debug;
 use alloy_consensus::BlockBody;
 use alloy_primitives::{B256, Bytes};
 use alloy_rlp::Decodable;
-use base_alloy_consensus::{BaseBlock, OpTxEnvelope, OpTxType};
+use base_common_consensus::{BaseBlock, BaseTxEnvelope, OpTxType};
+use base_common_genesis::RollupConfig;
 use base_consensus_derive::{Pipeline, PipelineError, PipelineErrorKind, Signal, SignalReceiver};
-use base_consensus_genesis::RollupConfig;
 use base_proof_executor::BlockBuildingOutcome;
 use base_protocol::L2BlockInfo;
 use spin::RwLock;
@@ -151,8 +151,10 @@ where
                         .as_ref()
                         .unwrap_or(&Vec::new())
                         .iter()
-                        .map(|tx| OpTxEnvelope::decode(&mut tx.as_ref()).map_err(DriverError::Rlp))
-                        .collect::<DriverResult<Vec<OpTxEnvelope>, E::Error>>()?,
+                        .map(|tx| {
+                            BaseTxEnvelope::decode(&mut tx.as_ref()).map_err(DriverError::Rlp)
+                        })
+                        .collect::<DriverResult<Vec<BaseTxEnvelope>, E::Error>>()?,
                     ommers: Vec::new(),
                     withdrawals: None,
                 },

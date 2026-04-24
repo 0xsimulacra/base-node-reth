@@ -2,7 +2,6 @@ use std::{fmt, path::Path, time::Duration};
 
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
-use rand::Rng;
 use revm::precompile::PrecompileId;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -96,6 +95,12 @@ pub struct TestConfig {
     /// Maximum in-flight transactions per sender.
     pub in_flight_per_sender: u32,
 
+    /// Number of transactions to batch together before submitting to the RPC.
+    pub batch_size: u32,
+
+    /// Maximum time to wait for a batch to fill before flushing (e.g., "50ms", "200ms").
+    pub batch_timeout: Option<String>,
+
     /// Test duration (e.g., "30s", "5m", "1h").
     pub duration: Option<String>,
 
@@ -103,6 +108,10 @@ pub struct TestConfig {
     pub target_gps: Option<u64>,
 
     /// Seed for deterministic account generation (used if mnemonic not provided).
+    ///
+    /// Defaults to `12345` for reproducible single-run testing and fund recovery. Concurrent runs
+    /// against the same chain without overriding this will derive identical
+    /// accounts and collide on nonces.
     pub seed: u64,
 
     /// Chain ID (if not provided, fetched from RPC).
@@ -115,10 +124,10 @@ pub struct TestConfig {
     #[serde(default)]
     pub looper_contract: Option<String>,
 
-    /// WebSocket JSON-RPC endpoint URL for block subscription (enables block latency tracking).
-    #[serde(default, alias = "ws_url")]
-    pub rpc_ws_url: Option<Url>,
-    /// WebSocket URL for flashblocks subscription (enables flashblock latency tracking).
+    /// JSON-RPC endpoint for block tracking (WebSocket subscription or HTTP polling).
+    #[serde(default, alias = "rpc_ws_url", alias = "ws_url")]
+    pub block_watcher_url: Option<Url>,
+    /// WebSocket URL for flashblocks subscription.
     #[serde(default, alias = "flashblocks_url")]
     pub flashblocks_ws_url: Option<Url>,
 }
@@ -129,16 +138,18 @@ impl Default for TestConfig {
             rpc: Url::parse("http://localhost:8545").expect("valid URL"),
             mnemonic: None,
             funding_amount: "10000000000000000".to_string(),
-            sender_count: 10,
+            sender_count: 100,
             sender_offset: 0,
-            in_flight_per_sender: 16,
-            duration: Some("30s".to_string()),
-            target_gps: Some(2_100_000),
-            seed: rand::rng().random(),
+            in_flight_per_sender: 256,
+            batch_size: 50,
+            batch_timeout: Some("100ms".to_string()),
+            duration: Some("60s".to_string()),
+            target_gps: Some(20_000_000),
+            seed: 12345,
             chain_id: None,
             transactions: vec![WeightedTxType { weight: 100, tx_type: TxTypeConfig::Transfer }],
             looper_contract: None,
-            rpc_ws_url: None,
+            block_watcher_url: None,
             flashblocks_ws_url: None,
         }
     }
@@ -159,7 +170,7 @@ impl fmt::Debug for TestConfig {
             .field("chain_id", &self.chain_id)
             .field("transactions", &self.transactions)
             .field("looper_contract", &self.looper_contract)
-            .field("rpc_ws_url", &self.rpc_ws_url)
+            .field("block_watcher_url", &self.block_watcher_url)
             .field("flashblocks_ws_url", &self.flashblocks_ws_url)
             .finish()
     }
@@ -176,7 +187,7 @@ pub struct WeightedTxType {
     pub tx_type: TxTypeConfig,
 }
 
-/// Osaka (Base V1) transaction target.
+/// Osaka (Base Azul) transaction target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OsakaTarget {
@@ -222,7 +233,7 @@ pub enum TxTypeConfig {
         iterations: u32,
     },
 
-    /// Osaka (Base V1) opcode or precompile transaction.
+    /// Osaka (Base Azul) opcode or precompile transaction.
     Osaka {
         /// Target Osaka feature.
         target: OsakaTarget,
@@ -265,9 +276,6 @@ impl TestConfig {
             return Err(BaselineError::Config("sender_count must be > 0".into()));
         }
 
-        if let Some(url) = &self.rpc_ws_url {
-            Self::validate_ws_url(url, "rpc_ws_url")?;
-        }
         if let Some(url) = &self.flashblocks_ws_url {
             Self::validate_ws_url(url, "flashblocks_ws_url")?;
         }
@@ -354,6 +362,16 @@ impl TestConfig {
             self.transactions.iter().map(|t| self.convert_tx_type(t)).collect::<Result<Vec<_>>>()?
         };
 
+        let batch_timeout = self
+            .batch_timeout
+            .as_ref()
+            .map(|d| {
+                humantime::parse_duration(d.trim())
+                    .map_err(|e| BaselineError::Config(format!("invalid batch_timeout '{d}': {e}")))
+            })
+            .transpose()?
+            .unwrap_or(Duration::from_millis(100));
+
         Ok(crate::runner::LoadConfig {
             rpc_http_url,
             chain_id: resolved_chain_id,
@@ -365,10 +383,10 @@ impl TestConfig {
             target_gps: self.target_gps.unwrap_or(2_100_000),
             duration,
             max_in_flight_per_sender: self.in_flight_per_sender as u64,
-            batch_size: 5,
-            batch_timeout: Duration::from_millis(50),
+            batch_size: self.batch_size.max(1) as usize,
+            batch_timeout,
             max_gas_price: crate::runner::DEFAULT_MAX_GAS_PRICE,
-            rpc_ws_url: self.rpc_ws_url.clone(),
+            block_watcher_url: self.block_watcher_url.clone(),
             flashblocks_ws_url: self.flashblocks_ws_url.clone(),
         })
     }
@@ -427,7 +445,7 @@ rpc: http://localhost:8545
 "#;
         let config = TestConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.rpc.host_str(), Some("localhost"));
-        assert_eq!(config.sender_count, 10);
+        assert_eq!(config.sender_count, 100);
         assert!(config.mnemonic.is_none());
     }
 
@@ -562,46 +580,55 @@ transactions:
     }
 
     #[test]
-    fn rejects_http_scheme_for_ws_url() {
+    fn rejects_http_scheme_for_flashblocks_url() {
         let yaml = r#"
 rpc: http://localhost:8545
-rpc_ws_url: http://localhost:8546
+flashblocks_ws_url: http://localhost:7111
 "#;
         let err = TestConfig::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("rpc_ws_url"));
+        assert!(err.to_string().contains("flashblocks_ws_url"));
         assert!(err.to_string().contains("ws://"));
     }
 
     #[test]
-    fn rejects_https_scheme_for_ws_url() {
+    fn block_watcher_url_accepts_http() {
         let yaml = r#"
 rpc: http://localhost:8545
-rpc_ws_url: https://localhost:8546
+block_watcher_url: http://localhost:8546
 "#;
-        let err = TestConfig::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("rpc_ws_url"));
-        assert!(err.to_string().contains("wss://"));
+        let config = TestConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.block_watcher_url.as_ref().unwrap().scheme(), "http");
     }
 
     #[test]
-    fn accepts_wss_scheme_for_ws_url() {
+    fn block_watcher_url_accepts_wss() {
         let yaml = r#"
 rpc: http://localhost:8545
-rpc_ws_url: wss://localhost:8546
+block_watcher_url: wss://localhost:8546
 flashblocks_ws_url: wss://localhost:7111
 "#;
         let config = TestConfig::from_yaml(yaml).unwrap();
-        assert_eq!(config.rpc_ws_url.as_ref().unwrap().scheme(), "wss");
+        assert_eq!(config.block_watcher_url.as_ref().unwrap().scheme(), "wss");
         assert_eq!(config.flashblocks_ws_url.as_ref().unwrap().scheme(), "wss");
     }
 
     #[test]
-    fn accepts_omitted_ws_urls() {
+    fn block_watcher_url_alias_rpc_ws_url() {
+        let yaml = r#"
+rpc: http://localhost:8545
+rpc_ws_url: ws://localhost:8546
+"#;
+        let config = TestConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.block_watcher_url.as_ref().unwrap().scheme(), "ws");
+    }
+
+    #[test]
+    fn omitted_urls_are_none() {
         let yaml = r#"
 rpc: http://localhost:8545
 "#;
         let config = TestConfig::from_yaml(yaml).unwrap();
-        assert!(config.rpc_ws_url.is_none());
+        assert!(config.block_watcher_url.is_none());
         assert!(config.flashblocks_ws_url.is_none());
     }
 }

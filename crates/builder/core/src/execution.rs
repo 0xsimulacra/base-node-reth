@@ -8,8 +8,9 @@ use ExecutionMeteringLimitExceeded::{
     BlockStateRootGas, FlashblockExecutionTime, TransactionExecutionTime,
 };
 use alloy_primitives::{Address, U256};
-use base_alloy_consensus::{OpReceipt, OpTransactionSigned};
-use base_revm::OpTransactionError;
+use base_bundles::RejectedTransaction;
+use base_common_consensus::{BaseReceipt, BaseTransactionSigned};
+use base_common_evm::BaseTransactionError;
 use derive_more::Display;
 use thiserror::Error;
 
@@ -161,7 +162,7 @@ pub enum TxnExecutionError {
 
     /// Internal EVM error during transaction execution.
     #[error("internal error: {0}")]
-    InternalError(OpTransactionError),
+    InternalError(BaseTransactionError),
 
     /// EVM execution error.
     #[error("EVM error")]
@@ -215,11 +216,11 @@ pub enum TxnOutcome {
 #[derive(Default, Debug)]
 pub struct ExecutionInfo {
     /// All executed transactions (unrecovered).
-    pub executed_transactions: Vec<OpTransactionSigned>,
+    pub executed_transactions: Vec<BaseTransactionSigned>,
     /// The recovered senders for the executed transactions.
     pub executed_senders: Vec<Address>,
     /// The transaction receipts
-    pub receipts: Vec<OpReceipt>,
+    pub receipts: Vec<BaseReceipt>,
     /// All gas used so far
     pub cumulative_gas_used: u64,
     /// Estimated DA size
@@ -238,6 +239,8 @@ pub struct ExecutionInfo {
     pub extra: FlashblocksExecutionInfo,
     /// DA Footprint Scalar for Jovian
     pub da_footprint_scalar: Option<u16>,
+    /// Rejected transactions accumulated during block building, flushed after finalization.
+    pub rejected_txs: Vec<RejectedTransaction>,
 }
 
 impl ExecutionInfo {
@@ -255,6 +258,7 @@ impl ExecutionInfo {
             total_fees: U256::ZERO,
             extra: Default::default(),
             da_footprint_scalar: None,
+            rejected_txs: Vec::new(),
         }
     }
 

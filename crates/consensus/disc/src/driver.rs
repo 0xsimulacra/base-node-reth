@@ -378,7 +378,7 @@ impl Discv5Driver {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use base_alloy_chains::BaseChainConfig;
+    use base_common_chains::ChainConfig;
     use discv5::{
         ConfigBuilder,
         enr::{CombinedKey, CombinedPublicKey},
@@ -398,13 +398,13 @@ mod tests {
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let discovery = Discv5Driver::builder(
             LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-            BaseChainConfig::sepolia().chain_id,
+            ChainConfig::sepolia().chain_id,
             ConfigBuilder::new(socket.into()).build(),
         )
         .build()
         .expect("Failed to build discovery service");
         let (handle, _) = discovery.start();
-        assert_eq!(handle.chain_id, BaseChainConfig::sepolia().chain_id);
+        assert_eq!(handle.chain_id, ChainConfig::sepolia().chain_id);
     }
 
     #[tokio::test]
@@ -420,7 +420,7 @@ mod tests {
         };
         let mut discovery = Discv5Driver::builder(
             LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-            BaseChainConfig::sepolia().chain_id,
+            ChainConfig::sepolia().chain_id,
             ConfigBuilder::new(socket.into()).build(),
         )
         .with_bootnodes(BootNodes::testnet())
@@ -435,14 +435,12 @@ mod tests {
         Discv5Driver::bootstrap_peers(
             discovery.bootstore,
             discovery.bootnodes,
-            BaseChainConfig::sepolia().chain_id,
+            ChainConfig::sepolia().chain_id,
             &discovery.disc,
         )
         .await;
-        assert!(
-            discovery.disc.table_entries_enr().len() >= 2,
-            "Discovery table should have at least 2 ENRs"
-        );
+        let enrs = discovery.disc.table_entries_enr();
+        assert!(enrs.len() >= 2, "Discovery table should have at least 2 ENRs");
 
         // Filter out testnet ENRs that are not valid.
         let testnet = BootNodes::testnet();
@@ -450,9 +448,7 @@ mod tests {
             .iter()
             .filter_map(|node| match node {
                 BootNode::Enr(enr) => {
-                    if EnrValidation::validate(enr, BaseChainConfig::sepolia().chain_id)
-                        .is_invalid()
-                    {
+                    if EnrValidation::validate(enr, ChainConfig::sepolia().chain_id).is_invalid() {
                         return None;
                     }
                     Some(enr.public_key())
@@ -465,12 +461,12 @@ mod tests {
             })
             .collect();
 
-        // There should be 2 valid boot nodes for the testnet (all enodes).
-        assert_eq!(testnet.len(), 2);
+        // There should be 6 valid boot nodes for the testnet:
+        // 2 ENRs + 4 enodes (each enode listed on ports 30301 and 9200).
+        assert_eq!(testnet.len(), 6);
 
         // Those ENRs should be in the testnet bootnodes.
-        let disc_enrs = discovery.disc.table_entries_enr();
-        for enr in disc_enrs {
+        for enr in &enrs {
             assert!(
                 testnet.iter().any(|pub_key| pub_key == &enr.public_key()),
                 "Discovery table does not contain testnet ENR: {enr:?}"
@@ -493,9 +489,7 @@ mod tests {
             .iter()
             .filter_map(|node| match node {
                 BootNode::Enr(enr) => {
-                    if EnrValidation::validate(enr, BaseChainConfig::mainnet().chain_id)
-                        .is_invalid()
-                    {
+                    if EnrValidation::validate(enr, ChainConfig::mainnet().chain_id).is_invalid() {
                         return None;
                     }
                     Some(enr.public_key())
@@ -508,9 +502,9 @@ mod tests {
             })
             .collect();
 
-        // There should be 10 valid boot nodes for the mainnet:
-        // 5 Base Mainnet ENRs + 5 Base enodes.
-        assert_eq!(mainnet.len(), 10);
+        // There should be 15 valid boot nodes for the mainnet:
+        // 5 Base Mainnet ENRs + 10 Base enodes (each enode listed on ports 30301 and 9200).
+        assert_eq!(mainnet.len(), 15);
 
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
@@ -520,7 +514,7 @@ mod tests {
 
         let mut discovery = Discv5Driver::builder(
             LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-            BaseChainConfig::mainnet().chain_id,
+            ChainConfig::mainnet().chain_id,
             ConfigBuilder::new(socket.into()).build(),
         )
         .with_bootnodes(BootNodes::mainnet())
@@ -535,7 +529,7 @@ mod tests {
         Discv5Driver::bootstrap_peers(
             discovery.bootstore,
             discovery.bootnodes,
-            BaseChainConfig::mainnet().chain_id,
+            ChainConfig::mainnet().chain_id,
             &discovery.disc,
         )
         .await;

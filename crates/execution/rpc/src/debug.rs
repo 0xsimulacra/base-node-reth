@@ -8,12 +8,12 @@ use alloy_primitives::B256;
 use alloy_rlp::Encodable;
 use alloy_rpc_types_debug::ExecutionWitness;
 use async_trait::async_trait;
-use base_alloy_chains::BaseUpgrades;
+use base_common_chains::Upgrades;
 use base_execution_payload_builder::{
     Attributes, PayloadPrimitives,
-    builder::{Builder, OpPayloadBuilderCtx},
+    builder::{BasePayloadBuilderCtx, Builder},
 };
-use base_execution_trie::{OpProofsStorage, OpProofsStore};
+use base_execution_trie::{BaseProofsStorage, BaseProofsStore};
 use base_execution_txpool::BasePooledTransaction;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee_core::RpcResult;
@@ -79,7 +79,7 @@ impl<Eth, Storage, Provider, EvmConfig, Attrs> DebugApiExt<Eth, Storage, Provide
 where
     Eth: FullEthApi + Send + Sync + 'static,
     ErrorObject<'static>: From<Eth::Error>,
-    Storage: OpProofsStore + Clone + 'static,
+    Storage: BaseProofsStore + Clone + 'static,
     Provider: BlockReaderIdExt + NodePrimitivesProvider<Primitives: PayloadPrimitives>,
     EvmConfig: ConfigureEvm<Primitives = Provider::Primitives> + 'static,
 {
@@ -87,7 +87,7 @@ where
     pub fn new(
         provider: Provider,
         eth_api: Eth,
-        preimage_store: OpProofsStorage<Storage>,
+        preimage_store: BaseProofsStorage<Storage>,
         task_spawner: Box<dyn TaskSpawner>,
         evm_config: EvmConfig,
     ) -> Self {
@@ -108,7 +108,7 @@ where
 pub struct DebugApiExtInner<Eth: FullEthApi, Storage, Provider, EvmConfig, Attrs> {
     provider: Provider,
     eth_api: Eth,
-    storage: OpProofsStorage<Storage>,
+    storage: BaseProofsStorage<Storage>,
     state_provider_factory: BaseStateProviderFactory<Eth, Storage>,
     evm_config: EvmConfig,
     task_spawner: Box<dyn TaskSpawner>,
@@ -120,13 +120,13 @@ impl<Eth, P, Provider, EvmConfig, Attrs> DebugApiExtInner<Eth, P, Provider, EvmC
 where
     Eth: FullEthApi + Send + Sync + 'static,
     ErrorObject<'static>: From<Eth::Error>,
-    P: OpProofsStore + Clone + 'static,
+    P: BaseProofsStore + Clone + 'static,
     Provider: NodePrimitivesProvider<Primitives: PayloadPrimitives>,
 {
     fn new(
         provider: Provider,
         eth_api: Eth,
-        storage: OpProofsStorage<P>,
+        storage: BaseProofsStorage<P>,
         task_spawner: Box<dyn TaskSpawner>,
         evm_config: EvmConfig,
     ) -> Self {
@@ -147,7 +147,7 @@ impl<Eth, P, Provider, EvmConfig, Attrs> DebugApiExt<Eth, P, Provider, EvmConfig
 where
     Eth: FullEthApi + Send + Sync + 'static,
     ErrorObject<'static>: From<Eth::Error>,
-    P: OpProofsStore + Clone + 'static,
+    P: BaseProofsStore + Clone + 'static,
     Provider: BlockReaderIdExt
         + NodePrimitivesProvider<Primitives: PayloadPrimitives>
         + HeaderProvider<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>,
@@ -169,7 +169,7 @@ impl<Eth, P, Provider, EvmConfig, Attrs, N> DebugApiOverrideServer<Attrs::RpcPay
 where
     Eth: FullEthApi + Send + Sync + 'static,
     ErrorObject<'static>: From<Eth::Error>,
-    P: OpProofsStore + Clone + 'static,
+    P: BaseProofsStore + Clone + 'static,
     Attrs: Attributes<Transaction = TxTy<EvmConfig::Primitives>>,
     N: PayloadPrimitives,
     EvmConfig: ConfigureEvm<
@@ -178,14 +178,14 @@ where
         > + 'static,
     Provider: BlockReaderIdExt<Header = N::BlockHeader>
         + StateProviderFactory
-        + ChainSpecProvider<ChainSpec: BaseUpgrades>
+        + ChainSpecProvider<ChainSpec: Upgrades>
         + NodePrimitivesProvider<Primitives = N>
         + HeaderProvider<Header = N::BlockHeader>
         + Clone
         + 'static,
-    base_alloy_consensus::OpPooledTransaction:
+    base_common_consensus::BasePooledTransaction:
         TryFrom<<N as PayloadPrimitives>::_TX, Error: core::error::Error>,
-    <N as PayloadPrimitives>::_TX: From<base_alloy_consensus::OpPooledTransaction>,
+    <N as PayloadPrimitives>::_TX: From<base_common_consensus::BasePooledTransaction>,
 {
     async fn execute_payload(
         &self,
@@ -207,7 +207,7 @@ where
 
                     let config =
                         PayloadConfig { parent_header: Arc::new(parent_header), attributes };
-                    let ctx = OpPayloadBuilderCtx {
+                    let ctx = BasePayloadBuilderCtx {
                         evm_config: this.evm_config.clone(),
                         chain_spec: this.provider.chain_spec(),
                         config,
@@ -226,7 +226,7 @@ where
                         NoopPayloadTransactions::<
                             BasePooledTransaction<
                                 <N as PayloadPrimitives>::_TX,
-                                base_alloy_consensus::OpPooledTransaction,
+                                base_common_consensus::BasePooledTransaction,
                             >,
                         >::default()
                     });

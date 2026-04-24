@@ -28,11 +28,14 @@ pub use traits::{ClientBounds, NodeBounds, PayloadTxsBounds, PoolBounds};
 mod metering;
 pub use metering::{MeteringProvider, NoopMeteringProvider, SharedMeteringProvider};
 
+mod rejected_tx_forwarder;
+pub use rejected_tx_forwarder::RejectedTxForwarder;
+
 mod flashblocks;
 pub use flashblocks::{
-    BestFlashblocksTxs, BlockCell, BlockPayloadJob, BlockPayloadJobGenerator, BuildArguments,
-    FlashblockDiagnostics, FlashblockSelectionOutcome, FlashblocksExecutionInfo,
-    FlashblocksExtraCtx, FlashblocksServiceBuilder, OpPayloadBuilderCtx, PayloadBuilder,
+    BasePayloadBuilderCtx, BestFlashblocksTxs, BlockCell, BlockPayloadJob,
+    BlockPayloadJobGenerator, BuildArguments, FlashblockDiagnostics, FlashblockSelectionOutcome,
+    FlashblocksExecutionInfo, FlashblocksExtraCtx, FlashblocksServiceBuilder, PayloadBuilder,
     PayloadHandler, RejectionCache, ResolvePayload, WaitForValue,
 };
 

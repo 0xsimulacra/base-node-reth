@@ -7,7 +7,7 @@ use alloy_rpc_client::RpcClient;
 use alloy_transport_http::{Http, reqwest::Client};
 use async_trait::async_trait;
 use backon::Retryable;
-use base_consensus_genesis::RollupConfig;
+use base_common_genesis::RollupConfig;
 use serde_json::Value;
 use url::Url;
 
@@ -191,7 +191,7 @@ impl RollupProvider for RollupClient {
         })
         .await?;
 
-        self.output_cache.insert(block_number, output.clone()).await;
+        self.output_cache.insert(block_number, output).await;
 
         Ok(output)
     }

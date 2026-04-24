@@ -4,9 +4,9 @@ use alloy_provider::ProviderBuilder;
 use audit_archiver_lib::{
     AuditConnector, BundleEvent, KafkaBundleEventPublisher, load_kafka_config_from_file,
 };
-use base_alloy_network::Base;
 use base_bundles::MeterBundleResponse;
 use base_cli_utils::LogConfig;
+use base_common_network::Base;
 use clap::Parser;
 use ingress_rpc_lib::{
     BuilderConnector, Config, HealthServer, IngressApiServer, IngressService, KafkaMessageQueue,
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
     let audit_publisher =
         KafkaBundleEventPublisher::new(audit_producer, config.audit_topic.clone());
-    let (audit_tx, audit_rx) = mpsc::unbounded_channel::<BundleEvent>();
+    let (audit_tx, audit_rx) = mpsc::channel::<BundleEvent>(config.audit_channel_capacity);
     AuditConnector::connect(audit_rx, audit_publisher);
 
     let (builder_tx, _) =

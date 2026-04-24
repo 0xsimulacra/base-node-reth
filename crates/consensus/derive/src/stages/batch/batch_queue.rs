@@ -5,7 +5,7 @@ use core::fmt::Debug;
 
 use alloy_eips::BlockNumHash;
 use async_trait::async_trait;
-use base_consensus_genesis::{RollupConfig, SystemConfig};
+use base_common_genesis::{RollupConfig, SystemConfig};
 use base_protocol::{
     Batch, BatchValidity, BatchWithInclusionBlock, BlockInfo, L2BlockInfo, SingleBatch,
 };
@@ -138,7 +138,7 @@ where
                 BatchValidity::Future => {
                     // Drop Future batches post-holocene.
                     //
-                    // See: <https://specs.optimism.io/protocol/holocene/derivation.html#batch_queue>
+                    // See: <https://specs.base.org/upgrades/holocene/derivation#batch_queue>
                     if !self.cfg.is_holocene_active(origin.timestamp) {
                         remaining.push(batch.clone());
                     } else {
@@ -479,8 +479,8 @@ mod tests {
     use alloy_eips::{BlockNumHash, eip2718::Decodable2718};
     use alloy_primitives::{Address, B256, Bytes, TxKind, U256, address, b256};
     use alloy_rlp::{BytesMut, Encodable};
-    use base_alloy_consensus::{BaseBlock, OpTxEnvelope, OpTxType, TxDeposit};
-    use base_consensus_genesis::{ChainGenesis, HardForkConfig, RollupConfig, SystemConfig};
+    use base_common_consensus::{BaseBlock, BaseTxEnvelope, OpTxType, TxDeposit};
+    use base_common_genesis::{ChainGenesis, HardForkConfig, RollupConfig, SystemConfig};
     use base_protocol::{BatchReader, L1BlockInfoBedrock, L1BlockInfoTx};
     use tracing::Level;
     use tracing_subscriber::layer::SubscriberExt;
@@ -1062,11 +1062,11 @@ mod tests {
         };
         let batch_txs = batch_txs
             .into_iter()
-            .map(|tx| OpTxEnvelope::decode_2718(&mut &tx[..]).unwrap())
+            .map(|tx| BaseTxEnvelope::decode_2718(&mut &tx[..]).unwrap())
             .collect();
         let second_batch_txs = second_batch_txs
             .into_iter()
-            .map(|tx| OpTxEnvelope::decode_2718(&mut &tx[..]).unwrap())
+            .map(|tx| BaseTxEnvelope::decode_2718(&mut &tx[..]).unwrap())
             .collect();
         let block = BaseBlock {
             header: Header { number: 8, ..Default::default() },

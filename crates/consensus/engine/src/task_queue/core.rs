@@ -2,7 +2,7 @@
 
 use std::{collections::BinaryHeap, sync::Arc};
 
-use base_consensus_genesis::RollupConfig;
+use base_common_genesis::RollupConfig;
 use base_protocol::{BaseBlockConversionError, L2BlockInfo};
 use thiserror::Error;
 use tokio::sync::watch::Sender;
@@ -91,6 +91,7 @@ impl<EngineClient_: EngineClient> Engine<EngineClient_> {
             Arc::clone(&config),
             EngineSyncStateUpdate {
                 unsafe_head: Some(start.un_safe),
+                local_safe_head: Some(start.safe),
                 safe_head: Some(start.safe),
                 finalized_head: Some(start.finalized),
             },
@@ -207,7 +208,7 @@ mod tests {
     use std::sync::Arc;
 
     use alloy_rpc_types_engine::{ForkchoiceUpdated, PayloadStatus, PayloadStatusEnum};
-    use base_consensus_genesis::RollupConfig;
+    use base_common_genesis::RollupConfig;
     use tokio::sync::watch;
 
     use crate::{
@@ -250,6 +251,7 @@ mod tests {
         let mut engine = Engine::new(EngineState::default(), state_tx, queue_tx);
         let update = EngineSyncStateUpdate {
             unsafe_head: Some(head),
+            local_safe_head: Some(safe),
             safe_head: Some(safe),
             finalized_head: Some(finalized),
         };

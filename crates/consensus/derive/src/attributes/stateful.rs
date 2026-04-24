@@ -9,10 +9,11 @@ use alloy_primitives::{Address, B256, Bytes};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::PayloadAttributes;
 use async_trait::async_trait;
-use base_alloy_rpc_types_engine::OpPayloadAttributes;
-use base_consensus_genesis::RollupConfig;
-use base_consensus_upgrades::{Hardfork, Hardforks};
-use base_protocol::{Deposits, L1BlockInfoTx, L2BlockInfo, Predeploys};
+use base_common_consensus::Predeploys;
+use base_common_genesis::RollupConfig;
+use base_common_rpc_types_engine::BasePayloadAttributes;
+use base_consensus_upgrades::{Upgrade, Upgrades};
+use base_protocol::{Deposits, L1BlockInfoTx, L2BlockInfo};
 use tracing::warn;
 
 use crate::{
@@ -68,7 +69,7 @@ where
         &mut self,
         l2_parent: L2BlockInfo,
         epoch: BlockNumHash,
-    ) -> PipelineResult<OpPayloadAttributes> {
+    ) -> PipelineResult<BasePayloadAttributes> {
         let l1_header;
         let deposit_transactions: Vec<Bytes>;
 
@@ -145,22 +146,22 @@ where
         if self.rollup_cfg.is_ecotone_active(next_l2_time)
             && !self.rollup_cfg.is_ecotone_active(l2_parent.block_info.timestamp)
         {
-            upgrade_transactions = Hardforks::ECOTONE.txs().collect();
+            upgrade_transactions = Upgrades::ECOTONE.txs().collect();
         }
         if self.rollup_cfg.is_fjord_active(next_l2_time)
             && !self.rollup_cfg.is_fjord_active(l2_parent.block_info.timestamp)
         {
-            upgrade_transactions.append(&mut Hardforks::FJORD.txs().collect());
+            upgrade_transactions.append(&mut Upgrades::FJORD.txs().collect());
         }
         if self.rollup_cfg.is_isthmus_active(next_l2_time)
             && !self.rollup_cfg.is_isthmus_active(l2_parent.block_info.timestamp)
         {
-            upgrade_transactions.append(&mut Hardforks::ISTHMUS.txs().collect());
+            upgrade_transactions.append(&mut Upgrades::ISTHMUS.txs().collect());
         }
         if self.rollup_cfg.is_jovian_active(next_l2_time)
             && !self.rollup_cfg.is_jovian_active(l2_parent.block_info.timestamp)
         {
-            upgrade_transactions.append(&mut Hardforks::JOVIAN.txs().collect());
+            upgrade_transactions.append(&mut Upgrades::JOVIAN.txs().collect());
         }
 
         // Build and encode the L1 info transaction for the current payload.
@@ -195,7 +196,7 @@ where
             parent_beacon_root = Some(l1_header.parent_beacon_block_root.unwrap_or_default());
         }
 
-        Ok(OpPayloadAttributes {
+        Ok(BasePayloadAttributes {
             payload_attributes: PayloadAttributes {
                 timestamp: next_l2_time,
                 prev_randao: l1_header.mix_hash,
@@ -260,8 +261,8 @@ mod tests {
 
     use alloy_consensus::Header;
     use alloy_primitives::{B256, Log, LogData, U64, U256, address};
-    use base_consensus_genesis::{HardForkConfig, SystemConfig, SystemConfigUpdate};
-    use base_consensus_registry::Sepolia;
+    use base_common_chains::Sepolia;
+    use base_common_genesis::{HardForkConfig, SystemConfig, SystemConfigUpdate};
     use base_protocol::{BlockInfo, DepositDecodeError};
 
     use super::*;
@@ -479,7 +480,7 @@ mod tests {
         };
         let next_l2_time = l2_parent.block_info.timestamp + block_time;
         let payload = builder.prepare_payload_attributes(l2_parent, epoch).await.unwrap();
-        let expected = OpPayloadAttributes {
+        let expected = BasePayloadAttributes {
             payload_attributes: PayloadAttributes {
                 timestamp: next_l2_time,
                 prev_randao,
@@ -531,7 +532,7 @@ mod tests {
         };
         let next_l2_time = l2_parent.block_info.timestamp + block_time;
         let payload = builder.prepare_payload_attributes(l2_parent, epoch).await.unwrap();
-        let expected = OpPayloadAttributes {
+        let expected = BasePayloadAttributes {
             payload_attributes: PayloadAttributes {
                 timestamp: next_l2_time,
                 prev_randao,
@@ -584,7 +585,7 @@ mod tests {
         };
         let next_l2_time = l2_parent.block_info.timestamp + block_time;
         let payload = builder.prepare_payload_attributes(l2_parent, epoch).await.unwrap();
-        let expected = OpPayloadAttributes {
+        let expected = BasePayloadAttributes {
             payload_attributes: PayloadAttributes {
                 timestamp: next_l2_time,
                 prev_randao,
@@ -636,7 +637,7 @@ mod tests {
         };
         let next_l2_time = l2_parent.block_info.timestamp + block_time;
         let payload = builder.prepare_payload_attributes(l2_parent, epoch).await.unwrap();
-        let expected = OpPayloadAttributes {
+        let expected = BasePayloadAttributes {
             payload_attributes: PayloadAttributes {
                 timestamp: next_l2_time,
                 prev_randao,

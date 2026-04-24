@@ -7,10 +7,10 @@ use alloy_rpc_types_engine::{
     BlobsBundleV2, ExecutionPayloadEnvelopeV2, ExecutionPayloadFieldV2, ExecutionPayloadV1,
     ExecutionPayloadV2, ExecutionPayloadV3, PayloadId,
 };
-use base_alloy_rpc_types_engine::{
-    OpExecutionPayload, OpExecutionPayloadEnvelopeV5, OpExecutionPayloadV4,
+use base_common_genesis::{HardForkConfig, HardforkConfig, RollupConfig};
+use base_common_rpc_types_engine::{
+    BaseExecutionPayload, BaseExecutionPayloadEnvelopeV5, BaseExecutionPayloadV4,
 };
-use base_consensus_genesis::{BaseHardforkConfig, HardForkConfig, RollupConfig};
 use rstest::rstest;
 use tokio::sync::mpsc;
 
@@ -42,10 +42,10 @@ fn v2_envelope() -> ExecutionPayloadEnvelopeV2 {
     }
 }
 
-/// A non-zero [`OpExecutionPayloadEnvelopeV5`] for Osaka / Base V1 testing.
-fn v5_envelope() -> OpExecutionPayloadEnvelopeV5 {
-    OpExecutionPayloadEnvelopeV5 {
-        execution_payload: OpExecutionPayloadV4 {
+/// A non-zero [`BaseExecutionPayloadEnvelopeV5`] for Osaka / Base Azul testing.
+fn v5_envelope() -> BaseExecutionPayloadEnvelopeV5 {
+    BaseExecutionPayloadEnvelopeV5 {
+        execution_payload: BaseExecutionPayloadV4 {
             payload_inner: ExecutionPayloadV3 {
                 payload_inner: ExecutionPayloadV2 {
                     payload_inner: ExecutionPayloadV1 {
@@ -141,8 +141,8 @@ async fn test_get_payload_v2_success(#[values(true, false)] with_channel: bool) 
 }
 
 /// When the unsafe head matches the attributes parent and the engine returns a valid V5 payload
-/// (Osaka / Base V1), `GetPayloadTask` must call `get_payload_v5`, wrap the inner
-/// [`OpExecutionPayloadV4`] as an [`OpExecutionPayload::V4`] variant, and source
+/// (Osaka / Base Azul), `GetPayloadTask` must call `get_payload_v5`, wrap the inner
+/// [`BaseExecutionPayloadV4`] as an [`BaseExecutionPayload::V4`] variant, and source
 /// `parent_beacon_block_root` from the attributes rather than the payload envelope.
 #[rstest]
 #[tokio::test]
@@ -150,11 +150,11 @@ async fn test_get_payload_v5_success(#[values(true, false)] with_channel: bool) 
     let attributes = TestAttributesBuilder::new().build();
     let parent = attributes.parent;
 
-    // Activate Base V1 (Osaka) at the default attributes timestamp (2000) so that
+    // Activate Base Azul (Osaka) at the default attributes timestamp (2000) so that
     // `EngineGetPayloadVersion::V5` is selected.
     let cfg = Arc::new(RollupConfig {
         hardforks: HardForkConfig {
-            base: BaseHardforkConfig { v1: Some(2000) },
+            base: HardforkConfig { azul: Some(2000) },
             ..Default::default()
         },
         ..Default::default()
@@ -179,9 +179,9 @@ async fn test_get_payload_v5_success(#[values(true, false)] with_channel: bool) 
         let channel_result = rx.recv().await.expect("channel should have a result");
         assert!(channel_result.is_ok(), "channel result should be Ok, got {channel_result:?}");
         let envelope = channel_result.unwrap();
-        // V5 wraps the execution payload as the V4 variant inside OpExecutionPayload.
+        // V5 wraps the execution payload as the V4 variant inside BaseExecutionPayload.
         assert!(
-            matches!(envelope.execution_payload, OpExecutionPayload::V4(_)),
+            matches!(envelope.execution_payload, BaseExecutionPayload::V4(_)),
             "V5 get_payload should produce a V4 execution payload variant, got {:?}",
             envelope.execution_payload
         );

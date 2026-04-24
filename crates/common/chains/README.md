@@ -1,4 +1,4 @@
-# `base-alloy-chains`
+# `base-common-chains`
 
 Single source of truth for Base chain configuration and network upgrade bindings.
 
@@ -10,17 +10,17 @@ Const instances `BASE_MAINNET`, `BASE_SEPOLIA`, and `BASE_DEVNET_0_SEPOLIA_DEV_0
 duplicated configuration across the workspace.
 
 Also provides the `BaseUpgrade` enum, `BaseUpgrades` trait, and `BaseChainUpgrades` for the
-Base upgrade sequence (Bedrock, Canyon, Ecotone, Fjord, Granite, Holocene, Isthmus, Jovian, V1).
+Base upgrade sequence (Bedrock, Canyon, Ecotone, Fjord, Granite, Holocene, Isthmus, Jovian, Azul).
 
 ## Usage
 
 ```toml
 [dependencies]
-base-alloy-chains = { workspace = true }
+base-common-chains = { workspace = true }
 ```
 
 ```rust,ignore
-use base_alloy_chains::{BaseChainConfig, BASE_MAINNET};
+use base_common_chains::{BaseChainConfig, BASE_MAINNET};
 
 assert_eq!(BASE_MAINNET.chain_id, 8453);
 assert_eq!(BASE_MAINNET.canyon_timestamp, 1_704_992_401);

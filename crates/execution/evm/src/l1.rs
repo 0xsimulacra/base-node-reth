@@ -2,8 +2,8 @@
 
 use alloy_consensus::Transaction;
 use alloy_primitives::{U16, U256, hex};
-use base_alloy_chains::BaseUpgrades;
-use base_revm::{L1BlockInfo, OpSpecId};
+use base_common_chains::Upgrades;
+use base_common_evm::{L1BlockInfo, OpSpecId};
 use reth_execution_errors::BlockExecutionError;
 use reth_primitives_traits::BlockBody;
 
@@ -299,11 +299,11 @@ pub fn parse_l1_info_tx_jovian(data: &[u8]) -> Result<L1BlockInfo, BaseBlockExec
     })
 }
 
-/// Returns the [`OpSpecId`] at the given timestamp using the [`BaseUpgrades`] trait from
-/// `base-execution-upgrades`.
-fn op_spec_id(chain_spec: &impl BaseUpgrades, timestamp: u64) -> OpSpecId {
-    if chain_spec.is_base_v1_active_at_timestamp(timestamp) {
-        OpSpecId::BASE_V1
+/// Returns the [`OpSpecId`] at the given timestamp using the [`Upgrades`] trait from
+/// `base-common-chains`.
+fn base_spec_id(chain_spec: &impl Upgrades, timestamp: u64) -> OpSpecId {
+    if chain_spec.is_base_azul_active_at_timestamp(timestamp) {
+        OpSpecId::AZUL
     } else if chain_spec.is_jovian_active_at_timestamp(timestamp) {
         OpSpecId::JOVIAN
     } else if chain_spec.is_isthmus_active_at_timestamp(timestamp) {
@@ -337,7 +337,7 @@ pub trait RethL1BlockInfo {
     /// - `is_deposit`: Whether or not the transaction is a deposit.
     fn l1_tx_data_fee(
         &mut self,
-        chain_spec: impl BaseUpgrades,
+        chain_spec: impl Upgrades,
         timestamp: u64,
         input: &[u8],
         is_deposit: bool,
@@ -351,7 +351,7 @@ pub trait RethL1BlockInfo {
     /// - `input`: The calldata of the transaction.
     fn l1_data_gas(
         &self,
-        chain_spec: impl BaseUpgrades,
+        chain_spec: impl Upgrades,
         timestamp: u64,
         input: &[u8],
     ) -> Result<U256, BlockExecutionError>;
@@ -360,7 +360,7 @@ pub trait RethL1BlockInfo {
 impl RethL1BlockInfo for L1BlockInfo {
     fn l1_tx_data_fee(
         &mut self,
-        chain_spec: impl BaseUpgrades,
+        chain_spec: impl Upgrades,
         timestamp: u64,
         input: &[u8],
         is_deposit: bool,
@@ -369,17 +369,17 @@ impl RethL1BlockInfo for L1BlockInfo {
             return Ok(U256::ZERO);
         }
 
-        let spec_id = op_spec_id(&chain_spec, timestamp);
+        let spec_id = base_spec_id(&chain_spec, timestamp);
         Ok(self.calculate_tx_l1_cost(input, spec_id))
     }
 
     fn l1_data_gas(
         &self,
-        chain_spec: impl BaseUpgrades,
+        chain_spec: impl Upgrades,
         timestamp: u64,
         input: &[u8],
     ) -> Result<U256, BlockExecutionError> {
-        let spec_id = op_spec_id(&chain_spec, timestamp);
+        let spec_id = base_spec_id(&chain_spec, timestamp);
         Ok(self.data_gas(input, spec_id))
     }
 }
@@ -389,8 +389,8 @@ mod tests {
     use alloy_consensus::{Block, BlockBody, Header};
     use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{Bytes, hex_literal::hex, keccak256};
-    use base_alloy_chains::BaseUpgrades;
-    use base_alloy_consensus::OpTransactionSigned;
+    use base_common_chains::Upgrades;
+    use base_common_consensus::BaseTransactionSigned;
     use base_execution_chainspec::BASE_MAINNET;
 
     use super::*;
@@ -400,7 +400,7 @@ mod tests {
         let bytes = Bytes::from_static(&hex!(
             "7ef9015aa044bae9d41b8380d781187b426c6fe43df5fb2fb57bd4466ef6a701e1f01e015694deaddeaddeaddeaddeaddeaddeaddeaddead000194420000000000000000000000000000000000001580808408f0d18001b90104015d8eb900000000000000000000000000000000000000000000000000000000008057650000000000000000000000000000000000000000000000000000000063d96d10000000000000000000000000000000000000000000000000000000000009f35273d89754a1e0387b89520d989d3be9c37c1f32495a88faf1ea05c61121ab0d1900000000000000000000000000000000000000000000000000000000000000010000000000000000000000002d679b567db6187c0c8323fa982cfb88b74dbcc7000000000000000000000000000000000000000000000000000000000000083400000000000000000000000000000000000000000000000000000000000f4240"
         ));
-        let l1_info_tx = OpTransactionSigned::decode_2718(&mut bytes.as_ref()).unwrap();
+        let l1_info_tx = BaseTransactionSigned::decode_2718(&mut bytes.as_ref()).unwrap();
         let mock_block = Block {
             header: Header::default(),
             body: BlockBody { transactions: vec![l1_info_tx], ..Default::default() },
@@ -436,8 +436,8 @@ mod tests {
             "7ef8f8a0a539eb753df3b13b7e386e147d45822b67cb908c9ddc5618e3dbaa22ed00850b94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e2000000558000c5fc50000000000000000000000006605a89f00000000012a10d90000000000000000000000000000000000000000000000000000000af39ac3270000000000000000000000000000000000000000000000000000000d5ea528d24e582fa68786f080069bdbfe06a43f8e67bfd31b8e4d8a8837ba41da9a82a54a0000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
         );
 
-        let tx = OpTransactionSigned::decode_2718(&mut TX.as_slice()).unwrap();
-        let block: Block<OpTransactionSigned> = Block {
+        let tx = BaseTransactionSigned::decode_2718(&mut TX.as_slice()).unwrap();
+        let block: Block<BaseTransactionSigned> = Block {
             body: BlockBody { transactions: vec![tx], ..Default::default() },
             ..Default::default()
         };

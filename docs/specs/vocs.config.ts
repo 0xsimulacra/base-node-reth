@@ -166,7 +166,7 @@ const sidebar: SidebarItem[] = [
   {
     text: 'Upgrades',
     items: [
-      { text: 'V1', link: '/upgrades/v1/overview' },
+      { text: 'Azul', link: '/upgrades/azul/overview' },
       {
         text: 'Optimism',
         collapsed: true,
@@ -191,7 +191,10 @@ export default defineConfig({
   banner: '⚠️ This specification is under active development and subject to change.',
   title: 'Base Chain Specification',
   description: 'Base Chain protocol specification, upgrades, and reference documentation.',
-  logoUrl: '/assets/base/logo.svg',
+  logoUrl: {
+    light: '/assets/base/logo.svg',
+    dark: '/assets/base/logo-white.svg',
+  },
   iconUrl: '/assets/base/favicon.png',
   topNav: [
     { text: 'Docs', link: 'https://docs.base.org/base-chain/' },

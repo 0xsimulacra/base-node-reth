@@ -8,12 +8,8 @@ pub const PROPOSAL_TIMEOUT: Duration = Duration::from_mins(10);
 /// Timeout for prover server RPC calls.
 pub const PROVER_TIMEOUT: Duration = Duration::from_mins(30);
 
-/// Maximum number of concurrent `game_at_index` RPC calls during the recovery
-/// scan.
-pub const RECOVERY_SCAN_CONCURRENCY: usize = 32;
+/// Default maximum number of concurrent RPC calls during the recovery scan.
+pub const RECOVERY_SCAN_CONCURRENCY: usize = 8;
 
-/// Maximum number of factory entries to scan (from the most recent) on cold
-/// start or when the incremental delta exceeds this threshold. This bounds
-/// the factory scan phase only — the forward walk is unbounded and terminates
-/// naturally at the first gap or chain break.
-pub const MAX_FACTORY_SCAN_LOOKBACK: u64 = 5000;
+/// Maximum retries for a single proof range before a full pipeline reset.
+pub const MAX_PROOF_RETRIES: u32 = 3;

@@ -6,9 +6,8 @@ use alloy_eips::eip7840::BlobParams;
 use alloy_genesis::Genesis;
 use alloy_hardforks::Hardfork;
 use alloy_primitives::{B256, U256};
-use base_alloy_chains::{BaseUpgrade, BaseUpgrades};
-use base_execution_upgrades::BASE_MAINNET_UPGRADES;
-use base_protocol::Predeploys;
+use base_common_chains::{BaseUpgrade, Upgrades};
+use base_common_consensus::Predeploys;
 use derive_more::{Constructor, Deref, Into};
 use reth_chainspec::{
     BaseFeeParams, BaseFeeParamsKind, ChainSpec, DepositContract, DisplayHardforks, EthChainSpec,
@@ -19,8 +18,8 @@ use reth_network_peers::NodeRecord;
 use reth_primitives_traits::SealedHeader;
 
 use crate::{
-    BASE_DEV, BASE_DEVNET_0_SEPOLIA_DEV_0, BASE_MAINNET, BASE_SEPOLIA, BASE_ZERONET,
-    compute_jovian_base_fee, decode_holocene_base_fee,
+    BASE_DEV, BASE_DEVNET_0_SEPOLIA_DEV_0, BASE_MAINNET, BASE_MAINNET_UPGRADES, BASE_SEPOLIA,
+    BASE_ZERONET, compute_jovian_base_fee, decode_holocene_base_fee,
 };
 
 /// All supported chain names for the CLI.
@@ -31,7 +30,7 @@ pub const SUPPORTED_CHAINS: &[&str] =
 #[derive(Default, Debug)]
 pub struct GenesisInfo {
     /// Base chain info extracted from genesis extra fields.
-    pub optimism_chain_info: base_common_rpc_types::BaseChainInfo,
+    pub optimism_chain_info: base_common_rpc_types::ChainInfo,
     /// Base fee params derived from the genesis config.
     pub base_fee_params: BaseFeeParamsKind,
 }
@@ -40,7 +39,7 @@ impl GenesisInfo {
     /// Extracts Base genesis info from an [`alloy_genesis::Genesis`].
     pub fn extract_from(genesis: &Genesis) -> Self {
         let mut info = Self {
-            optimism_chain_info: base_common_rpc_types::BaseChainInfo::extract_from(
+            optimism_chain_info: base_common_rpc_types::ChainInfo::extract_from(
                 &genesis.config.extra_fields,
             )
             .unwrap_or_default(),
@@ -186,9 +185,9 @@ impl EthChainSpec for BaseChainSpec {
     }
 
     fn next_block_base_fee(&self, parent: &Header, target_timestamp: u64) -> Option<u64> {
-        if BaseUpgrades::is_jovian_active_at_timestamp(self, parent.timestamp()) {
+        if Upgrades::is_jovian_active_at_timestamp(self, parent.timestamp()) {
             compute_jovian_base_fee(self, parent, target_timestamp).ok()
-        } else if BaseUpgrades::is_holocene_active_at_timestamp(self, parent.timestamp()) {
+        } else if Upgrades::is_holocene_active_at_timestamp(self, parent.timestamp()) {
             decode_holocene_base_fee(self, parent, target_timestamp).ok()
         } else {
             self.inner.next_block_base_fee(parent, target_timestamp)
@@ -224,7 +223,7 @@ impl EthereumHardforks for BaseChainSpec {
     }
 }
 
-impl BaseUpgrades for BaseChainSpec {
+impl Upgrades for BaseChainSpec {
     fn upgrade_activation(&self, fork: BaseUpgrade) -> ForkCondition {
         self.fork(fork)
     }
@@ -270,7 +269,7 @@ impl From<Genesis> for BaseChainSpec {
 
         // Time-based hardforks
         // L1 hardforks are mapped to the activation timestamps of the corresponding Base hardforks
-        let base_v1_time = genesis_info.base.v1;
+        let azul_time = genesis_info.base.azul;
         let time_hardfork_opts = [
             (BaseUpgrade::Regolith.boxed(), genesis_info.regolith_time),
             (EthereumHardfork::Shanghai.boxed(), genesis_info.canyon_time),
@@ -283,8 +282,8 @@ impl From<Genesis> for BaseChainSpec {
             (EthereumHardfork::Prague.boxed(), genesis_info.isthmus_time),
             (BaseUpgrade::Isthmus.boxed(), genesis_info.isthmus_time),
             (BaseUpgrade::Jovian.boxed(), genesis_info.jovian_time),
-            (EthereumHardfork::Osaka.boxed(), base_v1_time),
-            (BaseUpgrade::V1.boxed(), base_v1_time),
+            (EthereumHardfork::Osaka.boxed(), azul_time),
+            (BaseUpgrade::Azul.boxed(), azul_time),
         ];
 
         let mut time_hardforks = time_hardfork_opts
@@ -342,11 +341,11 @@ mod tests {
     use core::str::FromStr;
 
     use alloy_consensus::proofs::storage_root_unhashed;
-    use alloy_genesis::{ChainConfig, Genesis};
+    use alloy_genesis::{ChainConfig as AlloyChainConfig, Genesis};
     use alloy_hardforks::Hardfork;
-    use alloy_primitives::{B256, U256, b256, hex};
-    use base_alloy_chains::{BaseChainConfig, BaseUpgrade, BaseUpgrades};
-    use base_common_rpc_types::BaseFeeInfo;
+    use alloy_primitives::{B256, U256, b256};
+    use base_common_chains::{BaseUpgrade, ChainConfig, Upgrades};
+    use base_common_rpc_types::FeeInfo;
     use reth_chainspec::{
         BaseFeeParams, BaseFeeParamsKind, EthChainSpec, EthereumHardforks, test_fork_ids,
     };
@@ -437,16 +436,24 @@ mod tests {
                     Head { number: 0, timestamp: 1746806401, ..Default::default() },
                     ForkId {
                         hash: ForkHash([0x86, 0x72, 0x8b, 0x4e]),
-                        next: BaseChainConfig::mainnet().jovian_timestamp,
+                        next: ChainConfig::mainnet().jovian_timestamp,
                     },
                 ),
                 (
                     Head {
                         number: 0,
-                        timestamp: BaseChainConfig::mainnet().jovian_timestamp,
+                        timestamp: ChainConfig::mainnet().jovian_timestamp,
                         ..Default::default()
                     },
                     BASE_MAINNET.hardfork_fork_id(BaseUpgrade::Jovian).unwrap(),
+                ),
+                (
+                    Head {
+                        number: 0,
+                        timestamp: ChainConfig::mainnet().azul_timestamp.unwrap(),
+                        ..Default::default()
+                    },
+                    BASE_MAINNET.hardfork_fork_id(BaseUpgrade::Azul).unwrap(),
                 ),
             ],
         );
@@ -501,13 +508,13 @@ mod tests {
                     Head { number: 0, timestamp: 1744905600, ..Default::default() },
                     ForkId {
                         hash: ForkHash([0x06, 0x0a, 0x4d, 0x1d]),
-                        next: BaseChainConfig::sepolia().jovian_timestamp,
+                        next: ChainConfig::sepolia().jovian_timestamp,
                     },
                 ),
                 (
                     Head {
                         number: 0,
-                        timestamp: BaseChainConfig::sepolia().jovian_timestamp,
+                        timestamp: ChainConfig::sepolia().jovian_timestamp,
                         ..Default::default()
                     },
                     BASE_SEPOLIA.hardfork_fork_id(BaseUpgrade::Jovian).unwrap(),
@@ -550,7 +557,7 @@ mod tests {
     #[test]
     fn latest_base_mainnet_fork_id() {
         assert_eq!(
-            ForkId { hash: ForkHash(hex!("1cfeafc9")), next: 0 },
+            BASE_MAINNET.hardfork_fork_id(BaseUpgrade::Azul).unwrap(),
             BASE_MAINNET.latest_fork_id()
         )
     }
@@ -559,7 +566,7 @@ mod tests {
     fn latest_base_mainnet_fork_id_with_builder() {
         let base_mainnet = BaseChainSpecBuilder::base_mainnet().build();
         assert_eq!(
-            ForkId { hash: ForkHash(hex!("1cfeafc9")), next: 0 },
+            BASE_MAINNET.hardfork_fork_id(BaseUpgrade::Azul).unwrap(),
             base_mainnet.latest_fork_id()
         )
     }
@@ -615,8 +622,8 @@ mod tests {
         assert!(!chain_spec.is_fork_active_at_timestamp(EthereumHardfork::Osaka, 54));
         assert!(chain_spec.is_fork_active_at_timestamp(EthereumHardfork::Osaka, 55));
         assert!(chain_spec.is_fork_active_at_timestamp(EthereumHardfork::Osaka, 98));
-        assert!(!chain_spec.is_fork_active_at_timestamp(BaseUpgrade::V1, 54));
-        assert!(chain_spec.is_fork_active_at_timestamp(BaseUpgrade::V1, 55));
+        assert!(!chain_spec.is_fork_active_at_timestamp(BaseUpgrade::Azul, 54));
+        assert!(chain_spec.is_fork_active_at_timestamp(BaseUpgrade::Azul, 55));
     }
 
     #[test]
@@ -750,11 +757,11 @@ mod tests {
 
         let optimism_object = genesis.config.extra_fields.get("optimism").unwrap();
         let optimism_base_fee_info =
-            serde_json::from_value::<BaseFeeInfo>(optimism_object.clone()).unwrap();
+            serde_json::from_value::<FeeInfo>(optimism_object.clone()).unwrap();
 
         assert_eq!(
             optimism_base_fee_info,
-            BaseFeeInfo {
+            FeeInfo {
                 eip1559_elasticity: Some(6),
                 eip1559_denominator: Some(50),
                 eip1559_denominator_canyon: None,
@@ -775,7 +782,7 @@ mod tests {
     #[test]
     fn test_fork_order_base_hardforks() {
         let genesis = Genesis {
-            config: ChainConfig {
+            config: AlloyChainConfig {
                 chain_id: 0,
                 homestead_block: Some(0),
                 dao_fork_block: Some(0),
@@ -848,7 +855,7 @@ mod tests {
             BaseUpgrade::Isthmus.boxed(),
             BaseUpgrade::Jovian.boxed(),
             EthereumHardfork::Osaka.boxed(),
-            BaseUpgrade::V1.boxed(),
+            BaseUpgrade::Azul.boxed(),
         ];
 
         for (expected, actual) in expected_hardforks.iter().zip(hardforks.iter()) {
@@ -913,7 +920,7 @@ mod tests {
 
         let genesis: Genesis = serde_json::from_str(geth_genesis).unwrap();
         let chainspec = BaseChainSpec::from_genesis(genesis);
-        assert!(BaseUpgrades::is_holocene_active_at_timestamp(&chainspec, 1732633200));
+        assert!(Upgrades::is_holocene_active_at_timestamp(&chainspec, 1732633200));
     }
 
     #[test]

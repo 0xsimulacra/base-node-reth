@@ -23,15 +23,15 @@ base-consensus-peers.workspace = true
 base-consensus-derive.workspace = true
 base-consensus-gossip.workspace = true
 base-consensus-sources.workspace = true
-base-consensus-genesis.workspace = true
-base-consensus-registry.workspace = true
+base-common-chains.workspace = true
+base-common-genesis.workspace = true
 base-consensus-providers.workspace = true
 
 # alloy
 alloy-signer.workspace = true
 alloy-genesis.workspace = true
-alloy-primitives.workspace = true
 alloy-provider.workspace = true
+alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-chains = { workspace = true, features = ["std"] }
@@ -53,8 +53,8 @@ tracing = { workspace = true, features = ["std"] }
 
 # misc
 eyre.workspace = true
-serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 rstest.workspace = true

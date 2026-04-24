@@ -4,17 +4,16 @@ use alloc::{sync::Arc, vec};
 
 use alloy_chains::Chain;
 use alloy_primitives::{U256, b256};
-use base_alloy_chains::{BaseChainConfig, BaseUpgrade};
-use base_execution_upgrades::BASE_ZERONET_UPGRADES;
+use base_common_chains::{BaseUpgrade, ChainConfig};
 use reth_chainspec::{BaseFeeParams, BaseFeeParamsKind, ChainSpec, Hardfork};
 use reth_ethereum_forks::EthereumHardfork;
 use reth_primitives_traits::{SealedHeader, sync::LazyLock};
 
-use crate::BaseChainSpec;
+use crate::{BASE_ZERONET_UPGRADES, BaseChainSpec};
 
 /// The Base zeronet spec
 pub static BASE_ZERONET: LazyLock<Arc<BaseChainSpec>> = LazyLock::new(|| {
-    let genesis = serde_json::from_str(BaseChainConfig::zeronet().genesis_json)
+    let genesis = serde_json::from_str(ChainConfig::zeronet().genesis_json)
         .expect("Can't deserialize Base zeronet genesis json");
     let hardforks = BASE_ZERONET_UPGRADES.clone();
     BaseChainSpec {

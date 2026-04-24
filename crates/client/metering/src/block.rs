@@ -4,9 +4,9 @@ use std::{sync::Arc, time::Instant};
 
 use alloy_consensus::{BlockHeader, Header, transaction::SignerRecoverable};
 use alloy_primitives::B256;
-use base_alloy_consensus::BaseBlock;
+use base_common_consensus::BaseBlock;
 use base_execution_chainspec::BaseChainSpec;
-use base_execution_evm::{BaseEvmConfig, OpNextBlockEnvAttributes};
+use base_execution_evm::{BaseEvmConfig, BaseNextBlockEnvAttributes};
 use eyre::{Result as EyreResult, eyre};
 use reth_evm::{ConfigureEvm, execute::BlockBuilder};
 use reth_primitives_traits::Block as BlockT;
@@ -60,7 +60,7 @@ where
     let mut db = State::builder().with_database(state_db).with_bundle_update().build();
 
     // Set up block attributes from the actual block header
-    let attributes = OpNextBlockEnvAttributes {
+    let attributes = BaseNextBlockEnvAttributes {
         timestamp: block.header().timestamp(),
         suggested_fee_recipient: block.header().beneficiary(),
         prev_randao: block.header().mix_hash().unwrap_or_else(B256::random),
@@ -88,7 +88,7 @@ where
 
     let evm_start = Instant::now();
     {
-        let evm_config = BaseEvmConfig::optimism(chain_spec);
+        let evm_config = BaseEvmConfig::base(chain_spec);
         let mut builder = evm_config.builder_for_next_block(&mut db, &parent_header, attributes)?;
 
         builder.apply_pre_execution_changes()?;
@@ -137,7 +137,7 @@ where
 mod tests {
     use alloy_consensus::TxEip1559;
     use alloy_primitives::{Address, Signature};
-    use base_alloy_consensus::{BaseBlockBody, OpTransactionSigned};
+    use base_common_consensus::{BaseBlockBody, BaseTransactionSigned};
     use base_node_runner::test_utils::TestHarness;
     use base_test_utils::Account;
     use reth_primitives_traits::Block as _;
@@ -147,7 +147,7 @@ mod tests {
 
     fn create_block_with_transactions(
         harness: &TestHarness,
-        transactions: Vec<OpTransactionSigned>,
+        transactions: Vec<BaseTransactionSigned>,
     ) -> BaseBlock {
         let latest = harness.latest_block();
         let header = Header {
@@ -210,7 +210,7 @@ mod tests {
             .max_priority_fee_per_gas(1)
             .into_eip1559();
 
-        let tx = OpTransactionSigned::Eip1559(
+        let tx = BaseTransactionSigned::Eip1559(
             signed_tx.as_eip1559().expect("eip1559 transaction").clone(),
         );
         let tx_hash = tx.tx_hash();
@@ -260,7 +260,7 @@ mod tests {
             .max_priority_fee_per_gas(1)
             .into_eip1559();
 
-        let tx_1 = OpTransactionSigned::Eip1559(
+        let tx_1 = BaseTransactionSigned::Eip1559(
             signed_tx_1.as_eip1559().expect("eip1559 transaction").clone(),
         );
         let tx_hash_1 = tx_1.tx_hash();
@@ -277,7 +277,7 @@ mod tests {
             .max_priority_fee_per_gas(2)
             .into_eip1559();
 
-        let tx_2 = OpTransactionSigned::Eip1559(
+        let tx_2 = BaseTransactionSigned::Eip1559(
             signed_tx_2.as_eip1559().expect("eip1559 transaction").clone(),
         );
         let tx_hash_2 = tx_2.tx_hash();
@@ -340,7 +340,7 @@ mod tests {
             .max_priority_fee_per_gas(1)
             .into_eip1559();
 
-        let tx = OpTransactionSigned::Eip1559(
+        let tx = BaseTransactionSigned::Eip1559(
             signed_tx.as_eip1559().expect("eip1559 transaction").clone(),
         );
 
@@ -424,7 +424,7 @@ mod tests {
 
         let signed_tx =
             alloy_consensus::Signed::new_unchecked(tx, invalid_signature, B256::random());
-        let op_tx = OpTransactionSigned::Eip1559(signed_tx);
+        let op_tx = BaseTransactionSigned::Eip1559(signed_tx);
 
         let block = create_block_with_transactions(&harness, vec![op_tx]);
 

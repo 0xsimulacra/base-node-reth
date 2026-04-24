@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Stdout, sync::atomic::Ordering, time::Duration};
+use std::{collections::HashMap, fmt, io::Stdout, sync::atomic::Ordering, time::Duration};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -11,8 +11,8 @@ use tokio::sync::oneshot;
 
 use super::{Action, Resources, Router, View, ViewId, runner::start_background_services};
 use crate::{
-    commands::common::{COLOR_BASE_BLUE, EVENT_POLL_TIMEOUT},
-    config::ChainConfig,
+    commands::{COLOR_BASE_BLUE, EVENT_POLL_TIMEOUT},
+    config::MonitoringConfig,
     tui::{AppFrame, Toast, restore_terminal, setup_terminal},
 };
 
@@ -29,7 +29,7 @@ struct NetworkPicker {
 
 impl NetworkPicker {
     fn new() -> Self {
-        Self { options: ChainConfig::available_names(), cursor: 0 }
+        Self { options: MonitoringConfig::available_names(), cursor: 0 }
     }
 }
 
@@ -38,7 +38,7 @@ impl NetworkPicker {
 // ---------------------------------------------------------------------------
 
 /// Main TUI application that manages views, routing, and the event loop.
-pub(crate) struct App {
+pub struct App {
     router: Router,
     resources: Resources,
     show_help: bool,
@@ -46,12 +46,25 @@ pub(crate) struct App {
     /// Network picker overlay; `None` when closed.
     network_picker: Option<NetworkPicker>,
     /// Pending async network-load result. `Some` while a switch is in flight.
-    pending_network: Option<oneshot::Receiver<anyhow::Result<ChainConfig>>>,
+    pending_network: Option<oneshot::Receiver<anyhow::Result<MonitoringConfig>>>,
+}
+
+impl fmt::Debug for App {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("App")
+            .field("router", &self.router)
+            .field("resources", &self.resources)
+            .field("show_help", &self.show_help)
+            .field("view_cache", &format_args!("({} views)", self.view_cache.len()))
+            .field("network_picker", &self.network_picker.as_ref().map(|_| ".."))
+            .field("pending_network", &self.pending_network.is_some())
+            .finish()
+    }
 }
 
 impl App {
     /// Creates a new application with the given resources and initial view.
-    pub(crate) fn new(resources: Resources, initial_view: ViewId) -> Self {
+    pub fn new(resources: Resources, initial_view: ViewId) -> Self {
         Self {
             router: Router::new(initial_view),
             resources,
@@ -63,7 +76,7 @@ impl App {
     }
 
     /// Runs the application event loop using the given view factory.
-    pub(crate) async fn run<F>(mut self, mut view_factory: F) -> Result<()>
+    pub async fn run<F>(mut self, mut view_factory: F) -> Result<()>
     where
         F: FnMut(ViewId) -> Box<dyn View>,
     {
@@ -105,7 +118,7 @@ impl App {
             self.resources.proofs.poll();
             // When a conductor cluster is configured, bridge the Raft leader's
             // safe head into the DA tracker each tick.  The conductor poller
-            // already queries `op_sync_status` from every node's CL, so the
+            // already queries `sync_status` from every node's CL, so the
             // leader's value is available here without an extra RPC.  This
             // ensures the DA monitor advances even before sequencer-0's EL has
             // P2P-synced blocks that were produced by a different leader.
@@ -242,7 +255,7 @@ impl App {
         let (tx, rx) = oneshot::channel();
         self.pending_network = Some(rx);
         tokio::spawn(async move {
-            let result = ChainConfig::load(&name).await;
+            let result = MonitoringConfig::load(&name).await;
             let _ = tx.send(result);
         });
     }
@@ -282,7 +295,7 @@ impl App {
 
     fn apply_network_switch<F>(
         &mut self,
-        new_config: ChainConfig,
+        new_config: MonitoringConfig,
         current_view: &mut Box<dyn View>,
         view_factory: &mut F,
     ) where

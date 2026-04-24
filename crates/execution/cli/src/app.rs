@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use base_execution_chainspec::BaseChainSpec;
-use base_execution_consensus::OpBeaconConsensus;
+use base_execution_consensus::BaseBeaconConsensus;
 use base_execution_evm::BaseExecutorProvider;
 use base_node_core::BaseNode;
 use eyre::{Result, eyre};
@@ -55,7 +55,7 @@ where
     /// [`NodeCommand`](reth_cli_commands::node::NodeCommand).
     pub fn run(
         mut self,
-        launcher: impl Launcher<crate::chainspec::OpChainSpecParser, Ext>,
+        launcher: impl Launcher<crate::chainspec::BaseChainSpecParser, Ext>,
     ) -> Result<()> {
         let runner = match self.runner.take() {
             Some(runner) => runner,
@@ -76,8 +76,8 @@ where
 
         let components = |spec: Arc<BaseChainSpec>| {
             (
-                BaseExecutorProvider::optimism(Arc::clone(&spec)),
-                Arc::new(OpBeaconConsensus::new(spec)),
+                BaseExecutorProvider::base(Arc::clone(&spec)),
+                Arc::new(BaseBeaconConsensus::new(spec)),
             )
         };
 
@@ -116,7 +116,7 @@ where
             Commands::ReExecute(command) => {
                 runner.run_until_ctrl_c(command.execute::<BaseNode>(components))
             }
-            Commands::OpProofs(command) => {
+            Commands::BaseProofs(command) => {
                 runner.run_blocking_until_ctrl_c(command.execute::<BaseNode>())
             }
         }

@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, U256, address, b256, uint};
 
 /// Complete configuration for a Base chain
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BaseChainConfig {
+pub struct ChainConfig {
     // Identity
     /// L2 chain ID.
     pub chain_id: u64,
@@ -44,8 +44,8 @@ pub struct BaseChainConfig {
     pub isthmus_timestamp: u64,
     /// Jovian activation timestamp.
     pub jovian_timestamp: u64,
-    /// Base V1 activation timestamp (optional, not yet scheduled on prod).
-    pub base_v1_timestamp: Option<u64>,
+    /// Base Azul activation timestamp (optional).
+    pub azul_timestamp: Option<u64>,
 
     // Genesis
     /// L1 genesis block hash.
@@ -102,7 +102,7 @@ pub struct BaseChainConfig {
     pub genesis_json: &'static str,
 }
 
-impl BaseChainConfig {
+impl ChainConfig {
     /// Base Mainnet chain configuration.
     pub const fn mainnet() -> &'static Self {
         &MAINNET
@@ -145,7 +145,7 @@ impl BaseChainConfig {
     }
 }
 
-const MAINNET: BaseChainConfig = BaseChainConfig {
+const MAINNET: ChainConfig = ChainConfig {
     chain_id: 8453,
     l1_chain_id: 1,
 
@@ -165,7 +165,7 @@ const MAINNET: BaseChainConfig = BaseChainConfig {
     pectra_blob_schedule_timestamp: None,
     isthmus_timestamp: 1_746_806_401,
     jovian_timestamp: 1_764_691_201,
-    base_v1_timestamp: None,
+    azul_timestamp: Some(1_778_695_200),
 
     genesis_l1_hash: b256!("5c13d307623a926cd31415036c8b7fa14572f9dac64528e857a470511fc30771"),
     genesis_l1_number: 17_481_768,
@@ -197,16 +197,21 @@ const MAINNET: BaseChainConfig = BaseChainConfig {
         "enr:-J24QHmGyBwUZXIcsGYMaUqGGSl4CFdx9Tozu-vQCn5bHIQbR7On7dZbU61vYvfrJr30t0iahSqhc64J46MnUO2JvQaGAYiOoCKKgmlkgnY0gmlwhAPnCzSHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQINc4fSijfbNIiGhcgvwjsjxVFJHUstK9L1T8OTKUjgloN0Y3CCJAaDdWRwgiQG",
         "enr:-J24QG3ypT4xSu0gjb5PABCmVxZqBjVw9ca7pvsI8jl4KATYAnxBmfkaIuEqy9sKvDHKuNCsy57WwK9wTt2aQgcaDDyGAYiOoGAXgmlkgnY0gmlwhDbGmZaHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQIeAK_--tcLEiu7HvoUlbV52MspE0uCocsx1f_rYvRenIN0Y3CCJAaDdWRwgiQG",
         "enode://87a32fd13bd596b2ffca97020e31aef4ddcc1bbd4b95bb633d16c1329f654f34049ed240a36b449fda5e5225d70fe40bc667f53c304b71f8e68fc9d448690b51@3.231.138.188:30301",
+        "enode://87a32fd13bd596b2ffca97020e31aef4ddcc1bbd4b95bb633d16c1329f654f34049ed240a36b449fda5e5225d70fe40bc667f53c304b71f8e68fc9d448690b51@3.231.138.188:9200",
         "enode://ca21ea8f176adb2e229ce2d700830c844af0ea941a1d8152a9513b966fe525e809c3a6c73a2c18a12b74ed6ec4380edf91662778fe0b79f6a591236e49e176f9@184.72.129.189:30301",
+        "enode://ca21ea8f176adb2e229ce2d700830c844af0ea941a1d8152a9513b966fe525e809c3a6c73a2c18a12b74ed6ec4380edf91662778fe0b79f6a591236e49e176f9@184.72.129.189:9200",
         "enode://acf4507a211ba7c1e52cdf4eef62cdc3c32e7c9c47998954f7ba024026f9a6b2150cd3f0b734d9c78e507ab70d59ba61dfe5c45e1078c7ad0775fb251d7735a2@3.220.145.177:30301",
+        "enode://acf4507a211ba7c1e52cdf4eef62cdc3c32e7c9c47998954f7ba024026f9a6b2150cd3f0b734d9c78e507ab70d59ba61dfe5c45e1078c7ad0775fb251d7735a2@3.220.145.177:9200",
         "enode://8a5a5006159bf079d06a04e5eceab2a1ce6e0f721875b2a9c96905336219dbe14203d38f70f3754686a6324f786c2f9852d8c0dd3adac2d080f4db35efc678c5@3.231.11.52:30301",
+        "enode://8a5a5006159bf079d06a04e5eceab2a1ce6e0f721875b2a9c96905336219dbe14203d38f70f3754686a6324f786c2f9852d8c0dd3adac2d080f4db35efc678c5@3.231.11.52:9200",
         "enode://cdadbe835308ad3557f9a1de8db411da1a260a98f8421d62da90e71da66e55e98aaa8e90aa7ce01b408a54e4bd2253d701218081ded3dbe5efbbc7b41d7cef79@54.198.153.150:30301",
+        "enode://cdadbe835308ad3557f9a1de8db411da1a260a98f8421d62da90e71da66e55e98aaa8e90aa7ce01b408a54e4bd2253d701218081ded3dbe5efbbc7b41d7cef79@54.198.153.150:9200",
     ],
 
     genesis_json: include_str!("../res/genesis/base.json"),
 };
 
-const SEPOLIA: BaseChainConfig = BaseChainConfig {
+const SEPOLIA: ChainConfig = ChainConfig {
     chain_id: 84532,
     l1_chain_id: 11155111,
 
@@ -226,7 +231,7 @@ const SEPOLIA: BaseChainConfig = BaseChainConfig {
     pectra_blob_schedule_timestamp: Some(1_742_486_400),
     isthmus_timestamp: 1_744_905_600,
     jovian_timestamp: 1_763_568_001,
-    base_v1_timestamp: Some(1_776_708_000),
+    azul_timestamp: Some(1_776_708_000),
 
     genesis_l1_hash: b256!("cac9a83291d4dec146d6f7f69ab2304f23f5be87b1789119a0c5b1e4482444ed"),
     genesis_l1_number: 4_370_868,
@@ -253,13 +258,17 @@ const SEPOLIA: BaseChainConfig = BaseChainConfig {
 
     bootnodes: &[
         "enode://548f715f3fc388a7c917ba644a2f16270f1ede48a5d88a4d14ea287cc916068363f3092e39936f1a3e7885198bef0e5af951f1d7b1041ce8ba4010917777e71f@18.210.176.114:30301",
+        "enode://548f715f3fc388a7c917ba644a2f16270f1ede48a5d88a4d14ea287cc916068363f3092e39936f1a3e7885198bef0e5af951f1d7b1041ce8ba4010917777e71f@18.210.176.114:9200",
         "enode://6f10052847a966a725c9f4adf6716f9141155b99a0fb487fea3f51498f4c2a2cb8d534e680ee678f9447db85b93ff7c74562762c3714783a7233ac448603b25f@107.21.251.55:30301",
+        "enode://6f10052847a966a725c9f4adf6716f9141155b99a0fb487fea3f51498f4c2a2cb8d534e680ee678f9447db85b93ff7c74562762c3714783a7233ac448603b25f@107.21.251.55:9200",
+        "enr:-J64QFa3qMsONLGphfjEkeYyF6Jkil_jCuJmm7_a42ckZeUQGLVzrzstZNb1dgBp1GGx9bzImq5VxJLP-BaptZThGiWGAYrTytOvgmlkgnY0gmlwhGsV-zeHb3BzdGFja4S0lAUAiXNlY3AyNTZrMaEDahfSECTIS_cXyZ8IyNf4leANlZnrsMEWTkEYxf4GMCmDdGNwgiQGg3VkcIIkBg",
+        "enr:-J64QBwRIWAco7lv6jImSOjPU_W266lHXzpAS5YOh7WmgTyBZkgLgOwo_mxKJq3wz2XRbsoBItbv1dCyjIoNq67mFguGAYrTxM42gmlkgnY0gmlwhBLSsHKHb3BzdGFja4S0lAUAiXNlY3AyNTZrMaEDmoWSi8hcsRpQf2eJsNUx-sqv6fH4btmo2HsAzZFAKnKDdGNwgiQGg3VkcIIkBg",
     ],
 
     genesis_json: include_str!("../res/genesis/sepolia_base.json"),
 };
 
-const ALPHA: BaseChainConfig = BaseChainConfig {
+const ALPHA: ChainConfig = ChainConfig {
     chain_id: 11763072,
     l1_chain_id: 11155111,
 
@@ -279,7 +288,7 @@ const ALPHA: BaseChainConfig = BaseChainConfig {
     pectra_blob_schedule_timestamp: Some(1_742_486_400),
     isthmus_timestamp: 1_744_300_800,
     jovian_timestamp: 1_762_185_600,
-    base_v1_timestamp: Some(1_774_890_000),
+    azul_timestamp: Some(1_774_890_000),
 
     genesis_l1_hash: b256!("86252c512dc5bd7201d0532b31d50696ba84344a7cda545e04a98073a8e13d87"),
     genesis_l1_number: 4_344_216,
@@ -309,7 +318,7 @@ const ALPHA: BaseChainConfig = BaseChainConfig {
     genesis_json: include_str!("../res/genesis/devnet_0_sepolia_dev_0_base.json"),
 };
 
-const DEVNET: BaseChainConfig = BaseChainConfig {
+const DEVNET: ChainConfig = ChainConfig {
     chain_id: 1337,
     l1_chain_id: 900,
 
@@ -329,7 +338,7 @@ const DEVNET: BaseChainConfig = BaseChainConfig {
     pectra_blob_schedule_timestamp: None,
     isthmus_timestamp: 0,
     jovian_timestamp: 0,
-    base_v1_timestamp: Some(0),
+    azul_timestamp: Some(0),
 
     genesis_l1_hash: B256::ZERO,
     genesis_l1_number: 0,
@@ -359,7 +368,7 @@ const DEVNET: BaseChainConfig = BaseChainConfig {
     genesis_json: include_str!("../res/genesis/dev.json"),
 };
 
-const ZERONET: BaseChainConfig = BaseChainConfig {
+const ZERONET: ChainConfig = ChainConfig {
     chain_id: 763360,
     l1_chain_id: 560048,
 
@@ -379,7 +388,7 @@ const ZERONET: BaseChainConfig = BaseChainConfig {
     pectra_blob_schedule_timestamp: None,
     isthmus_timestamp: 0,
     jovian_timestamp: 0,
-    base_v1_timestamp: Some(1_775_152_800),
+    azul_timestamp: Some(1_775_152_800),
 
     genesis_l1_hash: b256!("b7d4b69971ff31d5179be5e1b83f5a4f438f4cd1db886a6630623b7047f32cfd"),
     genesis_l1_number: 2_450_277,
@@ -404,7 +413,14 @@ const ZERONET: BaseChainConfig = BaseChainConfig {
 
     max_gas_limit: 25_000_000,
 
-    bootnodes: &[],
+    bootnodes: &[
+        "enr:-J-4QDS5Z5P4BoDbOlLGOcdXjcv2Nc5_PgP28lIxP4lKU6qYR-m10c8rHdcHk0DdmTvZpndoSpuK__688dmX-tlOsNKGAZ22NI20gmlkgnY0gmlwhCzGBHaHb3BzdGFja4WA-80FAIlzZWNwMjU2azGhA4Qs8_ZWeMdUNldNdjnAxd018gjWofqKoW4_pr0qzvTtg3RjcIIkBoN1ZHCCJAY",
+        "enode://cd4528698249ad8b36fa7b1cad75aa5683ad355e6f0776629eaff1d83cfbb575062330d711efefbfa0d531c86969c2daf9a88fb28cddbbad216f46ac367981eb@44.198.4.118:30301",
+        "enode://cd4528698249ad8b36fa7b1cad75aa5683ad355e6f0776629eaff1d83cfbb575062330d711efefbfa0d531c86969c2daf9a88fb28cddbbad216f46ac367981eb@44.198.4.118:9200",
+        "enr:-J-4QKgMF6zAv7u_75LTXLJKgLtEn4HcI8gaqsDAl78nfw7VQE-EN6dUZCZW4_CI42MAOWUCinrV8rP5hbBu3aje-u-GAZ22LUBogmlkgnY0gmlwhDQCC1-Hb3BzdGFja4WA-80FAIlzZWNwMjU2azGhArwjzoKlEKQiEXtuZ0qT23Wy_3IeEXbAJo7VKDO2Yovig3RjcIIkBoN1ZHCCJAY",
+        "enode://ea188fb5482ff8eb372956d674ecb6d09cbd42e6874121957a47b2ad252f54953c49866d2dcabcfc272fcc63e163a67b097fe4354283e56ddf077fc017b2a127@52.2.11.95:30301",
+        "enode://ea188fb5482ff8eb372956d674ecb6d09cbd42e6874121957a47b2ad252f54953c49866d2dcabcfc272fcc63e163a67b097fe4354283e56ddf077fc017b2a127@52.2.11.95:9200",
+    ],
 
     genesis_json: include_str!("../res/genesis/zeronet_base.json"),
 };

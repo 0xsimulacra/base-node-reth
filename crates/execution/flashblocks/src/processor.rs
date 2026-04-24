@@ -11,10 +11,10 @@ use alloy_network::TransactionResponse;
 use alloy_primitives::{Address, BlockNumber};
 use alloy_rpc_types_eth::state::StateOverride;
 use arc_swap::ArcSwapOption;
-use base_alloy_chains::BaseUpgrades;
-use base_alloy_consensus::{BaseBlock, OpTxEnvelope};
-use base_alloy_flashblocks::Flashblock;
-use base_execution_evm::{BaseEvmConfig, OpNextBlockEnvAttributes};
+use base_common_chains::Upgrades;
+use base_common_consensus::{BaseBlock, BaseTxEnvelope};
+use base_common_flashblocks::Flashblock;
+use base_execution_evm::{BaseEvmConfig, BaseNextBlockEnvAttributes};
 use rayon::prelude::*;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_evm::ConfigureEvm;
@@ -57,7 +57,7 @@ pub struct StateProcessor<Client> {
 impl<Client> StateProcessor<Client>
 where
     Client: StateProviderFactory
-        + ChainSpecProvider<ChainSpec: EthChainSpec<Header = Header> + BaseUpgrades>
+        + ChainSpecProvider<ChainSpec: EthChainSpec<Header = Header> + Upgrades>
         + BlockReaderIdExt<Header = Header>
         + Clone
         + 'static,
@@ -158,15 +158,20 @@ where
                         {
                             return;
                         }
-                        info!("waiting for first Flashblock");
                         // we should ignore this error since it doesn't necessarily indicate a problem
                         return;
                     }
                     _ => {}
                 }
 
-                error!(message = "could not process Flashblock", error = %e);
-                Metrics::block_processing_error().increment(1);
+                // skip logging expected caching case
+                if !matches!(
+                    e,
+                    StateProcessorError::Provider(ProviderError::MissingCanonicalHeader { .. })
+                ) {
+                    error!(message = "could not process Flashblock", error = %e);
+                    Metrics::block_processing_error().increment(1);
+                }
             }
         }
     }
@@ -359,7 +364,7 @@ where
             .map_err(|e| ProviderError::StateProvider(e.to_string()))?
             .ok_or(ProviderError::MissingCanonicalHeader { block_number: canonical_block })?;
 
-        let evm_config = BaseEvmConfig::optimism(self.client.chain_spec());
+        let evm_config = BaseEvmConfig::base(self.client.chain_spec());
         let state_provider = self
             .client
             .state_by_block_number_or_tag(BlockNumberOrTag::Number(canonical_block))
@@ -393,7 +398,7 @@ where
             // Extract L1 block info using the AssembledBlock method
             let l1_block_info = assembled.l1_block_info()?;
 
-            let block_env_attributes = OpNextBlockEnvAttributes {
+            let block_env_attributes = BaseNextBlockEnvAttributes {
                 timestamp: assembled.base.timestamp,
                 suggested_fee_recipient: assembled.base.fee_recipient,
                 prev_randao: assembled.base.prev_randao,
@@ -409,13 +414,13 @@ where
 
             // Parallel sender recovery - batch all ECDSA operations upfront
             let recovery_start = Instant::now();
-            let txs_with_senders: Vec<(OpTxEnvelope, Address)> = assembled
+            let txs_with_senders: Vec<(BaseTxEnvelope, Address)> = assembled
                 .block
                 .body
                 .transactions
                 .par_iter()
                 .cloned()
-                .map(|tx| -> Result<(OpTxEnvelope, Address)> {
+                .map(|tx| -> Result<(BaseTxEnvelope, Address)> {
                     let tx_hash = tx.tx_hash();
                     let sender = match prev_pending_blocks
                         .as_ref()

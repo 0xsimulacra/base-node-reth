@@ -1,7 +1,7 @@
 //! Base Payload attributes that reference the parent L2 block.
 
-use base_alloy_consensus::OpTxType;
-use base_alloy_rpc_types_engine::OpPayloadAttributes;
+use base_common_consensus::OpTxType;
+use base_common_rpc_types_engine::BasePayloadAttributes;
 
 use crate::{BlockInfo, L2BlockInfo};
 
@@ -10,7 +10,7 @@ use crate::{BlockInfo, L2BlockInfo};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttributesWithParent {
     /// The payload attributes.
-    pub attributes: OpPayloadAttributes,
+    pub attributes: BasePayloadAttributes,
     /// The parent block reference.
     pub parent: L2BlockInfo,
     /// The L1 block that the attributes were derived from.
@@ -22,7 +22,7 @@ pub struct AttributesWithParent {
 impl AttributesWithParent {
     /// Create a new [`AttributesWithParent`] instance.
     pub const fn new(
-        attributes: OpPayloadAttributes,
+        attributes: BasePayloadAttributes,
         parent: L2BlockInfo,
         derived_from: Option<BlockInfo>,
         is_last_in_span: bool,
@@ -36,13 +36,13 @@ impl AttributesWithParent {
         self.parent.block_info.number.saturating_add(1)
     }
 
-    /// Consumes `self` and returns the inner [`OpPayloadAttributes`].
-    pub fn take_inner(self) -> OpPayloadAttributes {
+    /// Consumes `self` and returns the inner [`BasePayloadAttributes`].
+    pub fn take_inner(self) -> BasePayloadAttributes {
         self.attributes
     }
 
     /// Returns the payload attributes.
-    pub const fn attributes(&self) -> &OpPayloadAttributes {
+    pub const fn attributes(&self) -> &BasePayloadAttributes {
         &self.attributes
     }
 
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_op_attributes_with_parent() {
-        let attributes = OpPayloadAttributes::default();
+        let attributes = BasePayloadAttributes::default();
         let parent = L2BlockInfo::default();
         let is_last_in_span = true;
         let op_attributes_with_parent =
@@ -116,7 +116,7 @@ mod tests {
     /// transactions that are not deposits.
     #[test]
     fn test_op_attributes_with_parent_as_deposits_only() {
-        let attributes = OpPayloadAttributes {
+        let attributes = BasePayloadAttributes {
             transactions: Some(vec![
                 vec![OpTxType::Deposit as u8, 0x0, 0x10, 0x20].into(),
                 vec![OpTxType::Legacy as u8, 0x0, 0x11, 0x21].into(),
@@ -125,7 +125,7 @@ mod tests {
                 vec![OpTxType::Eip7702 as u8, 0x0, 0x14, 0x24].into(),
                 vec![].into(),
             ]),
-            ..OpPayloadAttributes::default()
+            ..BasePayloadAttributes::default()
         };
         let parent = L2BlockInfo::default();
         let is_last_in_span = true;
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_op_attributes_with_parent_as_deposits_multi_deposits() {
-        let attributes = OpPayloadAttributes {
+        let attributes = BasePayloadAttributes {
             transactions: Some(vec![
                 vec![OpTxType::Deposit as u8, 0x0, 0x10, 0x20].into(),
                 vec![OpTxType::Legacy as u8, 0x0, 0x11, 0x21].into(),
@@ -152,7 +152,7 @@ mod tests {
                 vec![OpTxType::Deposit as u8, 0x56, 0x31, 0x41].into(),
                 vec![].into(),
             ]),
-            ..OpPayloadAttributes::default()
+            ..BasePayloadAttributes::default()
         };
         let parent = L2BlockInfo::default();
         let is_last_in_span = true;
@@ -174,7 +174,7 @@ mod tests {
     /// transactions that are not deposits.
     #[test]
     fn test_op_attributes_with_parent_as_deposits_no_deposits() {
-        let attributes = OpPayloadAttributes {
+        let attributes = BasePayloadAttributes {
             transactions: Some(vec![
                 vec![OpTxType::Legacy as u8, 0x0, 0x11, 0x21].into(),
                 vec![OpTxType::Eip2930 as u8, 0x0, 0x12, 0x22].into(),
@@ -182,7 +182,7 @@ mod tests {
                 vec![OpTxType::Eip7702 as u8, 0x0, 0x14, 0x24].into(),
                 vec![].into(),
             ]),
-            ..OpPayloadAttributes::default()
+            ..BasePayloadAttributes::default()
         };
         let parent = L2BlockInfo::default();
         let is_last_in_span = true;
@@ -195,14 +195,14 @@ mod tests {
 
     #[test]
     fn test_op_attributes_with_parent_as_deposits_only_deposits() {
-        let attributes = OpPayloadAttributes {
+        let attributes = BasePayloadAttributes {
             transactions: Some(vec![
                 vec![OpTxType::Deposit as u8, 0x0, 0x10, 0x20].into(),
                 vec![OpTxType::Deposit as u8, 0x98, 0x21, 0x31].into(),
                 vec![OpTxType::Deposit as u8, 0x56, 0x31, 0x41].into(),
                 vec![].into(),
             ]),
-            ..OpPayloadAttributes::default()
+            ..BasePayloadAttributes::default()
         };
         let parent = L2BlockInfo::default();
         let is_last_in_span = true;
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn test_op_attributes_with_parent_as_deposits_no_txs() {
         let attributes =
-            OpPayloadAttributes { transactions: None, ..OpPayloadAttributes::default() };
+            BasePayloadAttributes { transactions: None, ..BasePayloadAttributes::default() };
         let parent = L2BlockInfo::default();
         let is_last_in_span = true;
         let op_attributes_with_parent =

@@ -5,7 +5,7 @@ use core::fmt::Debug;
 
 use alloy_eips::BlockNumHash;
 use async_trait::async_trait;
-use base_consensus_genesis::{RollupConfig, SystemConfig};
+use base_common_genesis::{RollupConfig, SystemConfig};
 use base_protocol::{AttributesWithParent, BatchValidationProvider, BlockInfo, L2BlockInfo};
 
 use crate::{
@@ -51,7 +51,7 @@ where
     /// is at most `channel_timeout` L1 blocks behind the safe head's L1 origin, then returns
     /// that block's L1 origin and system config.
     ///
-    /// This matches op-node's `initialReset` behavior: using the system config from a
+    /// This matches the reference node's `initialReset` behavior: using the system config from a
     /// potentially older L2 block ensures we see any batcher-address changes that could
     /// affect channels still open within the channel timeout window.
     async fn initial_reset(
@@ -252,8 +252,8 @@ mod tests {
 
     use alloy_eips::BlockNumHash;
     use alloy_rpc_types_engine::PayloadAttributes;
-    use base_alloy_rpc_types_engine::OpPayloadAttributes;
-    use base_consensus_genesis::{RollupConfig, SystemConfig};
+    use base_common_genesis::{RollupConfig, SystemConfig};
+    use base_common_rpc_types_engine::BasePayloadAttributes;
     use base_protocol::{AttributesWithParent, L2BlockInfo};
 
     use super::*;
@@ -264,7 +264,7 @@ mod tests {
 
     fn default_test_payload_attributes() -> AttributesWithParent {
         AttributesWithParent {
-            attributes: OpPayloadAttributes {
+            attributes: BasePayloadAttributes {
                 payload_attributes: PayloadAttributes {
                     timestamp: 0,
                     prev_randao: Default::default(),

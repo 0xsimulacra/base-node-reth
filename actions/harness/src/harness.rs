@@ -2,9 +2,9 @@ use std::{fmt::Debug, sync::Arc};
 
 use alloy_eips::BlockNumHash;
 use alloy_genesis::ChainConfig;
-use base_alloy_consensus::{BaseBlock, OpTxEnvelope};
+use base_common_consensus::{BaseBlock, BaseTxEnvelope};
+use base_common_genesis::RollupConfig;
 use base_consensus_derive::{DataAvailabilityProvider, PipelineBuilder, StatefulAttributesBuilder};
-use base_consensus_genesis::RollupConfig;
 use base_consensus_node::L1OriginSelector;
 use base_protocol::{BlockInfo, L1BlockInfoTx, L2BlockInfo};
 
@@ -202,7 +202,7 @@ impl ActionTestHarness {
             .build_polled();
 
         // Create an independent engine client for the derivation node. The node uses
-        // `execute_from_attrs` which passes the full `OpPayloadAttributes` (including
+        // `execute_from_attrs` which passes the full `BasePayloadAttributes` (including
         // Holocene/Jovian parameters), so it can build any block from scratch without
         // needing the sequencer's pre-built headers.
         //
@@ -253,9 +253,9 @@ impl ActionTestHarness {
     /// Create an [`L2Sequencer`] starting from L2 genesis, wired to a
     /// snapshot of the current L1 chain.
     ///
-    /// The returned sequencer generates real [`OpBlock`]s using the production
+    /// The returned sequencer generates real [`BaseBlock`]s using the production
     /// [`L1OriginSelector`], [`StatefulAttributesBuilder`], and
-    /// [`ActionEngineClient`] (backed by `OpPayloadBuilder`).
+    /// [`ActionEngineClient`] (backed by `BasePayloadBuilder`).
     ///
     /// Call `build_next_block_with_single_transaction().await` once per L2
     /// block to advance the sequencer.
@@ -309,7 +309,7 @@ impl ActionTestHarness {
     /// Panics if the first transaction is not a deposit or if the calldata
     /// cannot be decoded.
     pub fn l1_info_from_block(block: &BaseBlock) -> L1BlockInfoTx {
-        let OpTxEnvelope::Deposit(sealed) = &block.body.transactions[0] else {
+        let BaseTxEnvelope::Deposit(sealed) = &block.body.transactions[0] else {
             panic!("first transaction must be a deposit");
         };
         L1BlockInfoTx::decode_calldata(sealed.inner().input.as_ref())
@@ -326,7 +326,7 @@ impl ActionTestHarness {
     /// production engine. If you need a sync source builder, construct the
     /// sequencer manually and drive it with an async runtime.
     ///
-    /// [`OpBlock`]: base_alloy_consensus::OpBlock
+    /// [`BaseBlock`]: base_common_consensus::BaseBlock
     pub async fn create_l2_source(&self, n: u64) -> ActionL2Source {
         let chain = SharedL1Chain::from_blocks(self.l1.chain().to_vec());
         let mut sequencer = self.create_l2_sequencer(chain);

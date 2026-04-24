@@ -24,6 +24,9 @@ pub use reader::{
     Event, EventReader, KafkaAuditLogReader, assign_topic_partition, create_kafka_consumer,
 };
 
+mod rpc;
+pub use rpc::{AuditArchiverApiServer, AuditArchiverRpc};
+
 mod storage;
 pub use storage::{
     BundleEventS3Reader, BundleHistory, BundleHistoryEvent, EventWriter, S3EventReaderWriter,
@@ -41,7 +44,7 @@ pub struct AuditConnector;
 
 impl AuditConnector {
     /// Connects a bundle event receiver to a publisher, spawning a task to forward events.
-    pub fn connect<P>(event_rx: mpsc::UnboundedReceiver<BundleEvent>, publisher: P)
+    pub fn connect<P>(event_rx: mpsc::Receiver<BundleEvent>, publisher: P)
     where
         P: BundleEventPublisher + 'static,
     {

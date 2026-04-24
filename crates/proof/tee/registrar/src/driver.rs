@@ -12,7 +12,7 @@ use alloy_sol_types::SolCall;
 use base_proof_contracts::{INitroEnclaveVerifier, ITEEProverRegistry};
 use base_proof_tee_nitro_attestation_prover::AttestationProofProvider;
 use base_proof_tee_nitro_verifier::AttestationReport;
-use base_tx_manager::{TxCandidate, TxManager};
+use base_tx_manager::{TxCandidate, TxManager, TxManagerError};
 use futures::stream::StreamExt;
 use rand::random;
 use tokio_util::sync::CancellationToken;
@@ -45,7 +45,10 @@ pub const DEFAULT_TX_RETRY_DELAY_SECS: u64 = 5;
 /// still initializing. This window allows the registrar to attempt
 /// registration during that warm-up period rather than waiting for the
 /// instance to become healthy. Set to 0 to disable.
-pub const DEFAULT_UNHEALTHY_REGISTRATION_WINDOW_SECS: u64 = 3600;
+///
+/// 85 minutes gives a slight buffer ahead of the prove provision timeout
+/// of 90 minutes.
+pub const DEFAULT_UNHEALTHY_REGISTRATION_WINDOW_SECS: u64 = 5100;
 
 /// Runtime parameters for the [`RegistrationDriver`] that are not
 /// trait-based dependencies.
@@ -579,6 +582,18 @@ where
                     // funds, config errors, fee limits, etc.) cannot be
                     // resolved by retrying with the same calldata.
                     if !e.is_retryable() {
+                        // If the contract reverted execution, the proof
+                        // itself is likely invalid (wrong image ID, stale
+                        // attestation, etc.). Block recovery for this
+                        // signer so the next cycle generates a fresh
+                        // proof instead of re-recovering the same one.
+                        if matches!(e, TxManagerError::ExecutionReverted { .. }) {
+                            warn!(
+                                signer = %signer_address,
+                                "execution reverted, blocking proof recovery for signer"
+                            );
+                            self.proof_provider.block_recovery_for_signer(signer_address);
+                        }
                         return Err(RegistrarError::from(e));
                     }
 

@@ -7,9 +7,9 @@ use alloy_consensus::transaction::{Recovered, SignerRecoverable};
 use alloy_primitives::{B256, Bytes};
 use alloy_provider::{Provider, RootProvider, network::eip2718::Decodable2718};
 use audit_archiver_lib::BundleEvent;
-use base_alloy_consensus::OpTxEnvelope;
-use base_alloy_network::Base;
 use base_bundles::{AcceptedBundle, Bundle, BundleExtensions, MeterBundleResponse, ParsedBundle};
+use base_common_consensus::BaseTxEnvelope;
+use base_common_network::Base;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     proc_macros::rpc,
@@ -53,7 +53,7 @@ pub struct IngressService<Q: MessageQueue> {
     raw_tx_forward_provider: Option<Arc<RootProvider<Base>>>,
     tx_submission_method: TxSubmissionMethod,
     bundle_queue_publisher: BundleQueuePublisher<Q>,
-    audit_channel: mpsc::UnboundedSender<BundleEvent>,
+    audit_channel: mpsc::Sender<BundleEvent>,
     send_transaction_default_lifetime_seconds: u64,
     block_time_milliseconds: u64,
     meter_bundle_timeout_ms: u64,
@@ -73,7 +73,7 @@ impl<Q: MessageQueue> IngressService<Q> {
     pub fn new(
         providers: Providers,
         queue: Q,
-        audit_channel: mpsc::UnboundedSender<BundleEvent>,
+        audit_channel: mpsc::Sender<BundleEvent>,
         builder_tx: broadcast::Sender<MeterBundleResponse>,
         config: Config,
     ) -> Self {
@@ -167,7 +167,10 @@ impl<Q: MessageQueue + 'static> IngressApiServer for IngressService<Q> {
             self.bundle_cache.insert(*bundle_hash, ()).await;
             Metrics::bundles_parsed().increment(1);
 
-            let meter_bundle_response = match self.meter_bundle(&bundle, bundle_hash).await {
+            let meter_bundle_response: Option<MeterBundleResponse> = match self
+                .meter_bundle(&bundle, bundle_hash)
+                .await
+            {
                 Ok(response) => {
                     info!(message = "Metering succeeded for raw transaction", bundle_hash = %bundle_hash, response = ?response);
                     Some(response)
@@ -248,12 +251,12 @@ impl<Q: MessageQueue + 'static> IngressApiServer for IngressService<Q> {
 }
 
 impl<Q: MessageQueue> IngressService<Q> {
-    async fn get_tx(&self, data: &Bytes) -> RpcResult<Recovered<OpTxEnvelope>> {
+    async fn get_tx(&self, data: &Bytes) -> RpcResult<Recovered<BaseTxEnvelope>> {
         if data.is_empty() {
             return Err(EthApiError::EmptyRawTransactionData.into_rpc_err());
         }
 
-        let envelope = OpTxEnvelope::decode_2718_exact(data.iter().as_slice())
+        let envelope = BaseTxEnvelope::decode_2718_exact(data.iter().as_slice())
             .map_err(|_| EthApiError::FailedToDecodeSignedTransaction.into_rpc_err())?;
 
         let transaction = envelope
@@ -303,18 +306,30 @@ impl<Q: MessageQueue> IngressService<Q> {
         Ok(res)
     }
 
-    /// Helper method to send audit event for a bundle
+    /// Helper method to send audit event for a bundle.
+    ///
+    /// Uses `try_send` on the bounded channel to avoid blocking the RPC handler.
+    /// If the channel is full, the event is dropped and a warning is logged.
     fn send_audit_event(&self, accepted_bundle: &AcceptedBundle, bundle_hash: B256) {
         let audit_event = BundleEvent::Received {
             bundle_id: *accepted_bundle.uuid(),
             bundle: Box::new(accepted_bundle.clone()),
         };
-        if let Err(e) = self.audit_channel.send(audit_event) {
-            warn!(
-                message = "failed to send audit event",
-                bundle_hash = %bundle_hash,
-                error = %e
-            );
+        match self.audit_channel.try_send(audit_event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                Metrics::audit_channel_full().increment(1);
+                warn!(
+                    message = "audit channel full, dropping event",
+                    bundle_hash = %bundle_hash,
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                warn!(
+                    message = "audit channel closed",
+                    bundle_hash = %bundle_hash,
+                );
+            }
         }
     }
 }
@@ -365,6 +380,7 @@ mod tests {
             raw_tx_forward_rpc: None,
             chain_id: 11,
             bundle_cache_ttl: 20,
+            audit_channel_capacity: 512,
             send_to_builder: false,
         }
     }
@@ -443,7 +459,7 @@ mod tests {
             raw_tx_forward: None,
         };
 
-        let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
+        let (audit_tx, _audit_rx) = mpsc::channel(512);
         let (builder_tx, _builder_rx) = broadcast::channel(1);
 
         let service = IngressService::new(providers, MockQueue, audit_tx, builder_tx, config);
@@ -497,7 +513,7 @@ mod tests {
             raw_tx_forward: Some(RootProvider::new_http(forward_server.uri().parse().unwrap())),
         };
 
-        let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
+        let (audit_tx, _audit_rx) = mpsc::channel(512);
         let (builder_tx, _builder_rx) = broadcast::channel(1);
 
         let service = IngressService::new(providers, MockQueue, audit_tx, builder_tx, config);

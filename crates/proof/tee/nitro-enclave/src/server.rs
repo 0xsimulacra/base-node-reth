@@ -3,9 +3,9 @@ use std::sync::LazyLock;
 
 use alloy_primitives::{Address, B256, Bytes, keccak256, map::HashMap};
 use alloy_signer_local::PrivateKeySigner;
-use base_alloy_chains::BaseChainConfig;
-use base_alloy_evm::OpEvmFactory;
-use base_consensus_genesis::RollupConfig;
+use base_common_chains::ChainConfig;
+use base_common_evm::BaseEvmFactory;
+use base_common_genesis::RollupConfig;
 use base_proof::BootInfo;
 use base_proof_client::Prologue;
 use base_proof_preimage::PreimageKey;
@@ -18,18 +18,18 @@ use crate::{
 };
 
 /// Environment variable for setting the signer key in local mode.
-const SIGNER_KEY_ENV_VAR: &str = "OP_ENCLAVE_SIGNER_KEY";
+const SIGNER_KEY_ENV_VAR: &str = "BASE_ENCLAVE_SIGNER_KEY";
 
 /// PCR0 is a SHA-384 hash (48 bytes) per the AWS Nitro Enclaves specification.
 const PCR0_LENGTH: usize = 48;
 
-/// Per-chain config hashes derived from [`BaseChainConfig::all`] at first access.
+/// Per-chain config hashes derived from [`ChainConfig::all`] at first access.
 ///
 /// Each entry is `keccak256(PerChainConfig::marshal_binary())` with defaults applied.
 /// Chains that lack a `system_config` in their rollup config are skipped.
 static CONFIG_HASHES: LazyLock<HashMap<u64, B256>> = LazyLock::new(|| {
     let mut map = HashMap::default();
-    for cfg in BaseChainConfig::all() {
+    for cfg in ChainConfig::all() {
         let rollup = RollupConfig::from(cfg);
         if let Some(mut per_chain) = PerChainConfig::from_rollup_config(&rollup) {
             per_chain.force_defaults();
@@ -93,7 +93,7 @@ impl Server {
     /// Create a new server instance in local mode for development.
     ///
     /// Uses the OS RNG and sets `tee_image_hash` to zero. Optionally reads a
-    /// signer key from the `OP_ENCLAVE_SIGNER_KEY` environment variable.
+    /// signer key from the `BASE_ENCLAVE_SIGNER_KEY` environment variable.
     pub fn new_local() -> Result<Self> {
         let signer_key = match std::env::var(SIGNER_KEY_ENV_VAR) {
             Ok(hex_key) => {
@@ -151,7 +151,7 @@ impl Server {
         let config_hash = config_hash_for_chain(boot_info.chain_id)?;
         let agreed_l2_output_root = boot_info.agreed_l2_output_root;
 
-        let prologue = Prologue::new(oracle.clone(), oracle, OpEvmFactory::default());
+        let prologue = Prologue::new(oracle.clone(), oracle, BaseEvmFactory::default());
         let driver = prologue.load().await.map_err(|e| NitroError::ProofPipeline(e.to_string()))?;
         let (epilogue, block_results) = driver
             .execute_with_intermediates()
@@ -254,7 +254,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::b256;
-    use base_consensus_registry::Registry;
+    use base_common_chains::Registry;
 
     use super::*;
 
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn config_hashes_match_registry() {
-        for cfg in BaseChainConfig::all() {
+        for cfg in ChainConfig::all() {
             let chain_id = cfg.chain_id;
             let Some(rollup) = Registry::rollup_config(chain_id) else { continue };
             let Some(mut per_chain) = PerChainConfig::from_rollup_config(rollup) else {
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     #[ignore]
     fn print_real_config_hashes() {
-        for cfg in BaseChainConfig::all() {
+        for cfg in ChainConfig::all() {
             let chain_id = cfg.chain_id;
             let rollup = match Registry::rollup_config(chain_id) {
                 Some(r) => r,

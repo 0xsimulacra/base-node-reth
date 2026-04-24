@@ -12,11 +12,11 @@ use alloy_rpc_client::RpcClient;
 use alloy_rpc_types::simulate::{SimBlock, SimulatePayload};
 use alloy_rpc_types_engine::PayloadId;
 use alloy_rpc_types_eth::{TransactionInput, error::EthRpcErrorCode};
-use base_alloy_flashblocks::{
+use base_common_flashblocks::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
 };
-use base_alloy_network::Base;
-use base_common_rpc_types::OpTransactionRequest;
+use base_common_network::Base;
+use base_common_rpc_types::BaseTransactionRequest;
 use base_flashblocks_node::test_harness::FlashblocksHarness;
 use base_node_runner::test_utils::L1_BLOCK_INFO_DEPOSIT_TX;
 use base_test_utils::{Account, DoubleCounter};
@@ -195,7 +195,7 @@ impl TestSetup {
         // Alice's ETH transfer at nonce 0
         let (eth_transfer_tx, eth_transfer_hash) = alice
             .sign_txn_request(
-                OpTransactionRequest::default()
+                BaseTransactionRequest::default()
                     .from(alice.address())
                     .transaction_type(TransactionType::Eip1559.into())
                     .gas_limit(100_000)
@@ -224,7 +224,7 @@ impl TestSetup {
         // Call LogEmitterA at deployer nonce 5 to trigger logs
         let (log_trigger_tx, log_trigger_hash) = deployer
             .sign_txn_request(
-                OpTransactionRequest::default()
+                BaseTransactionRequest::default()
                     .from(deployer.address())
                     .transaction_type(TransactionType::Eip1559.into())
                     .gas_limit(100_000)
@@ -236,7 +236,7 @@ impl TestSetup {
         // Balance transfer: alice sends PENDING_BALANCE wei to TEST_ADDRESS at nonce 1
         let (balance_transfer_tx, _) = alice
             .sign_txn_request(
-                OpTransactionRequest::default()
+                BaseTransactionRequest::default()
                     .from(alice.address())
                     .transaction_type(TransactionType::Eip1559.into())
                     .gas_limit(21_000)
@@ -322,13 +322,13 @@ impl TestSetup {
         }
     }
 
-    fn count1(&self) -> OpTransactionRequest {
+    fn count1(&self) -> BaseTransactionRequest {
         let counter =
             DoubleCounterInstance::new(self.txn_details.counter_address, self.harness.provider());
         counter.count1().into_transaction_request()
     }
 
-    fn count2(&self) -> OpTransactionRequest {
+    fn count2(&self) -> BaseTransactionRequest {
         let counter =
             DoubleCounterInstance::new(self.txn_details.counter_address, self.harness.provider());
         counter.count2().into_transaction_request()
@@ -535,7 +535,7 @@ async fn test_eth_call() -> Result<()> {
     let provider = setup.harness.provider();
 
     // Initially, the big spend will succeed because we haven't sent the test payloads yet
-    let big_spend = OpTransactionRequest::default()
+    let big_spend = BaseTransactionRequest::default()
         .from(Account::Alice.address())
         .transaction_type(0)
         .gas_limit(200000)
@@ -576,7 +576,7 @@ async fn test_eth_estimate_gas() -> Result<()> {
     let provider = setup.harness.provider();
 
     // We ensure that eth_estimate_gas will succeed because we are on plain state
-    let send_estimate_gas = OpTransactionRequest::default()
+    let send_estimate_gas = BaseTransactionRequest::default()
         .from(Account::Alice.address())
         .transaction_type(0)
         .gas_limit(200000)
@@ -619,9 +619,9 @@ async fn test_eth_simulate_v1() -> Result<()> {
         block_state_calls: vec![SimBlock {
             calls: vec![
                 // read count1() from counter contract
-                setup.count1().into(),
+                setup.count1().gas_limit(100_000).into(),
                 // increment() value in contract
-                OpTransactionRequest::default()
+                BaseTransactionRequest::default()
                     .from(address!("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"))
                     .transaction_type(0)
                     .gas_limit(200000)
@@ -629,7 +629,7 @@ async fn test_eth_simulate_v1() -> Result<()> {
                     .input(TransactionInput::new(bytes!("0xd09de08a")))
                     .into(),
                 // read count1() from counter contract
-                setup.count1().into(),
+                setup.count1().gas_limit(100_000).into(),
             ],
             block_overrides: None,
             state_overrides: None,
@@ -1172,6 +1172,18 @@ async fn test_eth_subscribe_new_flashblock_transactions_full() -> eyre::Result<(
     assert!(tx["hash"].is_string(), "Expected full tx with hash field");
     assert!(tx["blockNumber"].is_string(), "Expected full tx with blockNumber field");
     assert!(tx["logs"].is_array(), "Expected logs array in full transaction");
+    let gas_used = tx["gasUsed"].as_str().expect("expected gasUsed hex string");
+    assert!(gas_used.starts_with("0x"), "Expected receipt-style gasUsed field, got: {gas_used}");
+    assert_eq!(tx["status"], "0x1", "Expected receipt-style status field");
+    assert!(
+        tx["cumulativeGasUsed"].is_string(),
+        "Expected cumulativeGasUsed field in full transaction"
+    );
+    assert!(
+        tx["contractAddress"].is_null() || tx["contractAddress"].is_string(),
+        "Expected contractAddress field in full transaction"
+    );
+    assert!(tx["logsBloom"].is_string(), "Expected logsBloom field in full transaction");
 
     // Send second flashblock with 9 more transactions (delta only, not cumulative)
     setup.send_flashblock(setup.create_second_payload()).await?;
@@ -1185,6 +1197,21 @@ async fn test_eth_subscribe_new_flashblock_transactions_full() -> eyre::Result<(
         let tx = &notif["params"]["result"];
         assert!(tx["hash"].is_string() && tx["blockNumber"].is_string());
         assert!(tx["logs"].is_array(), "Expected logs array in full transaction");
+        let gas_used = tx["gasUsed"].as_str().expect("expected gasUsed hex string");
+        assert!(
+            gas_used.starts_with("0x"),
+            "Expected receipt-style gasUsed field, got: {gas_used}"
+        );
+        assert_eq!(tx["status"], "0x1", "Expected receipt-style status field");
+        assert!(
+            tx["cumulativeGasUsed"].is_string(),
+            "Expected cumulativeGasUsed field in full transaction"
+        );
+        assert!(
+            tx["contractAddress"].is_null() || tx["contractAddress"].is_string(),
+            "Expected contractAddress field in full transaction"
+        );
+        assert!(tx["logsBloom"].is_string(), "Expected logsBloom field in full transaction");
         received_count += 1;
     }
     assert_eq!(received_count, 9);

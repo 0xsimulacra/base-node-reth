@@ -1,5 +1,5 @@
 [package]
-name = "base-alloy-provider"
+name = "base-common-provider"
 description = "Interface with a Base blockchain"
 
 version.workspace = true
@@ -15,10 +15,10 @@ workspace = true
 
 [dependencies]
 # Workspace
-base-alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
+base-common-network.workspace = true
+base-common-rpc-types-engine = { workspace = true, features = ["serde"] }
 
 # Alloy
-alloy-network.workspace = true
 alloy-provider.workspace = true
 alloy-transport.workspace = true
 alloy-primitives = { workspace = true, features = ["rlp", "serde"] }
@@ -31,10 +31,12 @@ async-trait.workspace = true
 std = [
 	"alloy-primitives/std",
 	"alloy-rpc-types-engine/std",
-	"base-alloy-rpc-types-engine/std",
+	"base-common-network/std",
+	"base-common-rpc-types-engine/std",
 ]
 serde = [
 	"alloy-primitives/serde",
 	"alloy-rpc-types-engine/serde",
-	"base-alloy-rpc-types-engine/serde",
+	"base-common-network/serde",
+	"base-common-rpc-types-engine/serde",
 ]

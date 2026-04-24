@@ -98,6 +98,8 @@ base_metrics::define_metrics! {
     metering_unknown_transaction: counter,
     #[describe("Number of LRU evictions from MeteringStore")]
     metering_store_lru_evictions: counter,
+    #[describe("Number of entries in the metering store that expired due to TTL")]
+    metering_store_ttl_expirations: counter,
     #[describe("Size of MeteringStore")]
     metering_store_size: gauge,
     #[describe("Transactions inserted into the rejection cache")]
@@ -184,21 +186,37 @@ base_metrics::define_metrics! {
     #[describe("Flashblock execution time headroom in microseconds")]
     #[label(flashblock_index)]
     flashblock_execution_time_headroom_us: histogram,
-    #[describe("Flashblock state root time used in microseconds")]
+    #[describe("Flashblock cumulative state root gas used")]
     #[label(flashblock_index)]
-    flashblock_state_root_time_used_us: histogram,
-    #[describe("Flashblock state root time headroom in microseconds")]
+    flashblock_state_root_gas_used: histogram,
+    #[describe("Flashblock state root gas headroom")]
     #[label(flashblock_index)]
-    flashblock_state_root_time_headroom_us: histogram,
+    flashblock_state_root_gas_headroom: histogram,
     #[describe("Priority fee of rejected transactions")]
     #[label(reason)]
     rejected_tx_priority_fee: histogram,
     #[describe("Actual execution time for transactions without metering data (microseconds)")]
     unmetered_tx_actual_execution_time_us: histogram,
+    #[describe("Transactions committed to a payload without metering data")]
+    metering_late_arrival_total: counter,
+    #[describe("Time between first metering lookup miss and metering data arrival (milliseconds)")]
+    metering_late_arrival_latency_ms: histogram,
+    #[describe("Execution time from late-arriving metering data (microseconds)")]
+    metering_late_arrival_execution_time_us: histogram,
+    #[describe("State root time from late-arriving metering data (microseconds)")]
+    metering_late_arrival_state_root_time_us: histogram,
     #[describe("Number of accounts modified by a transaction (from EVM post-state)")]
     tx_accounts_modified: histogram,
     #[describe("Number of storage slots modified by a transaction (from EVM post-state)")]
     tx_storage_slots_modified: histogram,
+    #[describe("Rejected transaction batch drops due to full forwarding channel")]
+    rejected_tx_channel_drops: counter,
+    #[describe("Rejected transaction drops due to per-block accumulation limit")]
+    rejected_tx_per_block_drops: counter,
+    #[describe("Rejected txs forwarded to audit-archiver")]
+    rejected_txs_forwarded: counter,
+    #[describe("Number of failed rejected transaction batch forwards to audit-archiver")]
+    rejected_tx_forward_failures: counter,
 }
 
 impl BuilderMetrics {
@@ -260,10 +278,10 @@ impl BuilderMetrics {
             );
         }
 
-        Self::flashblock_state_root_time_used_us(flashblock_index.clone())
+        Self::flashblock_state_root_gas_used(flashblock_index.clone())
             .record(info.cumulative_state_root_gas as f64);
         if let Some(block_state_root_gas_limit) = limits.block_state_root_gas_limit {
-            Self::flashblock_state_root_time_headroom_us(flashblock_index.clone())
+            Self::flashblock_state_root_gas_headroom(flashblock_index.clone())
                 .record(block_state_root_gas_limit.saturating_sub(info.cumulative_state_root_gas)
                     as f64);
         }

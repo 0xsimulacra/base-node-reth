@@ -16,9 +16,6 @@ exclude = [
     'foo.bar',
     'localhost',
 
-    # Links to files moved in this rename (not yet on main)
-    'https://github\.com/base/base/blob/main/crates/execution/upgrades',
-
     # Shields.io badges that query live GitHub stats (flaky, not real links)
     'https://img.shields.io/github/commit-activity/w/base/base',
     'https://img.shields.io/github/issues-pr-raw/base/base',
@@ -33,6 +30,11 @@ exclude = [
     'https://patreon\.com',
     'https://www\.patreon\.com',
     'https://tidelift\.com',
+
+    # Moved/deleted source files (links in docs that predate refactors)
+    'https://github\.com/base/base/blob/main/crates/execution/upgrades/src/chain\.rs',
+    'https://github\.com/base/base/blob/main/crates/common/genesis/src/rollup\.rs',
+    'https://github\.com/base/base/blob/main/crates/common/genesis/src/chain/hardfork\.rs',
 
     # Internal / staging sites not meant for link checking
     'https://rustup\.rs/',

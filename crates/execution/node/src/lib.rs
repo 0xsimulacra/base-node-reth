@@ -17,16 +17,16 @@ pub use args::TxpoolOrdering;
 /// Exports Base-specific implementations of the [`EngineTypes`](reth_node_api::EngineTypes)
 /// trait.
 pub mod engine;
-pub use engine::OpEngineTypes;
+pub use engine::BaseEngineTypes;
 
 pub mod node;
 pub use node::*;
 
 pub mod rpc;
-pub use rpc::OpEngineApiBuilder;
+pub use rpc::BaseEngineApiBuilder;
 
 pub mod version;
-pub use version::OP_NAME_CLIENT;
+pub use version::CLIENT_NAME;
 
 pub mod proof_history;
 
@@ -34,7 +34,7 @@ pub mod proof_history;
 #[cfg(feature = "test-utils")]
 pub mod utils;
 
-use base_revm as _;
+use base_common_evm as _;
 #[cfg(feature = "test-utils")]
 use reth_tasks as _;
 use revm as _;

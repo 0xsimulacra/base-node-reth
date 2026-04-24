@@ -4,7 +4,7 @@ use crate::BaseUpgrade;
 
 /// Extends [`EthereumHardforks`] with Base upgrade helper methods.
 #[auto_impl::auto_impl(&, Arc)]
-pub trait BaseUpgrades: EthereumHardforks {
+pub trait Upgrades: EthereumHardforks {
     /// Retrieves [`ForkCondition`] by a [`BaseUpgrade`]. If `fork` is not present, returns
     /// [`ForkCondition::Never`].
     fn upgrade_activation(&self, fork: BaseUpgrade) -> ForkCondition;
@@ -59,8 +59,8 @@ pub trait BaseUpgrades: EthereumHardforks {
         self.upgrade_activation(BaseUpgrade::Jovian).active_at_timestamp(timestamp)
     }
 
-    /// Returns `true` if [`V1`](BaseUpgrade::V1) is active at given block timestamp.
-    fn is_base_v1_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.upgrade_activation(BaseUpgrade::V1).active_at_timestamp(timestamp)
+    /// Returns `true` if [`Azul`](BaseUpgrade::Azul) is active at given block timestamp.
+    fn is_base_azul_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.upgrade_activation(BaseUpgrade::Azul).active_at_timestamp(timestamp)
     }
 }

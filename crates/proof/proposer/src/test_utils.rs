@@ -1,14 +1,19 @@
 //! Shared test utilities: reusable mock stubs for L1/L2 clients, contract clients, and proposer.
 
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
+
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rpc_types_eth::EIP1186AccountProofResponse;
 use async_trait::async_trait;
-use base_consensus_genesis::RollupConfig;
+use base_common_genesis::RollupConfig;
 use base_proof_contracts::{
     AggregateVerifierClient, AnchorRoot, AnchorStateRegistryClient, ContractError,
     DisputeGameFactoryClient, GameAtIndex, GameInfo,
 };
-use base_proof_primitives::Proposal;
+use base_proof_primitives::{ProofResult, Proposal, ProverClient};
 use base_proof_rpc::{
     BaseBlock, L1BlockId, L1BlockRef, L1Provider, L2BlockRef, L2Provider, OutputAtBlock,
     RollupProvider, RpcError, RpcResult, SyncStatus,
@@ -16,8 +21,10 @@ use base_proof_rpc::{
 
 use crate::{error::ProposerError, output_proposer::OutputProposer};
 
-/// Mock L1 client with configurable `block_number()` return.
-pub(crate) struct MockL1 {
+/// Mock L1 provider for tests.
+#[derive(Debug)]
+pub struct MockL1 {
+    /// The block number returned by `block_number()`.
     pub latest_block_number: u64,
 }
 
@@ -49,8 +56,10 @@ impl L1Provider for MockL1 {
     }
 }
 
-/// Mock L2 client with configurable `block_by_number()` behavior.
-pub(crate) struct MockL2 {
+/// Mock L2 provider for tests.
+#[derive(Debug)]
+pub struct MockL2 {
+    /// When true, `block_by_number` returns a `BlockNotFound` error.
     pub block_not_found: bool,
     /// If set, `header_by_number` returns a header with this hash.
     /// Used for reorg detection tests.
@@ -81,9 +90,19 @@ impl L2Provider for MockL2 {
     }
 }
 
-pub(crate) struct MockRollupClient {
+/// Mock rollup node client for tests.
+///
+/// When `max_safe_block` is set, `output_at_block` returns an error for any
+/// block number exceeding the limit, simulating a rollup node that hasn't
+/// reached that safe head yet.
+#[derive(Debug)]
+pub struct MockRollupClient {
+    /// The sync status returned by `sync_status()`.
     pub sync_status: SyncStatus,
-    pub output_roots: std::collections::HashMap<u64, B256>,
+    /// Map of block number to output root returned by `output_at_block()`.
+    pub output_roots: HashMap<u64, B256>,
+    /// When set, blocks beyond this number return an error.
+    pub max_safe_block: Option<u64>,
 }
 
 #[async_trait]
@@ -95,6 +114,13 @@ impl RollupProvider for MockRollupClient {
         Ok(self.sync_status.clone())
     }
     async fn output_at_block(&self, block_number: u64) -> RpcResult<OutputAtBlock> {
+        if let Some(max) = self.max_safe_block
+            && block_number > max
+        {
+            return Err(RpcError::BlockNotFound(format!(
+                "mock: block {block_number} beyond safe head {max}"
+            )));
+        }
         let root = self
             .output_roots
             .get(&block_number)
@@ -104,43 +130,49 @@ impl RollupProvider for MockRollupClient {
     }
 }
 
-/// Mock anchor state registry with configurable anchor root.
-pub(crate) struct MockAnchorStateRegistry {
+/// Mock anchor state registry contract client for tests.
+#[derive(Debug)]
+pub struct MockAnchorStateRegistry {
+    /// The anchor root returned by `get_anchor_root()`.
     pub anchor_root: AnchorRoot,
 }
 
 #[async_trait]
 impl AnchorStateRegistryClient for MockAnchorStateRegistry {
     async fn get_anchor_root(&self) -> Result<AnchorRoot, ContractError> {
-        Ok(self.anchor_root.clone())
+        Ok(self.anchor_root)
     }
 }
 
-/// Mock dispute game factory with configurable per-index game data.
+/// Mock dispute game factory contract client for tests.
 ///
-/// When `games` is empty, the factory reports `game_count_override` (defaulting
-/// to 0).  When `games` is populated, `game_count` returns the length of the
-/// vector and `game_at_index` returns the corresponding entry.
+/// `uuid_games` stores games keyed by `(game_type, root_claim, extra_data)` for
+/// the `games()` UUID-based lookup. When a key is not found, the lookup returns
+/// `Address::ZERO` (no game exists).
 ///
-/// `game_count_override` can be set to a value different from `games.len()` to
-/// simulate scenarios where new games appear between successive calls (e.g.
-/// caching tests).
-pub(crate) struct MockDisputeGameFactory {
+/// When `games_should_fail` is `true`, all `games()` calls return a
+/// `ContractError::Validation` to simulate RPC failures.
+#[derive(Debug)]
+pub struct MockDisputeGameFactory {
+    /// The list of games returned by `game_at_index()`.
     pub games: Vec<GameAtIndex>,
+    /// If set, overrides the game count returned by `game_count()`.
     pub game_count_override: Option<u64>,
+    /// UUID-keyed game proxy lookups for `games()`.
+    pub uuid_games: HashMap<(u32, B256, Bytes), Address>,
+    /// When true, all `games()` calls return an error.
+    pub games_should_fail: bool,
 }
 
 impl MockDisputeGameFactory {
-    /// Creates a factory with no games and the given game count.
-    ///
-    /// All `game_at_index` calls return a dummy game with `game_type = u32::MAX`.
-    pub(crate) fn with_count(game_count: u64) -> Self {
-        Self { games: Vec::new(), game_count_override: Some(game_count) }
-    }
-
-    /// Creates a factory backed by an explicit list of games.
-    pub(crate) fn with_games(games: Vec<GameAtIndex>) -> Self {
-        Self { games, game_count_override: None }
+    /// Creates a new mock with the given games and no count override.
+    pub fn with_games(games: Vec<GameAtIndex>) -> Self {
+        Self {
+            games,
+            game_count_override: None,
+            uuid_games: HashMap::new(),
+            games_should_fail: false,
+        }
     }
 }
 
@@ -150,9 +182,6 @@ impl DisputeGameFactoryClient for MockDisputeGameFactory {
         Ok(self.game_count_override.unwrap_or(self.games.len() as u64))
     }
     async fn game_at_index(&self, index: u64) -> Result<GameAtIndex, ContractError> {
-        if self.games.is_empty() {
-            return Ok(GameAtIndex { game_type: u32::MAX, timestamp: 0, proxy: Address::ZERO });
-        }
         self.games
             .get(index as usize)
             .copied()
@@ -164,43 +193,35 @@ impl DisputeGameFactoryClient for MockDisputeGameFactory {
     async fn game_impls(&self, _: u32) -> Result<Address, ContractError> {
         Ok(Address::ZERO)
     }
+    async fn games(
+        &self,
+        game_type: u32,
+        root_claim: B256,
+        extra_data: Bytes,
+    ) -> Result<Address, ContractError> {
+        if self.games_should_fail {
+            return Err(ContractError::Validation("mock: simulated games() RPC failure".into()));
+        }
+        let key = (game_type, root_claim, extra_data);
+        Ok(self.uuid_games.get(&key).copied().unwrap_or(Address::ZERO))
+    }
 }
 
-/// Mock aggregate verifier with configurable per-address game info.
-///
-/// When `game_info_map` is empty, all queries return a default `GameInfo`.
-/// When populated, `game_info` looks up the address in the map.
-///
-/// Addresses in `failing_addresses` will return a `ContractError::Validation`
-/// to simulate transient RPC failures.
-///
-/// `intermediate_roots_map` provides explicit intermediate output roots per
-/// game proxy. When not present, `intermediate_output_roots()` derives a
-/// default single-element vec from the game's `root_claim` (matching the
-/// contract behavior when `block_interval == intermediate_block_interval`).
-pub(crate) struct MockAggregateVerifier {
-    pub game_info_map: std::collections::HashMap<Address, GameInfo>,
-    pub failing_addresses: std::collections::HashSet<Address>,
-    pub intermediate_roots_map: std::collections::HashMap<Address, Vec<B256>>,
+/// Mock aggregate verifier contract client for tests.
+#[derive(Debug, Default)]
+pub struct MockAggregateVerifier {
+    /// Map of game address to game info returned by `game_info()`.
+    pub game_info_map: HashMap<Address, GameInfo>,
+    /// Addresses for which `game_info()` returns an error.
+    pub failing_addresses: HashSet<Address>,
+    /// Map of game address to intermediate output roots.
+    pub intermediate_roots_map: HashMap<Address, Vec<B256>>,
 }
 
 impl MockAggregateVerifier {
-    /// Creates a verifier that returns default values for all addresses.
-    pub(crate) fn empty() -> Self {
-        Self {
-            game_info_map: std::collections::HashMap::new(),
-            failing_addresses: std::collections::HashSet::new(),
-            intermediate_roots_map: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Creates a verifier backed by an explicit address-to-info map.
-    pub(crate) fn with_game_info(map: std::collections::HashMap<Address, GameInfo>) -> Self {
-        Self {
-            game_info_map: map,
-            failing_addresses: std::collections::HashSet::new(),
-            intermediate_roots_map: std::collections::HashMap::new(),
-        }
+    /// Creates a new mock with the given game info map.
+    pub fn with_game_info(map: HashMap<Address, GameInfo>) -> Self {
+        Self { game_info_map: map, ..Default::default() }
     }
 }
 
@@ -240,16 +261,24 @@ impl AggregateVerifierClient for MockAggregateVerifier {
         Ok(512)
     }
     async fn intermediate_output_roots(&self, addr: Address) -> Result<Vec<B256>, ContractError> {
-        // Explicit intermediate roots take priority.
         if let Some(roots) = self.intermediate_roots_map.get(&addr) {
             return Ok(roots.clone());
         }
-        // Default: derive from game info (single root = root_claim), matching
-        // the contract behavior when block_interval == intermediate_block_interval.
         if let Some(info) = self.game_info_map.get(&addr) {
             return Ok(vec![info.root_claim]);
         }
         Ok(vec![B256::ZERO])
+    }
+    async fn intermediate_output_root(
+        &self,
+        addr: Address,
+        index: u64,
+    ) -> Result<B256, ContractError> {
+        let roots = self.intermediate_output_roots(addr).await?;
+        Ok(roots
+            .get(index as usize)
+            .copied()
+            .expect("intermediate_output_root: index out of bounds"))
     }
     async fn countered_index(&self, _: Address) -> Result<u64, ContractError> {
         Ok(0)
@@ -283,11 +312,13 @@ impl AggregateVerifierClient for MockAggregateVerifier {
     }
 }
 
-pub(crate) fn test_l1_block_ref(number: u64) -> L1BlockRef {
+/// Creates a test [`L1BlockRef`] with the given block number.
+pub fn test_l1_block_ref(number: u64) -> L1BlockRef {
     L1BlockRef { hash: B256::ZERO, number, parent_hash: B256::ZERO, timestamp: 1_000_000 + number }
 }
 
-pub(crate) fn test_l2_block_ref(number: u64, hash: B256) -> L2BlockRef {
+/// Creates a test [`L2BlockRef`] with the given block number and hash.
+pub fn test_l2_block_ref(number: u64, hash: B256) -> L2BlockRef {
     L2BlockRef {
         hash,
         number,
@@ -298,35 +329,76 @@ pub(crate) fn test_l2_block_ref(number: u64, hash: B256) -> L2BlockRef {
     }
 }
 
-pub(crate) fn test_sync_status(safe_number: u64, safe_hash: B256) -> SyncStatus {
+/// Creates a test [`SyncStatus`] with the given safe block number and hash.
+pub fn test_sync_status(safe_number: u64, safe_hash: B256) -> SyncStatus {
     let l1 = test_l1_block_ref(100);
     let l2 = test_l2_block_ref(safe_number, safe_hash);
     SyncStatus {
-        current_l1: l1.clone(),
+        current_l1: l1,
         current_l1_finalized: None,
-        head_l1: l1.clone(),
-        safe_l1: l1.clone(),
+        head_l1: l1,
+        safe_l1: l1,
         finalized_l1: l1,
-        unsafe_l2: l2.clone(),
-        safe_l2: l2.clone(),
+        unsafe_l2: l2,
+        safe_l2: l2,
         finalized_l2: l2,
         pending_safe_l2: None,
     }
 }
 
-pub(crate) fn test_anchor_root(block_number: u64) -> AnchorRoot {
+/// Creates a test [`AnchorRoot`] with the given L2 block number.
+pub fn test_anchor_root(block_number: u64) -> AnchorRoot {
     AnchorRoot { root: B256::ZERO, l2_block_number: block_number }
 }
 
-/// Mock output proposer that does nothing (returns `Ok(())`).
-pub(crate) struct MockOutputProposer;
+/// Creates a test [`Proposal`] with the given L2 block number.
+pub fn test_proposal(block_number: u64) -> Proposal {
+    Proposal {
+        output_root: B256::repeat_byte(block_number as u8),
+        signature: Bytes::from_static(&[0xab; 65]),
+        l1_origin_hash: B256::repeat_byte(0x02),
+        l1_origin_number: 100 + block_number,
+        l2_block_number: block_number,
+        prev_output_root: B256::repeat_byte(0x03),
+        config_hash: B256::repeat_byte(0x04),
+    }
+}
+
+/// Mock prover client for tests.
+#[derive(Debug)]
+pub struct MockProver {
+    /// Simulated proving delay.
+    pub delay: Duration,
+    /// Block interval used to generate intermediate proposals.
+    pub block_interval: u64,
+}
+
+#[async_trait]
+impl ProverClient for MockProver {
+    async fn prove(
+        &self,
+        request: base_proof_primitives::ProofRequest,
+    ) -> Result<ProofResult, Box<dyn std::error::Error + Send + Sync>> {
+        tokio::time::sleep(self.delay).await;
+
+        let block_number = request.claimed_l2_block_number;
+
+        let start = block_number.saturating_sub(self.block_interval);
+        let proposals: Vec<Proposal> = ((start + 1)..=block_number).map(test_proposal).collect();
+
+        Ok(ProofResult::Tee { aggregate_proposal: test_proposal(block_number), proposals })
+    }
+}
+
+/// Mock output proposer that always succeeds.
+#[derive(Debug)]
+pub struct MockOutputProposer;
 
 #[async_trait]
 impl OutputProposer for MockOutputProposer {
     async fn propose_output(
         &self,
         _proposal: &Proposal,
-        _l2_block_number: u64,
         _parent_address: Address,
         _intermediate_roots: &[B256],
     ) -> Result<(), ProposerError> {

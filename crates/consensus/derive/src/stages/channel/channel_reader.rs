@@ -6,7 +6,7 @@ use core::fmt::Debug;
 use alloy_eips::BlockNumHash;
 use alloy_primitives::Bytes;
 use async_trait::async_trait;
-use base_consensus_genesis::{RollupConfig, SystemConfig};
+use base_common_genesis::{RollupConfig, SystemConfig};
 use base_protocol::{Batch, BatchReader, BlockInfo};
 use tracing::{debug, warn};
 
@@ -102,7 +102,7 @@ where
     /// This method is called by the `BatchStream` if an invalid span batch is found.
     /// In the case of an invalid span batch, the associated channel must be flushed.
     ///
-    /// See: <https://specs.optimism.io/protocol/holocene/derivation.html#span-batches>
+    /// See: <https://specs.base.org/upgrades/holocene/derivation#span-batches>
     ///
     /// SAFETY: Only called post-holocene activation.
     fn flush(&mut self) {
@@ -196,7 +196,7 @@ mod tests {
     use alloc::vec;
 
     use alloy_eips::BlockNumHash;
-    use base_consensus_genesis::{HardForkConfig, SystemConfig};
+    use base_common_genesis::{HardForkConfig, SystemConfig};
 
     use super::*;
     use crate::{errors::PipelineErrorKind, test_utils::TestChannelReaderProvider};

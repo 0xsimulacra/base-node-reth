@@ -10,15 +10,14 @@ mod tests {
 
     use alloy_consensus::{Block, BlockBody, Header, SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, Signature, StorageKey, StorageValue, U256, b256};
-    use base_alloy_consensus::{OpReceipt, OpTransactionSigned, TxDeposit};
+    use base_common_consensus::{BaseReceipt, BaseTransactionSigned, Predeploys, TxDeposit};
     use base_execution_chainspec::{BaseChainSpec, BaseChainSpecBuilder};
-    use base_revm::L1_BLOCK_CONTRACT;
     use reth_chainspec::MIN_TRANSACTION_GAS;
     use reth_evm::execute::{BasicBlockExecutor, Executor};
     use reth_primitives_traits::{Account, RecoveredBlock};
     use reth_revm::{database::StateProviderDatabase, test_utils::StateProviderTest};
 
-    use crate::{BaseEvmConfig, OpRethReceiptBuilder};
+    use crate::{BaseEvmConfig, BaseRethReceiptBuilder};
 
     fn create_op_state_provider() -> StateProviderTest {
         let mut db = StateProviderTest::default();
@@ -42,17 +41,22 @@ mod tests {
             .unwrap(),
         );
 
-        db.insert_account(L1_BLOCK_CONTRACT, l1_block_contract_account, None, l1_block_storage);
+        db.insert_account(
+            Predeploys::L1_BLOCK_INFO,
+            l1_block_contract_account,
+            None,
+            l1_block_storage,
+        );
 
         db
     }
 
     fn evm_config(chain_spec: Arc<BaseChainSpec>) -> BaseEvmConfig {
-        BaseEvmConfig::new(chain_spec, OpRethReceiptBuilder::default())
+        BaseEvmConfig::new(chain_spec, BaseRethReceiptBuilder::default())
     }
 
     #[test]
-    fn op_deposit_fields_pre_canyon() {
+    fn base_deposit_fields_pre_canyon() {
         let header = Header {
             timestamp: 1,
             number: 1,
@@ -73,7 +77,7 @@ mod tests {
         let chain_spec =
             Arc::new(BaseChainSpecBuilder::base_mainnet().regolith_activated().build());
 
-        let tx: OpTransactionSigned = TxEip1559 {
+        let tx: BaseTransactionSigned = TxEip1559 {
             chain_id: chain_spec.chain.id(),
             nonce: 0,
             gas_limit: MIN_TRANSACTION_GAS,
@@ -83,7 +87,7 @@ mod tests {
         .into_signed(Signature::test_signature())
         .into();
 
-        let tx_deposit: OpTransactionSigned = TxDeposit {
+        let tx_deposit: BaseTransactionSigned = TxDeposit {
             from: addr,
             to: addr.into(),
             gas_limit: MIN_TRANSACTION_GAS,
@@ -96,7 +100,7 @@ mod tests {
 
         // make sure the L1 block contract state is preloaded.
         executor.with_state_mut(|state| {
-            state.load_cache_account(L1_BLOCK_CONTRACT).unwrap();
+            state.load_cache_account(Predeploys::L1_BLOCK_INFO).unwrap();
         });
 
         // Attempt to execute a block with one deposit and one non-deposit transaction
@@ -114,9 +118,9 @@ mod tests {
         let tx_receipt = &receipts[0];
         let deposit_receipt = &receipts[1];
 
-        assert!(!matches!(tx_receipt, OpReceipt::Deposit(_)));
+        assert!(!matches!(tx_receipt, BaseReceipt::Deposit(_)));
         // deposit_nonce is present only in deposit transactions
-        let OpReceipt::Deposit(deposit_receipt) = deposit_receipt else {
+        let BaseReceipt::Deposit(deposit_receipt) = deposit_receipt else {
             panic!("expected deposit")
         };
         assert!(deposit_receipt.deposit_nonce.is_some());
@@ -125,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn op_deposit_fields_post_canyon() {
+    fn base_deposit_fields_post_canyon() {
         // ensure_create2_deployer will fail if timestamp is set to less than 2
         let header = Header {
             timestamp: 2,
@@ -146,7 +150,7 @@ mod tests {
 
         let chain_spec = Arc::new(BaseChainSpecBuilder::base_mainnet().canyon_activated().build());
 
-        let tx: OpTransactionSigned = TxEip1559 {
+        let tx: BaseTransactionSigned = TxEip1559 {
             chain_id: chain_spec.chain.id(),
             nonce: 0,
             gas_limit: MIN_TRANSACTION_GAS,
@@ -156,7 +160,7 @@ mod tests {
         .into_signed(Signature::test_signature())
         .into();
 
-        let tx_deposit: OpTransactionSigned = TxDeposit {
+        let tx_deposit: BaseTransactionSigned = TxDeposit {
             from: addr,
             to: addr.into(),
             gas_limit: MIN_TRANSACTION_GAS,
@@ -169,7 +173,7 @@ mod tests {
 
         // make sure the L1 block contract state is preloaded.
         executor.with_state_mut(|state| {
-            state.load_cache_account(L1_BLOCK_CONTRACT).unwrap();
+            state.load_cache_account(Predeploys::L1_BLOCK_INFO).unwrap();
         });
 
         // attempt to execute an empty block with parent beacon block root, this should not fail
@@ -188,8 +192,8 @@ mod tests {
         let deposit_receipt = &receipts[1];
 
         // deposit_receipt_version is set to 1 for post canyon deposit transactions
-        assert!(!matches!(tx_receipt, OpReceipt::Deposit(_)));
-        let OpReceipt::Deposit(deposit_receipt) = deposit_receipt else {
+        assert!(!matches!(tx_receipt, BaseReceipt::Deposit(_)));
+        let BaseReceipt::Deposit(deposit_receipt) = deposit_receipt else {
             panic!("expected deposit")
         };
         assert_eq!(deposit_receipt.deposit_receipt_version, Some(1));

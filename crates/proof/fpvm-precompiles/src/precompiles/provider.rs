@@ -3,8 +3,8 @@
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use alloy_primitives::{Address, Bytes};
+use base_common_evm::{BasePrecompiles, OpSpecId};
 use base_proof_preimage::{HintWriterClient, PreimageOracleClient};
-use base_revm::{BasePrecompiles, OpSpecId};
 use revm::{
     context::{Cfg, ContextTr, LocalContextTr},
     handler::{EthPrecompiles, PrecompileProvider},
@@ -17,7 +17,7 @@ use super::{ecrecover::ECRECOVER_ADDR, kzg_point_eval::KZG_POINT_EVAL_ADDR};
 
 /// The FPVM-accelerated precompiles.
 #[derive(Debug)]
-pub struct OpFpvmPrecompiles<H, O> {
+pub struct FpvmPrecompiles<H, O> {
     /// The default [`EthPrecompiles`] provider.
     inner: EthPrecompiles,
     /// The accelerated precompiles for the current [`OpSpecId`].
@@ -30,7 +30,7 @@ pub struct OpFpvmPrecompiles<H, O> {
     oracle_reader: O,
 }
 
-impl<H, O> OpFpvmPrecompiles<H, O>
+impl<H, O> FpvmPrecompiles<H, O>
 where
     H: HintWriterClient + Clone + Send + Sync + 'static,
     O: PreimageOracleClient + Clone + Send + Sync + 'static,
@@ -52,7 +52,7 @@ where
             OpSpecId::GRANITE | OpSpecId::HOLOCENE => BasePrecompiles::granite(),
             OpSpecId::ISTHMUS => BasePrecompiles::isthmus(),
             OpSpecId::JOVIAN => BasePrecompiles::jovian(),
-            OpSpecId::BASE_V1 => BasePrecompiles::base_v1(),
+            OpSpecId::AZUL => BasePrecompiles::azul(),
         };
 
         let accelerated_precompiles = match spec {
@@ -62,7 +62,7 @@ where
             OpSpecId::ECOTONE | OpSpecId::FJORD => accelerated_ecotone::<H, O>(),
             OpSpecId::GRANITE | OpSpecId::HOLOCENE => accelerated_granite::<H, O>(),
             OpSpecId::ISTHMUS => accelerated_isthmus::<H, O>(),
-            OpSpecId::JOVIAN | OpSpecId::BASE_V1 => accelerated_jovian::<H, O>(),
+            OpSpecId::JOVIAN | OpSpecId::AZUL => accelerated_jovian::<H, O>(),
         };
 
         Self {
@@ -78,7 +78,7 @@ where
     }
 }
 
-impl<CTX, H, O> PrecompileProvider<CTX> for OpFpvmPrecompiles<H, O>
+impl<CTX, H, O> PrecompileProvider<CTX> for FpvmPrecompiles<H, O>
 where
     H: HintWriterClient + Clone + Send + Sync + 'static,
     O: PreimageOracleClient + Clone + Send + Sync + 'static,
@@ -297,8 +297,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use base_common_evm::OpSpecId;
     use base_proof_preimage::{BidirectionalChannel, HintWriter, NativeChannel, OracleReader};
-    use base_revm::OpSpecId;
     use revm::precompile::modexp;
 
     use super::*;
@@ -326,22 +326,22 @@ mod tests {
     }
 
     #[test]
-    fn test_jovian_and_base_v1_use_different_precompile_sets() {
+    fn test_jovian_and_azul_use_different_precompile_sets() {
         let (hw, or_) = make_hw_or();
-        let jovian = OpFpvmPrecompiles::new_with_spec(OpSpecId::JOVIAN, hw.clone(), or_.clone());
-        let base_v1 = OpFpvmPrecompiles::new_with_spec(OpSpecId::BASE_V1, hw, or_);
+        let jovian = FpvmPrecompiles::new_with_spec(OpSpecId::JOVIAN, hw.clone(), or_.clone());
+        let azul = FpvmPrecompiles::new_with_spec(OpSpecId::AZUL, hw, or_);
 
         assert!(
-            !core::ptr::eq(jovian.precompiles(), base_v1.precompiles()),
-            "JOVIAN and BASE_V1 must resolve to different static precompile sets",
+            !core::ptr::eq(jovian.precompiles(), azul.precompiles()),
+            "JOVIAN and AZUL must resolve to different static precompile sets",
         );
     }
 
     #[test]
-    fn test_base_v1_modexp_enforces_eip7823_size_limit() {
+    fn test_azul_modexp_enforces_eip7823_size_limit() {
         let (hw, or_) = make_hw_or();
-        let jovian = OpFpvmPrecompiles::new_with_spec(OpSpecId::JOVIAN, hw.clone(), or_.clone());
-        let base_v1 = OpFpvmPrecompiles::new_with_spec(OpSpecId::BASE_V1, hw, or_);
+        let jovian = FpvmPrecompiles::new_with_spec(OpSpecId::JOVIAN, hw.clone(), or_.clone());
+        let azul = FpvmPrecompiles::new_with_spec(OpSpecId::AZUL, hw, or_);
 
         let modexp_berlin = modexp::BERLIN;
         let addr = modexp_berlin.address();
@@ -352,8 +352,8 @@ mod tests {
             "JOVIAN MODEXP must accept oversized input (Berlin pricing, no EIP-7823 limit)",
         );
         assert!(
-            base_v1.precompiles().get(addr).unwrap().execute(&input, u64::MAX).is_err(),
-            "BASE_V1 MODEXP must reject oversized input (Osaka pricing, EIP-7823 limit)",
+            azul.precompiles().get(addr).unwrap().execute(&input, u64::MAX).is_err(),
+            "AZUL MODEXP must reject oversized input (Osaka pricing, EIP-7823 limit)",
         );
     }
 }

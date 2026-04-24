@@ -1,7 +1,7 @@
 use core::fmt::Debug;
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_consensus::{Eip658Value, Transaction};
@@ -10,16 +10,18 @@ use alloy_evm::Database;
 use alloy_primitives::{B256, BlockHash, Bytes, TxHash, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use base_access_lists::FBALBuilderDb;
-use base_alloy_chains::BaseUpgrades;
-use base_alloy_consensus::{OpDepositReceipt, OpReceipt, OpTransactionSigned, OpTxType};
-use base_alloy_evm::OpReceiptBuilder;
+use base_bundles::{MeterBundleResponse, RejectedTransaction, RejectionReason};
+use base_common_chains::Upgrades;
+use base_common_consensus::{BaseReceipt, BaseTransactionSigned, DepositReceipt, OpTxType};
+use base_common_evm::{BaseReceiptBuilder, L1BlockInfo, OpSpecId};
 use base_execution_chainspec::BaseChainSpec;
-use base_execution_evm::{BaseEvmConfig, OpNextBlockEnvAttributes};
-use base_execution_payload_builder::{OpPayloadBuilderAttributes, error::BasePayloadBuilderError};
+use base_execution_evm::{BaseEvmConfig, BaseNextBlockEnvAttributes};
+use base_execution_payload_builder::{
+    BasePayloadBuilderAttributes, error::BasePayloadBuilderError,
+};
 use base_execution_txpool::{
     BundleTransaction, TimestampedTransaction, estimated_da_size::DataAvailabilitySized,
 };
-use base_revm::{L1BlockInfo, OpSpecId};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -33,6 +35,7 @@ use reth_primitives_traits::{InMemorySize, SignedTransaction};
 use reth_revm::{State, context::Block};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
@@ -274,26 +277,28 @@ impl FlashblocksExtraCtx {
 
 /// Container type that holds all the necessities to build a new payload.
 #[derive(Debug)]
-pub struct OpPayloadBuilderCtx {
+pub struct BasePayloadBuilderCtx {
     /// The type that knows how to perform system calls and configure the evm.
     pub evm_config: BaseEvmConfig,
     /// The chainspec
     pub chain_spec: Arc<BaseChainSpec>,
     /// How to build the payload.
-    pub config: PayloadConfig<OpPayloadBuilderAttributes<OpTransactionSigned>>,
+    pub config: PayloadConfig<BasePayloadBuilderAttributes<BaseTransactionSigned>>,
     /// Evm Settings
     pub evm_env: EvmEnv<OpSpecId>,
     /// Block env attributes for the current block.
-    pub block_env_attributes: OpNextBlockEnvAttributes,
+    pub block_env_attributes: BaseNextBlockEnvAttributes,
     /// Marker to check whether the job has been cancelled.
     pub cancel: CancellationToken,
     /// Extra context for the payload builder
     pub extra: FlashblocksExtraCtx,
     /// Builder configuration containing limits and metering settings.
     pub builder_config: BuilderConfig,
+    /// Sender for forwarding per-block batches of rejected transactions to the audit-archiver.
+    pub rejected_tx_sender: Option<mpsc::Sender<Vec<RejectedTransaction>>>,
 }
 
-impl OpPayloadBuilderCtx {
+impl BasePayloadBuilderCtx {
     pub(super) fn with_cancel(self, cancel: CancellationToken) -> Self {
         Self { cancel, ..self }
     }
@@ -326,7 +331,7 @@ impl OpPayloadBuilderCtx {
     }
 
     /// Returns the builder attributes.
-    pub(super) const fn attributes(&self) -> &OpPayloadBuilderAttributes<OpTransactionSigned> {
+    pub(super) const fn attributes(&self) -> &BasePayloadBuilderAttributes<BaseTransactionSigned> {
         &self.config.attributes
     }
 
@@ -446,15 +451,63 @@ impl OpPayloadBuilderCtx {
     pub fn chain_id(&self) -> u64 {
         self.chain_spec.chain_id()
     }
+
+    fn record_rejected_tx(
+        &self,
+        info: &mut ExecutionInfo,
+        tx_hash: TxHash,
+        reason: RejectionReason,
+        metering: MeterBundleResponse,
+    ) {
+        if self.rejected_tx_sender.is_none() {
+            return;
+        }
+
+        if info.rejected_txs.len() >= self.builder_config.max_rejected_txs_per_block {
+            BuilderMetrics::rejected_tx_per_block_drops().increment(1);
+            return;
+        }
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        info.rejected_txs.push(RejectedTransaction {
+            tx_hash,
+            block_number: self.block_number(),
+            reason,
+            timestamp: now,
+            metering,
+        });
+    }
+
+    /// Flushes all accumulated rejected transactions to the audit-archiver channel
+    /// as a single per-block batch.
+    pub fn flush_rejected_txs(&self, info: &mut ExecutionInfo) {
+        if info.rejected_txs.is_empty() {
+            return;
+        }
+
+        if let Some(sender) = &self.rejected_tx_sender {
+            let batch = std::mem::take(&mut info.rejected_txs);
+            let batch_size = batch.len();
+            if let Err(e) = sender.try_send(batch) {
+                BuilderMetrics::rejected_tx_channel_drops().increment(batch_size as u64);
+                warn!(
+                    target: "payload_builder",
+                    error = %e,
+                    batch_size,
+                    "Rejected tx channel full or closed, dropping batch"
+                );
+            }
+        }
+    }
 }
 
-impl OpPayloadBuilderCtx {
+impl BasePayloadBuilderCtx {
     /// Constructs a receipt for the given transaction.
     pub fn build_receipt<E: Evm>(
         &self,
         ctx: ReceiptBuilderCtx<'_, OpTxType, E>,
         deposit_nonce: Option<u64>,
-    ) -> OpReceipt {
+    ) -> BaseReceipt {
         let receipt_builder = self.evm_config.block_executor_factory().receipt_builder();
         match receipt_builder.build_receipt(ctx) {
             Ok(receipt) => receipt,
@@ -467,7 +520,7 @@ impl OpPayloadBuilderCtx {
                     logs: ctx.result.into_logs(),
                 };
 
-                receipt_builder.build_deposit_receipt(OpDepositReceipt {
+                receipt_builder.build_deposit_receipt(DepositReceipt {
                     inner: receipt,
                     deposit_nonce,
                     // The deposit receipt version was introduced in Canyon to indicate an
@@ -545,7 +598,7 @@ impl OpPayloadBuilderCtx {
             info.cumulative_gas_used += gas_used;
 
             if !sequencer_tx.is_deposit() {
-                info.cumulative_da_bytes_used += base_alloy_flz::tx_estimated_size_fjord_bytes(
+                info.cumulative_da_bytes_used += base_common_flz::tx_estimated_size_fjord_bytes(
                     sequencer_tx.encoded_2718().as_slice(),
                 );
                 info.cumulative_uncompressed_bytes += sequencer_tx.encode_2718_len() as u64;
@@ -705,6 +758,7 @@ impl OpPayloadBuilderCtx {
                 if tx_age_ms < wait_duration.as_millis() {
                     log_txn(Err(TxnExecutionError::MeteringDataPending));
                     BuilderMetrics::metering_data_pending_skip().increment(1);
+                    self.builder_config.metering_provider.skip(&tx_hash);
                     best_txs.mark_invalid(tx.signer(), tx.nonce());
                     continue;
                 }
@@ -768,6 +822,24 @@ impl OpPayloadBuilderCtx {
                         if err.is_permanent() {
                             diag.permanently_rejected_txs.push(tx_hash);
                         }
+
+                        if let ExecutionMeteringLimitExceeded::TransactionExecutionTime(
+                            tx_time_us,
+                            limit_us,
+                        ) = limit_err
+                        {
+                            // Only record per-tx execution time limits for the audit trail for now
+                            self.record_rejected_tx(
+                                info,
+                                tx_hash,
+                                RejectionReason::ExecutionTimeExceeded {
+                                    tx_time_us: *tx_time_us,
+                                    limit_us: *limit_us,
+                                },
+                                resource_usage.unwrap_or_default(),
+                            );
+                        }
+
                         log_txn(Err(err));
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
                         continue;
@@ -949,6 +1021,14 @@ impl OpPayloadBuilderCtx {
             let fee_u64 = miner_fee.min(u64::MAX as u128) as u64;
             diag.min_priority_fee = Some(diag.min_priority_fee.map_or(fee_u64, |m| m.min(fee_u64)));
 
+            // Record metering hit/miss only for committed transactions so the
+            // metric reflects actual payload inclusion, not speculative lookups.
+            if self.builder_config.metering_provider.is_enabled() && resource_usage.is_some() {
+                BuilderMetrics::metering_known_transaction().increment(1);
+            } else {
+                BuilderMetrics::metering_unknown_transaction().increment(1);
+            }
+
             // append sender and transaction to the respective lists
             // and increment the next txn index for the access list
             info.executed_senders.push(tx.signer());
@@ -1033,16 +1113,16 @@ impl OpPayloadBuilderCtx {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl OpPayloadBuilderCtx {
-    /// Creates a minimal [`OpPayloadBuilderCtx`] for unit tests.
+impl BasePayloadBuilderCtx {
+    /// Creates a minimal [`BasePayloadBuilderCtx`] for unit tests.
     ///
     /// Derives the EVM environment from the given chain spec and parent header,
     /// using default builder attributes and a no-op cancellation token.
     pub fn for_test(chain_spec: Arc<BaseChainSpec>, parent: Arc<SealedHeader>) -> Self {
-        let evm_config = BaseEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
         let timestamp = parent.timestamp + 2;
 
-        let attributes = OpPayloadBuilderAttributes {
+        let attributes = BasePayloadBuilderAttributes {
             payload_attributes: reth_payload_builder::EthPayloadBuilderAttributes {
                 id: PayloadId::new([0; 8]),
                 parent: parent.hash(),
@@ -1054,7 +1134,7 @@ impl OpPayloadBuilderCtx {
             ..Default::default()
         };
 
-        let block_env_attributes = OpNextBlockEnvAttributes {
+        let block_env_attributes = BaseNextBlockEnvAttributes {
             timestamp,
             suggested_fee_recipient: Default::default(),
             prev_randao: Default::default(),
@@ -1078,6 +1158,7 @@ impl OpPayloadBuilderCtx {
             cancel: CancellationToken::new(),
             extra: FlashblocksExtraCtx::default(),
             builder_config: crate::BuilderConfig::default(),
+            rejected_tx_sender: None,
         }
     }
 }

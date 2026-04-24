@@ -11,23 +11,23 @@ use alloy_evm::{
 use alloy_network::TxSigner;
 use alloy_primitives::{Address, Bytes};
 use alloy_signer::Signature;
-use base_alloy_consensus::{OpTransaction, OpTransactionInfo, OpTxEnvelope};
-use base_revm::OpTransaction as OpRevm;
+use base_common_consensus::{BaseTransactionInfo, BaseTxEnvelope};
+use base_common_evm::BaseTransaction as BaseRevm;
 use reth_rpc_convert::{
     SignTxRequestError, SignableTxRequest, TryIntoSimTx, transaction::FromConsensusTx,
 };
 use revm::context::TxEnv;
 
-use crate::{OpTransactionRequest, Transaction};
+use crate::{BaseTransactionRequest, Transaction};
 
-impl<T: OpTransaction + alloy_consensus::Transaction> FromConsensusTx<T> for Transaction<T> {
-    type TxInfo = OpTransactionInfo;
+impl FromConsensusTx<BaseTxEnvelope> for Transaction {
+    type TxInfo = BaseTransactionInfo;
     type Err = Infallible;
 
     fn from_consensus_tx(
-        tx: T,
+        tx: BaseTxEnvelope,
         signer: Address,
-        tx_info: OpTransactionInfo,
+        tx_info: BaseTransactionInfo,
     ) -> Result<Self, Infallible> {
         Ok(Self::from_transaction(
             alloy_consensus::transaction::Recovered::new_unchecked(tx, signer),
@@ -36,14 +36,14 @@ impl<T: OpTransaction + alloy_consensus::Transaction> FromConsensusTx<T> for Tra
     }
 }
 
-impl<Block: BlockEnvironment> TryIntoTxEnv<OpRevm<TxEnv>, Block> for OpTransactionRequest {
+impl<Block: BlockEnvironment> TryIntoTxEnv<BaseRevm<TxEnv>, Block> for BaseTransactionRequest {
     type Err = EthTxEnvError;
 
     fn try_into_tx_env<Spec>(
         self,
         evm_env: &EvmEnv<Spec, Block>,
-    ) -> Result<OpRevm<TxEnv>, Self::Err> {
-        Ok(OpRevm {
+    ) -> Result<BaseRevm<TxEnv>, Self::Err> {
+        Ok(BaseRevm {
             base: self.as_ref().clone().try_into_tx_env(evm_env)?,
             enveloped_tx: Some(Bytes::new()),
             deposit: Default::default(),
@@ -51,8 +51,8 @@ impl<Block: BlockEnvironment> TryIntoTxEnv<OpRevm<TxEnv>, Block> for OpTransacti
     }
 }
 
-impl TryIntoSimTx<OpTxEnvelope> for OpTransactionRequest {
-    fn try_into_sim_tx(self) -> Result<OpTxEnvelope, ValueError<Self>> {
+impl TryIntoSimTx<BaseTxEnvelope> for BaseTransactionRequest {
+    fn try_into_sim_tx(self) -> Result<BaseTxEnvelope, ValueError<Self>> {
         let tx = self
             .build_typed_tx()
             .map_err(|request| ValueError::new(request, "Required fields missing"))?;
@@ -64,11 +64,11 @@ impl TryIntoSimTx<OpTxEnvelope> for OpTransactionRequest {
     }
 }
 
-impl SignableTxRequest<OpTxEnvelope> for OpTransactionRequest {
+impl SignableTxRequest<BaseTxEnvelope> for BaseTransactionRequest {
     async fn try_build_and_sign(
         self,
         signer: impl TxSigner<Signature> + Send,
-    ) -> Result<OpTxEnvelope, SignTxRequestError> {
+    ) -> Result<BaseTxEnvelope, SignTxRequestError> {
         let mut tx =
             self.build_typed_tx().map_err(|_| SignTxRequestError::InvalidTransactionRequest)?;
 

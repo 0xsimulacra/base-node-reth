@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B64, B256};
-use base_alloy_rpc_types_engine::OpPayloadAttributes;
+use base_common_rpc_types_engine::BasePayloadAttributes;
 use base_execution_chainspec::{BASE_MAINNET, BaseChainSpecBuilder};
-use base_node_core::{BaseNode, OpEngineTypes};
+use base_node_core::{BaseEngineTypes, BaseNode};
 use eyre::Result;
 use reth_e2e_test_utils::testsuite::{
     TestBuilder,
@@ -28,12 +28,12 @@ async fn test_testsuite_op_assert_mine_block() -> Result<()> {
         .with_network(NetworkSetup::single_node());
 
     let test =
-        TestBuilder::new().with_setup(setup).with_action(AssertMineBlock::<OpEngineTypes>::new(
+        TestBuilder::new().with_setup(setup).with_action(AssertMineBlock::<BaseEngineTypes>::new(
             0,
             vec![],
             Some(B256::ZERO),
             // TODO: refactor once we have actions to generate payload attributes.
-            OpPayloadAttributes {
+            BasePayloadAttributes {
                 payload_attributes: alloy_rpc_types_engine::PayloadAttributes {
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -73,12 +73,12 @@ async fn test_testsuite_op_assert_mine_block_isthmus_activated() -> Result<()> {
         .with_network(NetworkSetup::single_node());
 
     let test =
-        TestBuilder::new().with_setup(setup).with_action(AssertMineBlock::<OpEngineTypes>::new(
+        TestBuilder::new().with_setup(setup).with_action(AssertMineBlock::<BaseEngineTypes>::new(
             0,
             vec![],
             Some(B256::ZERO),
             // TODO: refactor once we have actions to generate payload attributes.
-            OpPayloadAttributes {
+            BasePayloadAttributes {
                 payload_attributes: alloy_rpc_types_engine::PayloadAttributes {
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

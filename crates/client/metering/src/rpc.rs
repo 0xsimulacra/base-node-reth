@@ -8,13 +8,13 @@ use std::sync::{
 use alloy_consensus::{BlockHeader, Header, Sealed};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{B256, TxHash, U256};
-use base_alloy_consensus::BaseBlock;
-use base_alloy_flz::flz_compress_len;
 use base_bundles::{Bundle, MeterBundleResponse, ParsedBundle};
+use base_common_consensus::BaseBlock;
+use base_common_evm::L1BlockInfo;
+use base_common_flz::flz_compress_len;
 use base_execution_chainspec::BaseChainSpec;
 use base_execution_evm::extract_l1_info_from_tx;
 use base_flashblocks::{FlashblocksAPI, PendingBlocksAPI};
-use base_revm::L1BlockInfo;
 use jsonrpsee::core::{RpcResult, async_trait};
 use parking_lot::RwLock;
 use reth_primitives_traits::SealedHeader;
@@ -26,7 +26,9 @@ use tracing::{debug, error, info, warn};
 use crate::{
     MeterBlockResponse, MeteredPriorityFeeResponse, PendingState, PendingStateRootTimes,
     PendingTrieCache, PriorityFeeEstimator, ResourceDemand, ResourceFeeEstimateResponse,
-    block::meter_block, meter::meter_bundle, traits::MeteringApiServer,
+    block::meter_block,
+    meter::{MeterBundleInput, meter_bundle},
+    traits::MeteringApiServer,
 };
 
 /// Implementation of the metering RPC API.
@@ -42,6 +44,9 @@ pub struct MeteringApiImpl<Provider, FB> {
     state_root_cache: Option<Arc<RwLock<PendingStateRootTimes>>>,
     /// Whether metering data collection is enabled.
     metering_enabled: Arc<AtomicBool>,
+    /// Opcodes and precompiles to track for gas metering. When non-empty, a
+    /// `MeteringInspector` is attached during bundle execution.
+    metered_opcodes: Arc<crate::MeteredOpcodes>,
 }
 
 impl<Provider, FB> std::fmt::Debug for MeteringApiImpl<Provider, FB> {
@@ -63,7 +68,11 @@ where
     FB: FlashblocksAPI,
 {
     /// Creates a new instance of `MeteringApi` without priority fee estimation.
-    pub fn new(provider: Provider, flashblocks_api: Arc<FB>) -> Self {
+    pub fn new(
+        provider: Provider,
+        flashblocks_api: Arc<FB>,
+        metered_opcodes: Arc<crate::MeteredOpcodes>,
+    ) -> Self {
         Self {
             provider,
             flashblocks_api,
@@ -71,6 +80,7 @@ where
             priority_fee_estimator: None,
             state_root_cache: None,
             metering_enabled: Arc::new(AtomicBool::new(true)),
+            metered_opcodes,
         }
     }
 
@@ -80,6 +90,7 @@ where
         flashblocks_api: Arc<FB>,
         estimator: Arc<PriorityFeeEstimator>,
         state_root_cache: Arc<RwLock<PendingStateRootTimes>>,
+        metered_opcodes: Arc<crate::MeteredOpcodes>,
     ) -> Self {
         Self {
             provider,
@@ -88,6 +99,7 @@ where
             priority_fee_estimator: Some(estimator),
             state_root_cache: Some(state_root_cache),
             metering_enabled: Arc::new(AtomicBool::new(true)),
+            metered_opcodes,
         }
     }
 }
@@ -221,15 +233,16 @@ where
         let l1_block_info = self.get_l1_block_info(canonical_block_number)?;
 
         // Meter bundle using utility function
-        let output = meter_bundle(
+        let output = meter_bundle(MeterBundleInput {
             state_provider,
-            self.provider.chain_spec(),
-            parsed_bundle,
-            &header,
+            chain_spec: self.provider.chain_spec(),
+            bundle: parsed_bundle,
+            header: header.clone(),
             parent_beacon_block_root,
             pending_state,
             l1_block_info,
-        )
+            metered_opcodes: Arc::clone(&self.metered_opcodes),
+        })
         .map_err(|e| {
             // Sample error msg:
             // Transaction $TX_HASH execution failed: EVM reported invalid transaction ($TX_HASH): nonce $EXPECTED_NONCE too high, expected $EXPECTED_NONCE"
@@ -279,8 +292,10 @@ where
             total_gas_used: output.total_gas_used,
             total_execution_time_us,
             state_root_time_us: output.state_root_time_us,
-            state_root_account_node_count: output.state_root_account_node_count,
-            state_root_storage_node_count: output.state_root_storage_node_count,
+            state_root_account_leaf_count: output.state_root_account_leaf_count,
+            state_root_account_branch_count: output.state_root_account_branch_count,
+            state_root_storage_leaf_count: output.state_root_storage_leaf_count,
+            state_root_storage_branch_count: output.state_root_storage_branch_count,
         })
     }
 
@@ -604,11 +619,11 @@ mod tests {
     use alloy_eips::Encodable2718;
     use alloy_primitives::{B256, Bloom, Bytes, address};
     use alloy_rpc_client::RpcClient;
-    use base_alloy_consensus::{OpTransactionSigned, OpTxEnvelope};
-    use base_alloy_flashblocks::{
+    use base_bundles::{Bundle, MeterBundleResponse};
+    use base_common_consensus::{BaseTransactionSigned, BaseTxEnvelope};
+    use base_common_flashblocks::{
         ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
     };
-    use base_bundles::{Bundle, MeterBundleResponse};
     use base_flashblocks::{FlashblocksConfig, PendingBlocksBuilder};
     use base_node_runner::test_utils::TestHarness;
     use base_test_utils::Account;
@@ -702,8 +717,8 @@ mod tests {
             .into_eip1559();
 
         let signed_tx =
-            OpTransactionSigned::Eip1559(tx.as_eip1559().expect("eip1559 transaction").clone());
-        let envelope: OpTxEnvelope = signed_tx;
+            BaseTransactionSigned::Eip1559(tx.as_eip1559().expect("eip1559 transaction").clone());
+        let envelope: BaseTxEnvelope = signed_tx;
 
         let tx_bytes = Bytes::from(envelope.encoded_2718());
 
@@ -751,10 +766,10 @@ mod tests {
             .max_priority_fee_per_gas(1_000_000_000)
             .into_eip1559();
 
-        let tx1_signed = OpTransactionSigned::Eip1559(
+        let tx1_signed = BaseTransactionSigned::Eip1559(
             tx1_inner.as_eip1559().expect("eip1559 transaction").clone(),
         );
-        let tx1_envelope: OpTxEnvelope = tx1_signed;
+        let tx1_envelope: BaseTxEnvelope = tx1_signed;
         let tx1_bytes = Bytes::from(tx1_envelope.encoded_2718());
 
         let address2 = Account::Bob.address();
@@ -771,10 +786,10 @@ mod tests {
             .max_priority_fee_per_gas(2_000_000_000)
             .into_eip1559();
 
-        let tx2_signed = OpTransactionSigned::Eip1559(
+        let tx2_signed = BaseTransactionSigned::Eip1559(
             tx2_inner.as_eip1559().expect("eip1559 transaction").clone(),
         );
-        let tx2_envelope: OpTxEnvelope = tx2_signed;
+        let tx2_envelope: BaseTxEnvelope = tx2_signed;
         let tx2_bytes = Bytes::from(tx2_envelope.encoded_2718());
 
         let bundle = create_bundle(vec![tx1_bytes, tx2_bytes], 0, None);
@@ -910,10 +925,10 @@ mod tests {
             .max_priority_fee_per_gas(3_000_000_000)
             .into_eip1559();
 
-        let signed_tx1 = OpTransactionSigned::Eip1559(
+        let signed_tx1 = BaseTransactionSigned::Eip1559(
             tx1_inner.as_eip1559().expect("eip1559 transaction").clone(),
         );
-        let envelope1: OpTxEnvelope = signed_tx1;
+        let envelope1: BaseTxEnvelope = signed_tx1;
         let tx1_bytes = Bytes::from(envelope1.encoded_2718());
 
         let tx2_inner = TransactionBuilder::default()
@@ -927,10 +942,10 @@ mod tests {
             .max_priority_fee_per_gas(7_000_000_000)
             .into_eip1559();
 
-        let signed_tx2 = OpTransactionSigned::Eip1559(
+        let signed_tx2 = BaseTransactionSigned::Eip1559(
             tx2_inner.as_eip1559().expect("eip1559 transaction").clone(),
         );
-        let envelope2: OpTxEnvelope = signed_tx2;
+        let envelope2: BaseTxEnvelope = signed_tx2;
         let tx2_bytes = Bytes::from(envelope2.encoded_2718());
 
         let bundle = create_bundle(vec![tx1_bytes, tx2_bytes], 0, None);
@@ -1093,8 +1108,10 @@ mod tests {
             total_gas_used: 21_000,
             total_execution_time_us: 123,
             state_root_time_us: 45,
-            state_root_account_node_count: 7,
-            state_root_storage_node_count: 11,
+            state_root_account_leaf_count: 3,
+            state_root_account_branch_count: 4,
+            state_root_storage_leaf_count: 6,
+            state_root_storage_branch_count: 5,
             ..Default::default()
         };
 
@@ -1150,8 +1167,8 @@ mod tests {
             .into_eip1559();
 
         let signed_tx =
-            OpTransactionSigned::Eip1559(tx.as_eip1559().expect("eip1559 transaction").clone());
-        let envelope: OpTxEnvelope = signed_tx;
+            BaseTransactionSigned::Eip1559(tx.as_eip1559().expect("eip1559 transaction").clone());
+        let envelope: BaseTxEnvelope = signed_tx;
         let tx_bytes = Bytes::from(envelope.encoded_2718());
 
         let bundle = create_bundle(vec![tx_bytes], 0, None);
