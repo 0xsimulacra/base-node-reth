@@ -6,10 +6,29 @@
 //! present, its absolute path is exported as a `cargo:rustc-env=*_ELF_PATH` so
 //! that `src/lib.rs` can `include_bytes!(env!(...))` it.
 //!
-//! If `BASE_SUCCINCT_ELF_STUB=1` is set, empty placeholder files are written
-//! instead. This lets `cargo check` / `clippy` / unrelated tests compile
-//! without a local SP1 toolchain, at the cost of runtime failure if the
-//! constants are actually dereferenced by executed code.
+//! # Environment variables
+//!
+//! Three env vars control resolution. They operate in three modes:
+//!
+//! - **Default (neither set):** try to resolve the real ELF from the cache
+//!   directory and verify its sha256. On any failure (missing file, hash
+//!   mismatch), emit a loud `cargo:warning` and fall back to an empty stub
+//!   written into `OUT_DIR`. Runtime dereferences of a stub ELF will panic,
+//!   but `cargo check` / `rust-analyzer` work on a fresh clone without
+//!   requiring the SP1 toolchain.
+//! - **`BASE_SUCCINCT_ELF_REQUIRE=1`:** fail the build with a non-zero exit
+//!   code instead of falling back to a stub. Use this in release pipelines
+//!   and any CI job that must produce real, runnable binaries.
+//! - **`BASE_SUCCINCT_ELF_STUB=1`:** skip resolution entirely and always
+//!   emit a stub. Useful for docs/lint jobs that never execute the ELFs.
+//!   Mutually exclusive with `BASE_SUCCINCT_ELF_REQUIRE=1`; setting both is
+//!   a hard error.
+//!
+//! `BASE_SUCCINCT_ELF_CACHE_DIR` overrides the default cache directory
+//! (`crates/succinct/elf`). The script always declares a
+//! `cargo:rerun-if-changed` dependency on the expected real ELF path, so
+//! populating the cache (e.g. via `just succinct build-elfs`) after a
+//! stub-backed build triggers a rebuild.
 
 use std::{
     env, fs,
@@ -40,65 +59,92 @@ fn main() {
     let manifest_path = cache_dir.join("manifest.toml");
 
     println!("cargo:rerun-if-env-changed=BASE_SUCCINCT_ELF_STUB");
+    println!("cargo:rerun-if-env-changed=BASE_SUCCINCT_ELF_REQUIRE");
     println!("cargo:rerun-if-env-changed=BASE_SUCCINCT_ELF_CACHE_DIR");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
 
     let manifest = load_manifest(&manifest_path);
-    let stub = env::var("BASE_SUCCINCT_ELF_STUB").as_deref() == Ok("1");
+    let force_stub = env::var("BASE_SUCCINCT_ELF_STUB").as_deref() == Ok("1");
+    let require_real = env::var("BASE_SUCCINCT_ELF_REQUIRE").as_deref() == Ok("1");
+    if force_stub && require_real {
+        fail(
+            "BASE_SUCCINCT_ELF_STUB=1 and BASE_SUCCINCT_ELF_REQUIRE=1 are mutually \
+             exclusive: the former forces stub ELFs while the latter forbids them. \
+             Unset one of the two before retrying.",
+        );
+    }
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
     for entry in &manifest.elfs {
         let env_name = elf_env_var(&entry.name);
-        let resolved =
-            if stub { write_stub(&out_dir, &entry.name) } else { resolve_elf(&cache_dir, entry) };
-        println!("cargo:rerun-if-changed={}", resolved.display());
+        // Always track the expected real ELF path so that populating the
+        // cache after a stub-backed build (e.g. `just succinct build-elfs`)
+        // invalidates this crate and triggers a rebuild.
+        let expected_path = cache_dir.join(&entry.name);
+        println!("cargo:rerun-if-changed={}", expected_path.display());
+
+        let resolved = if force_stub {
+            write_stub(&out_dir, &entry.name)
+        } else {
+            match try_resolve_elf(&cache_dir, entry) {
+                Ok(path) => path,
+                Err(err) => {
+                    if require_real {
+                        fail(&err);
+                    }
+                    // Default: warn loudly and fall back to a stub so
+                    // `cargo check` / rust-analyzer work without a local SP1 toolchain.
+                    warn(&format!(
+                        "{err}\n\
+                         \n\
+                         Falling back to an empty stub ELF. Runtime \
+                         dereferences will panic. Run `just succinct \
+                         build-elfs` to materialize real ELFs, or set \
+                         BASE_SUCCINCT_ELF_REQUIRE=1 to fail fast.",
+                    ));
+                    write_stub(&out_dir, &entry.name)
+                }
+            }
+        };
         println!("cargo:rustc-env={}={}", env_name, resolved.display());
     }
 }
 
 fn load_manifest(path: &Path) -> Manifest {
     let contents = fs::read_to_string(path).unwrap_or_else(|err| {
-        fail(format!("failed to read ELF manifest at {}: {err}", path.display()))
+        fail(&format!("failed to read ELF manifest at {}: {err}", path.display()))
     });
     toml::from_str(&contents)
-        .unwrap_or_else(|err| fail(format!("failed to parse {}: {err}", path.display())))
+        .unwrap_or_else(|err| fail(&format!("failed to parse {}: {err}", path.display())))
 }
 
-fn resolve_elf(cache_dir: &Path, entry: &ElfEntry) -> PathBuf {
+fn try_resolve_elf(cache_dir: &Path, entry: &ElfEntry) -> Result<PathBuf, String> {
     let path = cache_dir.join(&entry.name);
-    let bytes = fs::read(&path).unwrap_or_else(|err| {
-        fail(format!(
-            "ELF `{name}` not found at {path} ({err}).\n\
-             \n\
-             Build it with:   just succinct build-elfs\n\
-             Or set BASE_SUCCINCT_ELF_STUB=1 for non-proving workflows \
-             (check/clippy) - callers will panic at runtime if they \
-             dereference the constant.",
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "ELF `{name}` not found at {path} ({err}).",
             name = entry.name,
             path = path.display(),
-        ))
-    });
+        )
+    })?;
     let actual = hex_sha256(&bytes);
     if actual != entry.sha256 {
-        fail(format!(
-            "ELF `{name}` sha256 mismatch at {path}.\n\
-             expected {expected}\n\
-             actual   {actual}\n\
-             \n\
-             Rebuild with: just succinct build-elfs\n\
-             (that target refreshes both the ELF and its hash in manifest.toml.)",
+        return Err(format!(
+            "ELF `{name}` sha256 mismatch at {path} (expected {expected}, actual {actual}). \
+             Rebuild with: just succinct build-elfs (that target refreshes both the \
+             ELF and its hash in manifest.toml.)",
             name = entry.name,
             path = path.display(),
             expected = entry.sha256,
         ));
     }
-    path
+    Ok(path)
 }
 
 fn write_stub(out_dir: &Path, name: &str) -> PathBuf {
     let stub = out_dir.join(name);
     fs::write(&stub, b"")
-        .unwrap_or_else(|err| fail(format!("failed to write stub {}: {err}", stub.display())));
+        .unwrap_or_else(|err| fail(&format!("failed to write stub {}: {err}", stub.display())));
     stub
 }
 
@@ -125,10 +171,14 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-fn fail(msg: String) -> ! {
+fn warn(msg: &str) {
     for line in msg.lines() {
         println!("cargo:warning={line}");
     }
+}
+
+fn fail(msg: &str) -> ! {
+    warn(msg);
     eprintln!("{msg}");
     process::exit(1);
 }
