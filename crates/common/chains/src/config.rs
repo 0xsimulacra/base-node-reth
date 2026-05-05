@@ -97,6 +97,8 @@ pub struct ChainConfig {
     // Gas limits
     /// Maximum gas limit for L2 blocks.
     pub max_gas_limit: u64,
+    /// Maximum number of entries deleted per execution-layer pruning batch.
+    pub prune_delete_limit: usize,
 
     // Networking
     /// Bootnodes for peer discovery, split by stack layer.
@@ -133,6 +135,25 @@ impl Bootnodes {
 }
 
 impl ChainConfig {
+    /// CLI chain name for Base Mainnet.
+    pub const MAINNET_NAME: &'static str = "base";
+    /// CLI chain name for Base Sepolia.
+    pub const SEPOLIA_NAME: &'static str = "base-sepolia";
+    /// Legacy CLI chain name for Base Sepolia.
+    pub const SEPOLIA_ALIAS: &'static str = "base_sepolia";
+    /// CLI chain name for Base Zeronet.
+    pub const ZERONET_NAME: &'static str = "base-zeronet";
+    /// CLI chain name for the local Base devnet.
+    pub const DEVNET_NAME: &'static str = "dev";
+    /// All chain names accepted by Base chain parsers.
+    pub const SUPPORTED_NAMES: &'static [&'static str] = &[
+        Self::MAINNET_NAME,
+        Self::SEPOLIA_ALIAS,
+        Self::SEPOLIA_NAME,
+        Self::ZERONET_NAME,
+        Self::DEVNET_NAME,
+    ];
+
     /// Base Mainnet chain configuration.
     pub const fn mainnet() -> &'static Self {
         &MAINNET
@@ -156,6 +177,17 @@ impl ChainConfig {
     /// Returns all known chain configurations, including devnet.
     pub const fn all() -> [&'static Self; 4] {
         [&MAINNET, &SEPOLIA, &DEVNET, &ZERONET]
+    }
+
+    /// Looks up a chain config by CLI chain name.
+    pub fn by_name(name: &str) -> Option<&'static Self> {
+        match name {
+            Self::MAINNET_NAME => Some(Self::mainnet()),
+            Self::SEPOLIA_NAME | Self::SEPOLIA_ALIAS => Some(Self::sepolia()),
+            Self::ZERONET_NAME => Some(Self::zeronet()),
+            Self::DEVNET_NAME => Some(Self::devnet()),
+            _ => None,
+        }
     }
 
     /// Looks up a chain config by L2 chain ID.
@@ -307,6 +339,7 @@ const MAINNET: ChainConfig = ChainConfig {
     unsafe_block_signer: Some(address!("Af6E19BE0F9cE7f8afd49a1824851023A8249e8a")),
 
     max_gas_limit: 105_000_000,
+    prune_delete_limit: 20_000,
 
     bootnodes: Bootnodes {
         execution: &[
@@ -377,6 +410,7 @@ const SEPOLIA: ChainConfig = ChainConfig {
     unsafe_block_signer: Some(address!("b830b99c95Ea32300039624Cb567d324D4b1D83C")),
 
     max_gas_limit: 45_000_000,
+    prune_delete_limit: 10_000,
 
     bootnodes: Bootnodes {
         execution: &[
@@ -438,6 +472,7 @@ const DEVNET: ChainConfig = ChainConfig {
     unsafe_block_signer: None,
 
     max_gas_limit: 30_000_000,
+    prune_delete_limit: 20_000,
 
     bootnodes: Bootnodes::EMPTY,
 
@@ -488,6 +523,7 @@ const ZERONET: ChainConfig = ChainConfig {
     unsafe_block_signer: Some(address!("cf17274338d3128f6C96d9af54511a17e8b38a08")),
 
     max_gas_limit: 25_000_000,
+    prune_delete_limit: 10_000,
 
     bootnodes: Bootnodes {
         execution: &[
@@ -514,5 +550,13 @@ mod tests {
         // Guard against drift between the hardcoded `FeeConfig::BASE_MAINNET` constant
         // (used as a serde default) and the canonical `ChainConfig::mainnet().fee_config()`.
         assert_eq!(ChainConfig::mainnet().fee_config(), FeeConfig::base_mainnet());
+    }
+
+    #[test]
+    fn supported_chain_names_resolve() {
+        for name in ChainConfig::SUPPORTED_NAMES {
+            assert!(ChainConfig::by_name(name).is_some(), "{name} should resolve");
+        }
+        assert_eq!(ChainConfig::by_name(ChainConfig::SEPOLIA_ALIAS), Some(ChainConfig::sepolia()));
     }
 }

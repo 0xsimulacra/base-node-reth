@@ -3950,7 +3950,6 @@ dependencies = [
  "reth-primitives-traits",
  "serde",
  "serde_json",
- "spin 0.10.0",
 ]
 
 [[package]]
@@ -3959,6 +3958,7 @@ version = "0.0.0"
 dependencies = [
  "alloy-eips",
  "backon",
+ "base-common-chains",
  "base-common-consensus",
  "base-execution-chainspec",
  "base-execution-consensus",
