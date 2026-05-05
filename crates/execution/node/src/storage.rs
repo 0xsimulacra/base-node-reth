@@ -1,15 +1,11 @@
-#![doc = include_str!("../README.md")]
-#![doc(
-    html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
-    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
-    issue_tracker_base_url = "https://github.com/base/base/issues/"
-)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
-#![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+//! Base node storage type aliases.
 
-mod chain;
-pub use chain::BaseStorage;
+use alloy_consensus::Header;
+use base_common_consensus::BaseTransactionSigned;
+use reth_storage_api::EmptyBodyStorage;
+
+/// Base storage implementation.
+pub type BaseStorage<T = BaseTransactionSigned, H = Header> = EmptyBodyStorage<T, H>;
 
 #[cfg(test)]
 mod tests {
@@ -22,9 +18,7 @@ mod tests {
         assert_eq!(PruneSegment::bitflag_encoded_bytes(), 1);
 
         // In case of failure, refer to the documentation of the
-        // [`validate_bitflag_backwards_compat`] macro for detailed instructions on handling
-        // it.
-
+        // [`validate_bitflag_backwards_compat`] macro for detailed instructions on handling it.
         validate_bitflag_backwards_compat!(PruneCheckpoint, UnusedBits::NotZero);
         validate_bitflag_backwards_compat!(PruneMode, UnusedBits::Zero);
         validate_bitflag_backwards_compat!(PruneSegment, UnusedBits::Zero);
