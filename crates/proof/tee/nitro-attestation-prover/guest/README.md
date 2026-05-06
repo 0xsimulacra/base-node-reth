@@ -11,7 +11,7 @@ check` invocations for everyone who doesn't have that toolchain installed.
 
 ## Quick start
 
-Build the Docker image (once), then build the ELF and bundle it:
+Build the Docker image (once), then build and verify:
 
 ```sh
 # From the repository root:
@@ -21,17 +21,37 @@ docker build --platform=linux/amd64 \
     -t nitro-guest-builder \
     crates/proof/tee/nitro-attestation-prover/guest
 
-# 2. Build ELF, bundle into R0BF, and compute image ID
+# 2. Build and verify (automatically builds if artifacts don't exist)
 docker run --rm --platform=linux/amd64 \
     -v "$(pwd)":/build/base \
-    nitro-guest-builder
+    nitro-guest-builder verify
 
-# 3. Verify the ELF hash
-shasum -a 256 crates/proof/tee/nitro-attestation-prover/guest/target/riscv32im-risc0-zkvm-elf/release/base-proof-tee-nitro-verifier-guest
+# Or: also verify the production IPFS upload matches your local build.
+# Obtain the IPFS gateway URL from the config service
+# (the --boundless-verifier-program-url value).
+docker run --rm --platform=linux/amd64 \
+    -v "$(pwd)":/build/base \
+    nitro-guest-builder verify "<IPFS_GATEWAY_URL>"
 ```
 
-The output shows the **image ID** and writes the bundled R0BF file to
-`target/base-proof-tee-nitro-verifier-guest.r0bf`.
+Step 2 automatically runs the full build if artifacts don't exist yet
+(subsequent runs skip the build and just print hashes). It outputs:
+
+| Value | What it is | Used for |
+|---|---|---|
+| **Raw ELF hash** | SHA-256 of the compiled guest binary | Comparing builds across machines |
+| **R0BF bundle hash** | SHA-256 of the bundled file (ELF + risc0 kernel) | Verifying the IPFS upload |
+| **Image ID** | risc0's own hash of the ELF (not a SHA-256) | On-chain config and registrar `--image-id` |
+
+When an IPFS URL is provided, the command also downloads the remote R0BF
+and checks it matches your local bundle, printing `MATCH` or `MISMATCH`.
+
+The build produces two artifacts:
+
+| Artifact | Path |
+|---|---|
+| Raw ELF | `target/riscv32im-risc0-zkvm-elf/release/base-proof-tee-nitro-verifier-guest` |
+| R0BF bundle | `target/base-proof-tee-nitro-verifier-guest.r0bf` |
 
 ### Apple Silicon note
 
@@ -49,35 +69,20 @@ gh release download r0.1.91.1 --repo risc0/rust \
 The Dockerfile detects and uses the pre-downloaded file automatically.
 The tarball is git-ignored and can be deleted after the image is built.
 
-## Full workflow
+## Deploying to production
 
-### 1. Build and bundle
+After building and verifying (see Quick Start above):
 
-```sh
-docker run --rm --platform=linux/amd64 \
-    -v /path/to/base-repo:/build/base \
-    nitro-guest-builder
-```
+1. **Upload to IPFS**: Upload `target/base-proof-tee-nitro-verifier-guest.r0bf`
+   to IPFS (e.g. via Pinata). Note the resulting gateway URL.
 
-This runs two steps inside the container:
-- **Build**: compiles the guest ELF with `cargo +risc0` for `riscv32im-risc0-zkvm-elf`
-- **Bundle**: combines the raw ELF with the risc0 v1compat kernel into R0BF
-  (RISC Zero Binary Format) and computes the image ID
+2. **Update configuration**: Three values must all match the same build:
 
-### 2. Upload to IPFS
-
-Upload the bundled R0BF file (`target/base-proof-tee-nitro-verifier-guest.r0bf`)
-to IPFS (e.g. via Pinata). Note the resulting gateway URL.
-
-### 3. Update configuration
-
-Three values must all match the same build:
-
-| Where | Value |
-|---|---|
-| Registrar CLI `--image-id` | Image ID printed by the build |
-| Registrar CLI `--boundless-verifier-program-url` | IPFS gateway URL from step 2 |
-| On-chain `TEEProverRegistry` contract | Same image ID, set via admin transaction |
+   | Where | Value |
+   |---|---|
+   | Registrar CLI `--image-id` | Image ID printed by the build |
+   | Registrar CLI `--boundless-verifier-program-url` | IPFS gateway URL from step 1 |
+   | On-chain `TEEProverRegistry` contract | Same image ID, set via admin transaction |
 
 ## Other Docker commands
 
