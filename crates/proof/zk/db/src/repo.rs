@@ -3,8 +3,9 @@ use uuid::Uuid;
 
 use crate::{
     CreateOutboxEntry, CreateProofRequest, CreateProofSession, MarkOutboxError,
-    MarkOutboxProcessed, OutboxEntry, ProofRequest, ProofSession, ProofStatus, ProofType,
-    RetryOutcome, SessionStatus, SessionType, UpdateProofSession, UpdateReceipt,
+    MarkOutboxProcessed, OutboxEntry, ProofRequest, ProofRequestListItem, ProofRequestPage,
+    ProofSession, ProofStatus, ProofType, RetryOutcome, SessionStatus, SessionType,
+    UpdateProofSession, UpdateReceipt,
 };
 
 /// Repository for proof request database operations
@@ -842,6 +843,62 @@ impl ProofRequestRepo {
         };
 
         rows.iter().map(row_to_proof_request).collect()
+    }
+
+    /// List proof requests with offset-based pagination and return total count.
+    pub async fn list_with_offset(
+        &self,
+        status_filter: Option<ProofStatus>,
+        page: ProofRequestPage,
+    ) -> Result<(Vec<ProofRequestListItem>, u64)> {
+        let (rows, count) = if let Some(status) = status_filter {
+            let rows = sqlx::query_as::<_, ProofRequestListItem>(
+                r#"
+                SELECT
+                    id, start_block_number, number_of_blocks_to_prove,
+                    proof_type, status, error_message,
+                    created_at, updated_at, completed_at
+                FROM proof_requests
+                WHERE status = $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+                "#,
+            )
+            .bind(status.as_str())
+            .bind(page.limit())
+            .bind(page.offset())
+            .fetch_all(&self.pool);
+
+            let count = sqlx::query_as::<_, (i64,)>(
+                "SELECT COUNT(*) FROM proof_requests WHERE status = $1",
+            )
+            .bind(status.as_str())
+            .fetch_one(&self.pool);
+
+            futures::try_join!(rows, count)?
+        } else {
+            let rows = sqlx::query_as::<_, ProofRequestListItem>(
+                r#"
+                SELECT
+                    id, start_block_number, number_of_blocks_to_prove,
+                    proof_type, status, error_message,
+                    created_at, updated_at, completed_at
+                FROM proof_requests
+                ORDER BY created_at DESC
+                LIMIT $1 OFFSET $2
+                "#,
+            )
+            .bind(page.limit())
+            .bind(page.offset())
+            .fetch_all(&self.pool);
+
+            let count = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM proof_requests")
+                .fetch_one(&self.pool);
+
+            futures::try_join!(rows, count)?
+        };
+
+        Ok((rows, count.0.max(0) as u64))
     }
 
     // ========== Outbox Methods ==========
