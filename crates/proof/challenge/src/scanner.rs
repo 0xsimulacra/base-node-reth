@@ -43,7 +43,7 @@ use base_proof_contracts::{
 };
 use eyre::Result;
 use futures::stream::{self, StreamExt};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::ChallengerMetrics;
 
@@ -286,9 +286,11 @@ impl GameScanner {
             // Path 1: TEE-proposed, unchallenged.
             (true, false, 0) => Some(GameCategory::InvalidTeeProposal),
 
-            // TEE-only game with a non-zero countered_index — unexpected state.
+            // Unreachable: `ci > 0` requires `challenge()` (which sets `zkProver`),
+            // and clearing `zkProver` runs through `_proofRefutedUpdate(ZK)` which
+            // also clears `ci`. Suspect contract bug if observed.
             (true, false, ci) => {
-                debug!(
+                error!(
                     index = index,
                     countered_index = ci,
                     "skipping TEE-only game with unexpected non-zero countered_index"
@@ -314,9 +316,12 @@ impl GameScanner {
             // Path 3: ZK-proposed, unchallenged.
             (false, true, 0) => Some(GameCategory::InvalidZkProposal),
 
-            // ZK-only game with a non-zero countered_index — unexpected state.
+            // Only reachable after a global `TEE_VERIFIER.nullify()` drops the
+            // TEE proof on a game with an active challenge (`_updateProofCount`
+            // does not clear `ci` for TEE refutations). Requires a TEE soundness
+            // break or key compromise.
             (false, true, ci) => {
-                debug!(
+                warn!(
                     index = index,
                     countered_index = ci,
                     "skipping ZK-only game with unexpected non-zero countered_index"
