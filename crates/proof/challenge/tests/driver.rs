@@ -10,13 +10,13 @@ use alloy_primitives::{Address, B256, Bytes};
 use base_challenger::{
     BondManager, ChallengeSubmitter, DisputeIntent, Driver, DriverComponents, DriverConfig,
     GameScanner, L1HeadProvider, OutputValidator, PendingProof, PendingProofs, ProofPhase,
-    ProofUpdate, ScannerConfig, TeeConfig,
+    ProofUpdate, TeeConfig,
     test_utils::{
         DEFAULT_L1_HEAD, DEFAULT_TEE_PROVER, MockAggregateVerifier, MockBondTransactionSubmitter,
         MockDisputeGameFactory, MockGameState, MockL1HeadProvider, MockL2Provider,
         MockTeeProofProvider, MockTxManager, MockZkProofProvider, MockZkProofState,
         TEST_DISCOVERY_INTERVAL, addr, build_test_header_and_account, empty_factory, factory_game,
-        mock_state, mock_state_with_tee, receipt_with_status,
+        mock_anchor_registry, mock_state, mock_state_with_tee, receipt_with_status,
     },
 };
 use base_proof_contracts::{AggregateVerifierClient, ContractError, GameAtIndex, GameStatus};
@@ -76,7 +76,7 @@ fn test_driver_with_tee(
     let scanner = GameScanner::new(
         factory,
         Arc::clone(&verifier) as Arc<dyn AggregateVerifierClient>,
-        ScannerConfig { lookback_games: 1000 },
+        mock_anchor_registry(Address::ZERO),
     );
     let validator = OutputValidator::new(l2_provider);
     let submitter = ChallengeSubmitter::new(tx_manager);
@@ -114,7 +114,7 @@ fn default_l2() -> Arc<MockL2Provider> {
 }
 
 fn single_game_factory() -> Arc<MockDisputeGameFactory> {
-    Arc::new(MockDisputeGameFactory { games: vec![factory_game(0, 1)] })
+    Arc::new(MockDisputeGameFactory::new(vec![factory_game(0, 1)]))
 }
 
 fn single_game_verifier(state: MockGameState) -> Arc<MockAggregateVerifier> {
@@ -224,7 +224,7 @@ fn driver_with_ready_proof(
 
 #[tokio::test]
 async fn test_step_no_candidates() {
-    let factory = Arc::new(MockDisputeGameFactory { games: vec![] });
+    let factory = Arc::new(MockDisputeGameFactory::new(vec![]));
     let verifier = empty_verifier();
     let l2 = default_l2();
 
@@ -372,7 +372,7 @@ async fn test_step_scan_error_propagated() {
     let scanner = GameScanner::new(
         factory,
         Arc::clone(&verifier) as Arc<dyn AggregateVerifierClient>,
-        ScannerConfig { lookback_games: 1000 },
+        mock_anchor_registry(Address::ZERO),
     );
 
     let l2 = default_l2();
@@ -528,7 +528,7 @@ async fn test_poll_or_submit_drops_nullified_game() {
 
 #[tokio::test]
 async fn test_run_cancellation() {
-    let factory = Arc::new(MockDisputeGameFactory { games: vec![] });
+    let factory = Arc::new(MockDisputeGameFactory::new(vec![]));
     let verifier = empty_verifier();
     let l2 = default_l2();
 
