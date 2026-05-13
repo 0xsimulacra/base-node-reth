@@ -12,7 +12,7 @@ Upgrade activation flows through three layers:
 
 1. **Config layer** — `HardForkConfig` stores an optional activation timestamp per upgrade. `RollupConfig` embeds it and exposes `is_X_active(timestamp)` helpers.
 2. **Trait layer** — `BaseUpgrade` (enum) and `BaseUpgrades` (trait) provide typed, generic activation checks used by both the consensus and execution layers.
-3. **Execution layer** — `OpSpecId` maps the active upgrade to an EVM spec. `spec_by_timestamp_after_bedrock` and `RollupConfig::spec_id` resolve which spec to use. `BasePrecompiles` routes to the correct precompile set.
+3. **Execution layer** — `BaseSpecId` maps the active upgrade to an EVM spec. `spec_by_timestamp_after_bedrock` and `RollupConfig::spec_id` resolve which spec to use. `BasePrecompiles` routes to the correct precompile set.
 
 ---
 
@@ -30,7 +30,7 @@ hardfork!(
     #[derive(Default)]
     BaseUpgrade {
         // ... existing variants ...
-        /// Jovian: <https://github.com/ethereum-optimism/specs/tree/main/specs/protocol/jovian>
+        /// Jovian: Base network upgrade.
         Jovian,
         /// Azul: First Base-specific network upgrade.
         Azul,   // <-- add here
@@ -38,7 +38,7 @@ hardfork!(
 );
 ```
 
-Then update all four chain config array methods from `[(Self, ForkCondition); N]` to `N+1` and append the new entry. Mainnet and sepolia use `ForkCondition::Never` until the upgrade is scheduled; the generic devnet uses `ForkCondition::ZERO_TIMESTAMP`:
+Then update each chain config array method from `[(Self, ForkCondition); N]` to `N+1` and append the new entry. Mainnet and sepolia use `ForkCondition::Never` until the upgrade is scheduled; the generic devnet uses `ForkCondition::ZERO_TIMESTAMP`:
 
 ```rust
 pub const fn mainnet() -> [(Self, ForkCondition); 10] {
@@ -52,18 +52,6 @@ pub const fn devnet() -> [(Self, ForkCondition); 10] {
     [
         // ... existing entries ...
         (Self::Azul, ForkCondition::ZERO_TIMESTAMP),
-    ]
-}
-```
-
-For named devnets like `base_devnet_0_sepolia_dev_0`, use the same timestamp as the previous upgrade rather than `ZERO_TIMESTAMP`, so the new upgrade does not activate before the one it follows:
-
-```rust
-pub const fn base_devnet_0_sepolia_dev_0() -> [(Self, ForkCondition); 10] {
-    [
-        // ... existing entries ...
-        (Self::Jovian, ForkCondition::Timestamp(BASE_DEVNET_0_SEPOLIA_DEV_0_JOVIAN_TIMESTAMP)),
-        (Self::Azul, ForkCondition::Timestamp(BASE_DEVNET_0_SEPOLIA_DEV_0_JOVIAN_TIMESTAMP)),
     ]
 }
 ```
@@ -200,7 +188,7 @@ For **cascading** upgrades, replace the previous arm's `unwrap_or(ForkCondition:
 
 ```rust
 /// Returns `true` if [`Azul`](BaseUpgrade::Azul) is active at given block timestamp.
-fn is_base_azul_active_at_timestamp(&self, timestamp: u64) -> bool {
+fn is_azul_active_at_timestamp(&self, timestamp: u64) -> bool {
     self.upgrade_activation(BaseUpgrade::Azul).active_at_timestamp(timestamp)
 }
 ```
@@ -278,12 +266,12 @@ if *fork == BaseUpgrade::Azul {
 
 Skip this section if the upgrade only affects protocol-level behavior (batch decoding, derivation rules, system config) without introducing new EVM opcodes, precompile addresses, or gas rule changes.
 
-### 9. Add the `OpSpecId` variant
+### 9. Add the `BaseSpecId` variant
 
 **File:** [`crates/common/evm/src/spec.rs`](https://github.com/base/base/blob/main/crates/common/evm/src/spec.rs)
 
 ```rust
-pub enum OpSpecId {
+pub enum BaseSpecId {
     // ... existing variants ...
     JOVIAN,
     AZUL,  // <-- add
@@ -291,66 +279,56 @@ pub enum OpSpecId {
 }
 ```
 
-Extend `into_eth_spec()` — if no new Ethereum EL upgrade is paired, reuse the previous mapping:
+Extend `BaseSpecId::into_eth_spec()` only when the new Base upgrade changes the paired Ethereum EL
+upgrade. `BaseSpecId` wraps `BaseUpgrade`, so new hardforks are added to `BaseUpgrade` first:
 
 ```rust
-Self::ISTHMUS | Self::JOVIAN | Self::AZUL => SpecId::PRAGUE,
+BaseUpgrade::Isthmus | BaseUpgrade::Jovian => SpecId::PRAGUE,
+BaseUpgrade::Azul | BaseUpgrade::Beryl => SpecId::OSAKA,
 ```
 
-Add a `#[strum(serialize = "...")]` attribute on the new variant with its canonical string name:
+Add the new `BaseUpgrade` variant with its canonical string name:
 
 ```rust
-/// Base Azul spec id.
-#[strum(serialize = "Azul")]
-AZUL,
+/// Beryl hardfork.
+Beryl,
 ```
 
-`FromStr` and `From<OpSpecId> for &'static str` are derived automatically.
+`BaseSpecId` parsing and display delegate to `BaseUpgrade`.
 
 ---
 
 ### 10. Route precompiles
 
-**File:** [`crates/common/evm/src/precompiles/provider.rs`](https://github.com/base/base/blob/main/crates/common/evm/src/precompiles/provider.rs)
+**File:** [`crates/common/precompiles/src/provider.rs`](../../crates/common/precompiles/src/provider.rs)
 
-If the upgrade introduces new precompiles, add a new `pub fn azul()` method on `BasePrecompiles`. If it reuses the previous set, extend the existing arm in `new_with_spec`:
+If the upgrade introduces new precompiles, add a new method on `BasePrecompiles`. If it reuses the
+previous set, extend the existing arm in `new_with_spec`:
 
 ```rust
 // Reuse previous precompile set
-OpSpecId::JOVIAN | OpSpecId::AZUL => Self::jovian(),
+BaseUpgrade::Azul | BaseUpgrade::Beryl => Self::azul(),
 
 // Or add a new set
-OpSpecId::AZUL => Self::azul(),
+BaseUpgrade::Beryl => Self::beryl(),
 ```
 
 ---
 
 ### 11. Update spec resolution
 
-**File:** [`crates/common/evm/src/spec.rs`](https://github.com/base/base/blob/main/crates/common/evm/src/spec.rs)
+**File:** [`crates/common/chains/src/upgrade.rs`](https://github.com/base/base/blob/main/crates/common/chains/src/upgrade.rs)
 
 Add the new upgrade as the first check (newest upgrade wins):
 
 ```rust
-pub fn spec_by_timestamp_after_bedrock(chain_spec: impl BaseUpgrades, timestamp: u64) -> OpSpecId {
-    if chain_spec.is_base_azul_active_at_timestamp(timestamp) {
-        OpSpecId::AZUL
+pub fn from_timestamp(chain_spec: impl Upgrades, timestamp: u64) -> Self {
+    if chain_spec.is_beryl_active_at_timestamp(timestamp) {
+        Self::Beryl
+    } else if chain_spec.is_azul_active_at_timestamp(timestamp) {
+        Self::Azul
     } else if chain_spec.is_jovian_active_at_timestamp(timestamp) {
-        OpSpecId::JOVIAN
-    } // ... remaining checks unchanged
-}
-```
-
-**File:** [`crates/common/genesis/src/rollup.rs`](https://github.com/base/base/blob/main/crates/common/genesis/src/rollup.rs)
-
-Same pattern in the `#[cfg(feature = "revm")] impl RollupConfig` block:
-
-```rust
-pub fn spec_id(&self, timestamp: u64) -> base_revm::OpSpecId {
-    if self.is_base_azul_active(timestamp) {
-        base_revm::OpSpecId::AZUL
-    } else if self.is_jovian_active(timestamp) {
-        base_revm::OpSpecId::JOVIAN
+        Self::Jovian
     } // ... remaining checks unchanged
 }
 ```
@@ -380,14 +358,14 @@ forks.push((BaseUpgrade::Azul.boxed(), self[BaseUpgrade::Azul]));  // <-- add
 - [ ] Config field (flat or nested struct) added to `HardForkConfig` in `upgrade.rs`; `iter()` updated; new types re-exported
 - [ ] `is_X_active` + `is_first_X_block` added to `RollupConfig`; `upgrade_activation` arm added; previous terminal upgrade cascades to new one (unless standalone)
 - [ ] `is_X_active_at_timestamp` added to `BaseUpgrades` trait
-- [ ] Timestamp constants added to `mainnet.rs`, `sepolia.rs`, `devnet_0_sepolia_dev_0.rs`; re-exported from `lib.rs`
+- [ ] Timestamp constants added to chain config modules and re-exported from `lib.rs`
 - [ ] Registry fixtures (`test_utils/mod.rs`) updated
 - [ ] Default rollup config updated (`defaults.rs`)
 - [ ] Upgrade consistency tests pass
 
 ### Required when EVM execution changes
 
-- [ ] `OpSpecId` variant added with `into_eth_spec` mapping and `#[strum(serialize = "...")]` attribute
+- [ ] `BaseSpecId` variant added with `into_eth_spec` mapping and `#[strum(serialize = "...")]` attribute
 - [ ] Precompile match arm updated (or new precompile set added)
 - [ ] `spec_by_timestamp_after_bedrock` updated (`common/evm/src/spec.rs`)
 - [ ] `RollupConfig::spec_id` updated (`common/genesis/src/rollup.rs`)

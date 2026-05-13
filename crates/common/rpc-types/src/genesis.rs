@@ -39,6 +39,9 @@ pub struct HardforkInfo {
     /// Base Azul hardfork timestamp.
     #[serde(alias = "v1")]
     pub azul: Option<u64>,
+    /// Beryl hardfork timestamp.
+    #[serde(alias = "v2")]
+    pub beryl: Option<u64>,
 }
 
 /// The Base chain-specific genesis block specification.
@@ -96,8 +99,7 @@ pub struct FeeInfo {
 }
 
 impl FeeInfo {
-    /// Extracts the Base chain base fee info by looking for the `optimism` key. It is intended to be
-    /// parsed from a genesis file.
+    /// Extracts the Base chain base fee info from the legacy `optimism` genesis key.
     pub fn extract_from(others: &OtherFields) -> Option<Self> {
         Self::try_from(others).ok()
     }
@@ -107,8 +109,8 @@ impl TryFrom<&OtherFields> for FeeInfo {
     type Error = serde_json::Error;
 
     fn try_from(others: &OtherFields) -> Result<Self, Self::Error> {
-        if let Some(Ok(op_chain_base_fee_info)) = others.get_deserialized::<Self>("optimism") {
-            Ok(op_chain_base_fee_info)
+        if let Some(Ok(base_chain_base_fee_info)) = others.get_deserialized::<Self>("optimism") {
+            Ok(base_chain_base_fee_info)
         } else {
             Err(serde_json::Error::missing_field("optimism"))
         }
@@ -120,7 +122,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_op_chain_genesis_info() {
+    fn test_extract_base_chain_genesis_info() {
         let genesis_info = r#"
         {
           "bedrockBlock": 10,
@@ -128,7 +130,8 @@ mod tests {
           "canyonTime": 0,
           "ecotoneTime": 0,
           "base": {
-            "v1": 14
+            "v1": 14,
+            "v2": 16
           }
         }
         "#;
@@ -148,13 +151,13 @@ mod tests {
                 holocene_time: None,
                 isthmus_time: None,
                 jovian_time: None,
-                base: HardforkInfo { azul: Some(14) },
+                base: HardforkInfo { azul: Some(14), beryl: Some(16) },
             }
         );
     }
 
     #[test]
-    fn test_extract_op_chain_base_fee_info() {
+    fn test_extract_base_chain_base_fee_info() {
         let base_fee_info = r#"
         {
           "optimism": {
@@ -179,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_op_chain_info() {
+    fn test_extract_base_chain_info() {
         let chain_info = r#"
         {
           "bedrockBlock": 10,
@@ -187,7 +190,8 @@ mod tests {
           "canyonTime": 0,
           "ecotoneTime": 0,
           "base": {
-            "v1": 14
+            "v1": 14,
+            "v2": 16
           },
           "optimism": {
             "eip1559Denominator": 8,
@@ -212,7 +216,7 @@ mod tests {
                     holocene_time: None,
                     isthmus_time: None,
                     jovian_time: None,
-                    base: HardforkInfo { azul: Some(14) },
+                    base: HardforkInfo { azul: Some(14), beryl: Some(16) },
                 }),
                 base_fee_info: Some(FeeInfo {
                     eip1559_elasticity: None,
@@ -237,7 +241,7 @@ mod tests {
                     holocene_time: None,
                     isthmus_time: None,
                     jovian_time: None,
-                    base: HardforkInfo { azul: Some(14) },
+                    base: HardforkInfo { azul: Some(14), beryl: Some(16) },
                 }),
                 base_fee_info: Some(FeeInfo {
                     eip1559_elasticity: None,
@@ -249,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_op_chain_info_no_base_fee() {
+    fn test_extract_base_chain_info_no_base_fee() {
         let chain_info = r#"
         {
           "bedrockBlock": 10,

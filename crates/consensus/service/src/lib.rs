@@ -25,7 +25,7 @@ pub use actors::{
     DerivationError, DerivationState, DerivationStateMachine, DerivationStateTransitionError,
     DerivationStateUpdate, EngineActor, EngineActorRequest, EngineClientError, EngineClientResult,
     EngineConfig, EngineDerivationClient, EngineError, EngineProcessingRequest, EngineProcessor,
-    EngineRequestReceiver, EngineRpcProcessor, EngineRpcRequest, EngineRpcRequestReceiver,
+    EngineProcessorOptions, EngineRequestReceiver, EngineRpcProcessor, EngineRpcRequest,
     GetPayloadRequest, GossipTransport, L1BlockFetcher, L1OriginSelector, L1OriginSelectorError,
     L1OriginSelectorProvider, L1WatcherActor, L1WatcherActorError, L1WatcherDerivationClient,
     L1WatcherQueryExecutor, L1WatcherQueryProcessor, L2Finalizer, L2SourceClient, LogRetrier,
@@ -35,9 +35,10 @@ pub use actors::{
     QueuedDerivationEngineClient, QueuedEngineDerivationClient, QueuedEngineRpcClient,
     QueuedL1WatcherDerivationClient, QueuedNetworkEngineClient, QueuedSequencerAdminAPIClient,
     QueuedSequencerEngineClient, QueuedUnsafePayloadGossipClient, RecoveryModeGuard, ResetRequest,
-    RpcActor, RpcActorError, RpcContext, SealRequest, SealState, SealStepError, SequencerActor,
-    SequencerActorError, SequencerAdminQuery, SequencerConfig, SequencerEngineClient,
-    UnsafePayloadGossipClient, UnsafePayloadGossipClientError, UnsealedPayloadHandle,
+    RpcActor, RpcActorError, RpcContext, ScheduledTicker, SealRequest, SealState, SealStepError,
+    SequencerActor, SequencerActorError, SequencerAdminQuery, SequencerConfig,
+    SequencerEngineClient, UnsafePayloadGossipClient, UnsafePayloadGossipClientError,
+    UnsealedPayloadHandle,
 };
 
 mod metrics;

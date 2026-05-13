@@ -1,30 +1,24 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    panic::AssertUnwindSafe,
+    collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use alloy_consensus::transaction::SignableTransaction;
-use alloy_eips::Encodable2718;
 use alloy_network::{Ethereum, EthereumWallet, TransactionBuilder};
 use alloy_primitives::{Address, Bytes, TxHash, U256, utils::format_ether};
 use alloy_provider::{Provider, RootProvider};
-use alloy_rpc_types::TransactionRequest;
-use alloy_signer::SignerSync;
+use alloy_rpc_types::{BlockNumberOrTag, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::{SolCall, sol};
+use base_common_network::Base;
 use base_tx_manager::NonceManager;
-use futures::{
-    FutureExt as _,
-    stream::{self, StreamExt},
-};
+use futures::{StreamExt, stream};
 use indicatif::{ProgressBar, ProgressStyle};
-use parking_lot::RwLock;
 use revm::precompile::PrecompileId;
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -37,74 +31,44 @@ const FUNDING_CONCURRENCY: usize = 32;
 const FUNDING_BATCH_SIZE: usize = 16;
 
 use super::{
-    AdaptiveBackoff, BlockFirstSeen, BlockWatcher, Confirmer, ConfirmerHandle, DisplaySnapshot,
-    FlashblockTimes, FlashblockTracker, LoadConfig, LoadTestDisplay, RateLimiter, TxType,
+    BlockWatcher, DisplaySnapshot, FlashblockWatcher, LoadConfig, LoadTestDisplay, PreparedBatch,
+    PreparedTransaction, QueuedSubmitFailures, RateLimiter, ResultsTracker, SubmissionPipeline,
+    SubmitEvent, TxType,
 };
 use crate::{
     BaselineError, Result,
     config::{OsakaTarget, WorkloadConfig},
-    metrics::{MetricsCollector, MetricsSummary, TransactionMetrics},
-    rpc::{BatchRpcClient, BatchSendResult, RpcClient, WalletProvider, create_wallet_provider},
+    metrics::{ConfigSummary, MetricsCollector, MetricsSummary},
+    rpc::{
+        BatchRpcClient, QueryProvider, RpcProviders, RpcResultExt, TxpoolAdminClient,
+        create_wallet_provider,
+    },
     workload::{
-        AccountPool, CalldataPayload, Erc20Payload, OsakaPayload, PrecompilePayload,
-        TransferPayload, WorkloadGenerator,
+        AccountPool, AerodromeClPayload, CalldataPayload, Erc20Payload, OsakaPayload,
+        PrecompilePayload, TransferPayload, UniswapV3Payload, WorkloadGenerator,
     },
 };
 
-/// Provider type for nonce management. Uses Ethereum network type because
-/// `NonceManager` only calls `get_transaction_count`, which returns the same
-/// response for both Ethereum and Base networks.
-type NonceProvider = RootProvider<Ethereum>;
-
-struct PreparedTx {
-    from: Address,
-    to: Option<Address>,
-    value: U256,
-    data: Bytes,
-    gas_limit: u64,
-}
-
-enum SubmitEvent {
-    Submitted(TxHash),
-    Failed(String),
-}
-
-struct SignedTx {
-    raw: Bytes,
-    tx_hash: TxHash,
-    from: Address,
-    nonce: u64,
-}
-
-/// Shared context cloned into each `submit_batch` spawned task.
-#[derive(Clone)]
-struct BatchSubmitCtx {
-    providers: Arc<HashMap<Address, WalletProvider>>,
-    signers: Arc<HashMap<Address, PrivateKeySigner>>,
-    batch_rpc: BatchRpcClient,
-    nonce_managers: Arc<HashMap<Address, NonceManager<NonceProvider>>>,
-    confirmer_handle: ConfirmerHandle,
-    submit_event_tx: mpsc::Sender<SubmitEvent>,
-    gas_price: u128,
-    chain_id: u64,
-    max_gas_price: u128,
-}
-
 const NONCE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const SUBMIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+const SUBMIT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(12);
+const PENDING_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(60);
+const CONFIRMATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(65);
+const TXPOOL_CLEAR_CONCURRENCY: usize = 64;
 
 /// Executes load tests by generating and submitting transactions at a target rate.
 pub struct LoadRunner {
     config: LoadConfig,
-    client: RpcClient,
+    config_summary: Option<ConfigSummary>,
+    client: QueryProvider,
     accounts: AccountPool,
     generator: WorkloadGenerator,
     collector: MetricsCollector,
     stop_flag: Arc<AtomicBool>,
     cancel_token: CancellationToken,
-    nonce_managers: Arc<HashMap<Address, NonceManager<NonceProvider>>>,
-    providers: Arc<HashMap<Address, WalletProvider>>,
+    nonce_managers: Arc<HashMap<Address, NonceManager<RootProvider<Ethereum>>>>,
     signers: Arc<HashMap<Address, PrivateKeySigner>>,
-    batch_rpc: BatchRpcClient,
+    submission_batch_rpcs: Arc<Vec<BatchRpcClient>>,
     gas_price: u128,
     display: Option<LoadTestDisplay>,
     snapshot_tx: Option<watch::Sender<DisplaySnapshot>>,
@@ -117,11 +81,19 @@ pub struct LoadRunner {
 
 impl LoadRunner {
     /// Creates a new load runner with the given configuration.
-    #[instrument(skip_all, fields(rpc_url = %config.rpc_http_url, chain_id = config.chain_id))]
+    #[instrument(
+        skip_all,
+        fields(
+            primary_submission_rpc = %config.primary_submission_rpc(),
+            submission_rpc_count = config.transaction_submission_rpcs.len(),
+            query_rpc = %config.query_rpc,
+            chain_id = config.chain_id,
+        )
+    )]
     pub fn new(config: LoadConfig) -> Result<Self> {
         config.validate()?;
 
-        let client = RpcClient::new(config.rpc_http_url.clone());
+        let client = RpcProviders::query(config.query_rpc.clone())?;
 
         let accounts = if let Some(mnemonic) = &config.mnemonic {
             info!(
@@ -140,9 +112,15 @@ impl LoadRunner {
             AccountPool::with_offset(config.seed, config.account_count, config.sender_offset)?
         };
 
-        let providers = Arc::new(Self::build_providers(&config.rpc_http_url, &accounts));
         let signers = Arc::new(Self::build_signers(&accounts));
-        let batch_rpc = BatchRpcClient::new(config.rpc_http_url.clone());
+        let submission_batch_rpcs = Arc::new(
+            config
+                .transaction_submission_rpcs
+                .iter()
+                .cloned()
+                .map(BatchRpcClient::new)
+                .collect::<Vec<_>>(),
+        );
         let sender_addresses = accounts.accounts().iter().map(|a| a.address.to_string()).collect();
 
         let workload_config = WorkloadConfig::new("load-test").with_seed(config.seed);
@@ -150,12 +128,14 @@ impl LoadRunner {
 
         info!(
             account_count = config.account_count,
-            providers_cached = providers.len(),
-            "load runner created with cached providers"
+            signers_cached = signers.len(),
+            submission_rpc_count = submission_batch_rpcs.len(),
+            "load runner created"
         );
 
         Ok(Self {
             config,
+            config_summary: None,
             client,
             accounts,
             generator,
@@ -163,9 +143,8 @@ impl LoadRunner {
             stop_flag: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
             nonce_managers: Arc::new(HashMap::new()),
-            providers,
             signers,
-            batch_rpc,
+            submission_batch_rpcs,
             gas_price: 0,
             display: None,
             snapshot_tx: None,
@@ -182,19 +161,14 @@ impl LoadRunner {
         self.funder_address = Some(addr);
     }
 
-    fn build_providers(
-        rpc_url: &url::Url,
-        accounts: &AccountPool,
-    ) -> HashMap<Address, WalletProvider> {
-        let mut providers = HashMap::with_capacity(accounts.len());
+    /// Sets the config summary for inclusion in JSON output.
+    pub fn set_config_summary(&mut self, summary: ConfigSummary) {
+        self.config_summary = Some(summary);
+    }
 
-        for account in accounts.accounts() {
-            let wallet = EthereumWallet::from(account.signer.clone());
-            let provider = create_wallet_provider(rpc_url.clone(), wallet);
-            providers.insert(account.address, provider);
-        }
-
-        providers
+    /// Returns the number of configured txpool nodes to clear before test startup.
+    pub const fn txpool_node_count(&self) -> usize {
+        self.config.txpool_nodes.len()
     }
 
     fn build_signers(accounts: &AccountPool) -> HashMap<Address, PrivateKeySigner> {
@@ -242,6 +216,39 @@ impl LoadRunner {
                     generator =
                         generator.with_payload(OsakaPayload::new(target.clone()), weight_pct);
                 }
+                TxType::UniswapV3 { router, token_in, token_out, fee, min_amount, max_amount } => {
+                    generator = generator.with_payload(
+                        UniswapV3Payload::new(
+                            *router,
+                            *token_in,
+                            *token_out,
+                            *fee,
+                            *min_amount,
+                            *max_amount,
+                        ),
+                        weight_pct,
+                    );
+                }
+                TxType::AerodromeCl {
+                    router,
+                    token_in,
+                    token_out,
+                    tick_spacing,
+                    min_amount,
+                    max_amount,
+                } => {
+                    generator = generator.with_payload(
+                        AerodromeClPayload::new(
+                            *router,
+                            *token_in,
+                            *token_out,
+                            *tick_spacing,
+                            *min_amount,
+                            *max_amount,
+                        ),
+                        weight_pct,
+                    );
+                }
             }
         }
 
@@ -287,6 +294,7 @@ impl LoadRunner {
                     OsakaTarget::Clz => 80_000,
                     OsakaTarget::P256verifyOsaka | OsakaTarget::ModexpOsaka => 30_000,
                 },
+                TxType::UniswapV3 { .. } | TxType::AerodromeCl { .. } => 250_000,
             };
             weighted_gas += gas_estimate * tx_config.weight as u64;
         }
@@ -303,7 +311,7 @@ impl LoadRunner {
     ) -> Result<()> {
         let total_accounts = self.accounts.len();
         let client = self.client.clone();
-        let rpc_url = self.config.rpc_http_url.clone();
+        let primary_submission_rpc = self.config.primary_submission_rpc().clone();
         let chain_id = self.config.chain_id;
         let max_gas_price = self.config.max_gas_price;
 
@@ -318,8 +326,9 @@ impl LoadRunner {
             .map(|&(addr, idx)| {
                 let client = client.clone();
                 async move {
-                    let balance = client.get_balance(addr).await?;
-                    let nonce = client.get_nonce(addr).await?;
+                    let balance = client.get_balance(addr).await.rpc("get balance")?;
+                    let nonce =
+                        client.get_transaction_count(addr).await.rpc("get transaction count")?;
                     Ok::<_, BaselineError>((addr, idx, balance, nonce))
                 }
             })
@@ -354,9 +363,10 @@ impl LoadRunner {
 
         let funder_address = funding_key.address();
         let wallet = EthereumWallet::from(funding_key);
-        let funder_provider = Arc::new(create_wallet_provider(rpc_url.clone(), wallet));
+        let funder_provider =
+            Arc::new(create_wallet_provider(primary_submission_rpc.clone(), wallet));
 
-        let gas_price = client.get_gas_price().await?;
+        let gas_price = client.get_gas_price().await.rpc("get gas price")?;
         let max_priority_fee = (gas_price / 10).max(1);
         // Ensure max_fee >= max_priority_fee (EIP-1559 requirement).
         // When gas_price is 0 (e.g. a fresh devnet), `gas_price * 2` would be 0
@@ -373,7 +383,7 @@ impl LoadRunner {
         let total_gas_cost = gas_cost_per_tx.saturating_mul(U256::from(accounts_to_fund.len()));
         let total_needed = total_deficit.saturating_add(total_gas_cost);
 
-        let funder_balance = client.get_balance(funder_address).await?;
+        let funder_balance = client.get_balance(funder_address).await.rpc("get balance")?;
 
         if funder_balance < total_needed {
             let shortfall = total_needed.saturating_sub(funder_balance);
@@ -392,7 +402,7 @@ impl LoadRunner {
             .get_transaction_count(funder_address)
             .pending()
             .await
-            .map_err(|e| BaselineError::Rpc(e.to_string()))?;
+            .rpc("get pending transaction count")?;
 
         info!(
             from = %funder_address,
@@ -432,7 +442,7 @@ impl LoadRunner {
         let mut txs_remaining = txs.into_iter().peekable();
         while txs_remaining.peek().is_some() {
             let batch: Vec<_> = txs_remaining.by_ref().take(FUNDING_BATCH_SIZE).collect();
-            let mut batch_pending: Vec<(TxHash, Address)> = Vec::with_capacity(batch.len());
+            let mut batch_pending: Vec<Address> = Vec::with_capacity(batch.len());
             let mut retries: Vec<(Address, U256, u64)> = Vec::new();
             let mut fatal_errors: Vec<String> = Vec::new();
 
@@ -446,17 +456,22 @@ impl LoadRunner {
 
             let mut send_stream = stream::iter(send_futs).buffer_unordered(FUNDING_BATCH_SIZE);
 
+            let mut nonce_refresh_needed: Vec<(Address, U256)> = Vec::new();
+
             while let Some((result, address, deficit, nonce)) = send_stream.next().await {
                 match result {
                     Ok(pending) => {
                         let tx_hash = *pending.tx_hash();
                         debug!(to = %address, deficit = %deficit, nonce, tx_hash = %tx_hash, "funding tx sent");
-                        batch_pending.push((tx_hash, address));
+                        batch_pending.push(address);
                     }
                     Err(e) => {
                         let error_str = e.to_string();
                         if error_str.contains("already known") {
                             retries.push((address, deficit, nonce));
+                        } else if error_str.contains("nonce too low") {
+                            info!(to = %address, nonce, "nonce too low, will refresh and retry");
+                            nonce_refresh_needed.push((address, deficit));
                         } else {
                             error!(to = %address, error = %e, "failed to fund account");
                             fatal_errors.push(format!("failed to fund {address}: {e}"));
@@ -499,7 +514,7 @@ impl LoadRunner {
                         Ok(pending) => {
                             let tx_hash = *pending.tx_hash();
                             info!(to = %address, nonce, tx_hash = %tx_hash, "replacement funding tx sent");
-                            batch_pending.push((tx_hash, address));
+                            batch_pending.push(address);
                         }
                         Err(replace_err) => {
                             warn!(to = %address, nonce, error = %replace_err, "replacement tx also failed, proceeding");
@@ -508,7 +523,63 @@ impl LoadRunner {
                 }
             }
 
-            Self::await_confirmations(&self.batch_rpc, &mut batch_pending, &pb_fund).await?;
+            Self::await_balances(&client, &mut batch_pending, amount_per_account, &pb_fund).await?;
+
+            if !nonce_refresh_needed.is_empty() {
+                let fresh_nonce = funder_provider
+                    .get_transaction_count(funder_address)
+                    .pending()
+                    .await
+                    .rpc("get pending transaction count")?;
+
+                info!(
+                    count = nonce_refresh_needed.len(),
+                    fresh_nonce, "retrying funding txs with refreshed nonce"
+                );
+
+                let nonce_retry_futs =
+                    nonce_refresh_needed.into_iter().enumerate().map(|(i, (address, deficit))| {
+                        let provider = Arc::clone(&funder_provider);
+                        let retry_nonce = fresh_nonce + i as u64;
+                        async move {
+                            let tx = TransactionRequest::default()
+                                .with_to(address)
+                                .with_value(deficit)
+                                .with_nonce(retry_nonce)
+                                .with_chain_id(chain_id)
+                                .with_gas_limit(21_000)
+                                .with_max_fee_per_gas(max_fee)
+                                .with_max_priority_fee_per_gas(max_priority_fee);
+                            let result = provider.send_transaction(tx).await;
+                            (result, address, retry_nonce)
+                        }
+                    });
+
+                let mut nonce_retry_stream =
+                    stream::iter(nonce_retry_futs).buffered(FUNDING_BATCH_SIZE);
+
+                let mut nonce_retry_pending: Vec<Address> = Vec::new();
+                while let Some((result, address, retry_nonce)) = nonce_retry_stream.next().await {
+                    match result {
+                        Ok(pending) => {
+                            let tx_hash = *pending.tx_hash();
+                            info!(to = %address, nonce = retry_nonce, tx_hash = %tx_hash, "nonce-refreshed funding tx sent");
+                            nonce_retry_pending.push(address);
+                        }
+                        Err(retry_err) => {
+                            warn!(to = %address, nonce = retry_nonce, error = %retry_err, "nonce-refreshed retry also failed, proceeding");
+                        }
+                    }
+                }
+
+                Self::await_balances(
+                    &client,
+                    &mut nonce_retry_pending,
+                    amount_per_account,
+                    &pb_fund,
+                )
+                .await?;
+            }
         }
         pb_fund.finish_and_clear();
 
@@ -522,8 +593,9 @@ impl LoadRunner {
                 let client = client.clone();
                 let addr = a.address;
                 async move {
-                    let balance = client.get_balance(addr).await?;
-                    let nonce = client.get_nonce(addr).await?;
+                    let balance = client.get_balance(addr).await.rpc("get balance")?;
+                    let nonce =
+                        client.get_transaction_count(addr).await.rpc("get transaction count")?;
                     Ok::<_, BaselineError>((addr, balance, nonce))
                 }
             })
@@ -546,7 +618,7 @@ impl LoadRunner {
             account.balance = balance;
             account.nonce = account_nonce;
 
-            let provider = NonceProvider::new_http(self.config.rpc_http_url.clone());
+            let provider = RootProvider::<Ethereum>::new_http(self.config.query_rpc.clone());
             let nonce_manager =
                 NonceManager::new(provider, addr, NONCE_RPC_TIMEOUT).with_pending_tag();
             Arc::make_mut(&mut self.nonce_managers).insert(addr, nonce_manager);
@@ -558,6 +630,307 @@ impl LoadRunner {
         Ok(())
     }
 
+    /// Collects unique token addresses from configured swap transaction types.
+    pub fn collect_swap_tokens(&self) -> Vec<Address> {
+        let mut tokens = std::collections::HashSet::new();
+        for tx_config in &self.config.transactions {
+            match &tx_config.tx_type {
+                TxType::UniswapV3 { token_in, token_out, .. }
+                | TxType::AerodromeCl { token_in, token_out, .. } => {
+                    tokens.insert(*token_in);
+                    tokens.insert(*token_out);
+                }
+                TxType::Transfer
+                | TxType::Calldata { .. }
+                | TxType::Erc20 { .. }
+                | TxType::Precompile { .. }
+                | TxType::Osaka { .. } => {}
+            }
+        }
+        tokens.into_iter().collect()
+    }
+
+    /// Clears pending transactions from all configured txpool nodes for every test sender.
+    #[instrument(skip(self), fields(nodes = self.config.txpool_nodes.len(), accounts = self.accounts.len()))]
+    pub async fn clear_txpools(&self) -> Result<u64> {
+        if self.config.txpool_nodes.is_empty() {
+            return Ok(0);
+        }
+
+        info!(
+            nodes = self.config.txpool_nodes.len(),
+            accounts = self.accounts.len(),
+            "clearing txpool sender transactions"
+        );
+
+        let clients: Vec<_> = self
+            .config
+            .txpool_nodes
+            .iter()
+            .cloned()
+            .map(|node| {
+                let client = TxpoolAdminClient::new(node.clone())?;
+                Ok::<_, BaselineError>((node, client))
+            })
+            .collect::<Result<_>>()?;
+        let addresses: Vec<_> =
+            self.accounts.accounts().iter().map(|account| account.address).collect();
+        let requests: Vec<_> = clients
+            .iter()
+            .flat_map(|(node, client)| {
+                addresses
+                    .iter()
+                    .copied()
+                    .map(move |address| (node.clone(), client.clone(), address))
+            })
+            .collect();
+
+        let clear_results: Vec<_> =
+            stream::iter(requests.into_iter().map(|(node, client, address)| async move {
+                let removed = client.drop_sender_transactions(address).await.map_err(|e| {
+                    BaselineError::Rpc(format!(
+                        "failed to clear txpool node {node} for sender {address}: {e}"
+                    ))
+                })?;
+                Ok::<_, BaselineError>((node, removed.len() as u64))
+            }))
+            .buffer_unordered(TXPOOL_CLEAR_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut removed_by_node: HashMap<url::Url, u64> = HashMap::new();
+        for result in clear_results {
+            let (node, removed) = result?;
+            removed_by_node
+                .entry(node)
+                .and_modify(|total| *total = total.saturating_add(removed))
+                .or_insert(removed);
+        }
+
+        let mut removed_total = 0u64;
+        for node in &self.config.txpool_nodes {
+            let removed_for_node = removed_by_node.get(node).copied().unwrap_or(0);
+            removed_total = removed_total.saturating_add(removed_for_node);
+            info!(
+                node = %node,
+                removed = removed_for_node,
+                "cleared txpool sender transactions from node"
+            );
+        }
+
+        info!(removed = removed_total, "txpool clearing complete");
+        Ok(removed_total)
+    }
+
+    /// Mints swap tokens to all sender accounts.
+    ///
+    /// Scans the configured transaction types for token addresses, then mints
+    /// `amount_per_token` of each token to every sender that has insufficient balance.
+    /// Skips accounts that already have enough tokens. Requires tokens that expose
+    /// a public `mint(address,uint256)` function (e.g., `FreeTransferERC20`).
+    #[instrument(skip(self, funding_key), fields(accounts = self.accounts.len()))]
+    pub async fn setup_swap_tokens(
+        &self,
+        funding_key: PrivateKeySigner,
+        amount_per_token: U256,
+    ) -> Result<()> {
+        let tokens = self.collect_swap_tokens();
+        if tokens.is_empty() {
+            debug!("no swap tokens configured, skipping token setup");
+            return Ok(());
+        }
+
+        let sender_addresses: Vec<Address> =
+            self.accounts.accounts().iter().map(|a| a.address).collect();
+        let token_count = tokens.len();
+        let total_pairs = token_count * sender_addresses.len();
+
+        // Phase 1: Check existing token balances for all (token, sender) pairs.
+        let pb_check = self.progress_bar(total_pairs as u64, "Checking token balances");
+        let client = &self.client;
+
+        let balance_futs: Vec<_> = tokens
+            .iter()
+            .flat_map(|&token| {
+                sender_addresses.iter().map(move |&sender| {
+                    let client = client.clone();
+                    let call_data = Self::encode_erc20_balance_of(sender);
+                    async move {
+                        let result = client
+                            .call(
+                                TransactionRequest::default()
+                                    .with_to(token)
+                                    .with_input(call_data)
+                                    .into(),
+                            )
+                            .await
+                            .rpc("eth_call")
+                            .map(|bytes| U256::from_be_slice(bytes.as_ref()))
+                            .unwrap_or(U256::ZERO);
+                        (token, sender, result)
+                    }
+                })
+            })
+            .collect();
+
+        let balance_results: Vec<_> = stream::iter(balance_futs)
+            .buffer_unordered(FUNDING_CONCURRENCY)
+            .inspect(|_| pb_check.inc(1))
+            .collect()
+            .await;
+        pb_check.finish_and_clear();
+
+        // Filter to only (token, sender) pairs that need funding.
+        let mut transfers_needed: Vec<(Address, Address)> = Vec::new();
+        let mut already_funded = 0usize;
+        for (token, sender, balance) in balance_results {
+            if balance < amount_per_token {
+                transfers_needed.push((token, sender));
+            } else {
+                already_funded += 1;
+                debug!(token = %token, sender = %sender, balance = %balance, "account already has sufficient tokens");
+            }
+        }
+
+        if transfers_needed.is_empty() {
+            info!(
+                tokens = token_count,
+                accounts = sender_addresses.len(),
+                "all accounts already have sufficient token balances, skipping distribution"
+            );
+            return Ok(());
+        }
+
+        info!(
+            transfers_needed = transfers_needed.len(),
+            already_funded = already_funded,
+            tokens = token_count,
+            accounts = sender_addresses.len(),
+            "distributing swap tokens"
+        );
+
+        // Phase 2: Setup for transfers.
+        let funder_address = funding_key.address();
+        let wallet = EthereumWallet::from(funding_key);
+        let funder_provider =
+            Arc::new(create_wallet_provider(self.config.primary_submission_rpc().clone(), wallet));
+        let chain_id = self.config.chain_id;
+        let max_gas_price = self.config.max_gas_price;
+
+        let gas_price = self.client.get_gas_price().await.rpc("get gas price")?;
+        let max_priority_fee = (gas_price / 10).max(1);
+        let max_fee = gas_price.saturating_mul(2).max(max_priority_fee).min(max_gas_price);
+
+        // Pre-flight balance check — abort before sending any TXs if the funder
+        // cannot cover the total gas cost for needed token transfers.
+        let gas_cost_per_tx = U256::from(65_000u64).saturating_mul(U256::from(max_fee));
+        let total_gas_cost = gas_cost_per_tx.saturating_mul(U256::from(transfers_needed.len()));
+        let funder_balance = self.client.get_balance(funder_address).await.rpc("get balance")?;
+
+        if funder_balance < total_gas_cost {
+            let shortfall = total_gas_cost.saturating_sub(funder_balance);
+            return Err(BaselineError::Transaction(format!(
+                "funder {} has insufficient balance for token distribution: has {} ETH, needs {} ETH (gas for {} txs), shortfall {} ETH",
+                funder_address,
+                format_ether(funder_balance),
+                format_ether(total_gas_cost),
+                transfers_needed.len(),
+                format_ether(shortfall),
+            )));
+        }
+
+        let mut nonce = funder_provider
+            .get_transaction_count(funder_address)
+            .pending()
+            .await
+            .rpc("get pending transaction count")?;
+
+        // Phase 3: Execute transfers for accounts that need tokens.
+        let pb = self.progress_bar(transfers_needed.len() as u64, "Minting tokens");
+        let mut failed_count: usize = 0;
+
+        let txs: Vec<(TransactionRequest, Address, Address)> = transfers_needed
+            .into_iter()
+            .map(|(token, sender)| {
+                let mint_data = Self::encode_erc20_mint(sender, amount_per_token);
+                let tx = TransactionRequest::default()
+                    .with_to(token)
+                    .with_input(mint_data)
+                    .with_nonce(nonce)
+                    .with_chain_id(chain_id)
+                    .with_gas_limit(65_000)
+                    .with_max_fee_per_gas(max_fee)
+                    .with_max_priority_fee_per_gas(max_priority_fee);
+                nonce += 1;
+                (tx, token, sender)
+            })
+            .collect();
+
+        let total_txs = txs.len();
+        let mut txs_remaining = txs.into_iter().peekable();
+        while txs_remaining.peek().is_some() {
+            let batch: Vec<_> = txs_remaining.by_ref().take(FUNDING_BATCH_SIZE).collect();
+            let mut pending_txs: Vec<(Address, Address)> = Vec::new();
+
+            let send_futs = batch.into_iter().map(|(tx, token, sender)| {
+                let provider = Arc::clone(&funder_provider);
+                async move {
+                    let result = provider.send_transaction(tx).await;
+                    (result, token, sender)
+                }
+            });
+
+            let mut send_stream = stream::iter(send_futs).buffer_unordered(FUNDING_BATCH_SIZE);
+
+            while let Some((result, token, sender)) = send_stream.next().await {
+                match result {
+                    Ok(pending) => {
+                        let tx_hash = *pending.tx_hash();
+                        debug!(token = %token, to = %sender, tx_hash = %tx_hash, "token mint sent");
+                        pending_txs.push((token, sender));
+                    }
+                    Err(e) => {
+                        warn!(token = %token, to = %sender, error = %e, "token mint failed");
+                        failed_count += 1;
+                    }
+                }
+            }
+
+            Self::await_token_balances(&self.client, &mut pending_txs, amount_per_token, &pb)
+                .await?;
+        }
+
+        pb.finish_and_clear();
+
+        if failed_count > 0 {
+            return Err(BaselineError::Transaction(format!(
+                "{failed_count}/{total_txs} token mints failed — senders with missing tokens will revert on swap"
+            )));
+        }
+
+        info!(
+            tokens = token_count,
+            transfers = total_txs,
+            skipped = already_funded,
+            "swap token setup complete"
+        );
+        Ok(())
+    }
+
+    fn encode_erc20_mint(to: Address, amount: U256) -> Bytes {
+        sol! {
+            function mint(address to, uint256 amount) external;
+        }
+        Bytes::from(mintCall { to, amount }.abi_encode())
+    }
+
+    fn encode_erc20_balance_of(account: Address) -> Bytes {
+        sol! {
+            function balanceOf(address account) external view returns (uint256);
+        }
+        Bytes::from(balanceOfCall { account }.abi_encode())
+    }
+
     /// Runs the load test and returns metrics summary.
     #[instrument(skip(self), fields(target_gps = self.config.target_gps, continuous = self.config.duration.is_none(), duration = ?self.config.duration))]
     pub async fn run(&mut self) -> Result<MetricsSummary> {
@@ -565,12 +938,12 @@ impl LoadRunner {
         self.stop_flag.store(false, Ordering::SeqCst);
         self.cancel_token = CancellationToken::new();
 
-        self.gas_price = self.client.get_gas_price().await?;
+        self.gas_price = self.client.get_gas_price().await.rpc("get gas price")?;
         info!(gas_price = self.gas_price, "fetched current gas price");
 
         for account in self.accounts.accounts() {
             if !self.nonce_managers.contains_key(&account.address) {
-                let provider = NonceProvider::new_http(self.config.rpc_http_url.clone());
+                let provider = RootProvider::<Ethereum>::new_http(self.config.query_rpc.clone());
                 let nonce_manager = NonceManager::new(provider, account.address, NONCE_RPC_TIMEOUT)
                     .with_pending_tag();
                 Arc::make_mut(&mut self.nonce_managers).insert(account.address, nonce_manager);
@@ -589,65 +962,32 @@ impl LoadRunner {
             }
         }
 
-        const METRICS_CHANNEL_BUFFER: usize = 2000;
-        const SUBMIT_CHANNEL_BUFFER: usize = 2000;
-        const SUBMIT_BATCH_CONCURRENCY: usize = 32;
-        let (metrics_tx, mut metrics_rx) =
-            mpsc::channel::<TransactionMetrics>(METRICS_CHANNEL_BUFFER);
+        const SUBMIT_CHANNEL_BUFFER: usize = 32_768;
         let (submit_event_tx, mut submit_event_rx) =
             mpsc::channel::<SubmitEvent>(SUBMIT_CHANNEL_BUFFER);
 
-        let flashblock_times: FlashblockTimes = Arc::new(RwLock::new(HashMap::new()));
-        let block_first_seen: BlockFirstSeen = Arc::new(RwLock::new(BTreeMap::new()));
-
-        let flashblock_tracker_task = if let Some(url) = &self.config.flashblocks_ws_url {
-            info!(url = %url, "starting flashblock tracker");
-            Some(
-                FlashblockTracker::new(
-                    url.clone(),
-                    Arc::clone(&flashblock_times),
-                    self.cancel_token.clone(),
-                )
-                .start(),
-            )
-        } else {
-            info!("flashblocks_ws_url not configured, flashblock latency tracking disabled");
-            None
-        };
-
-        let block_watcher_enabled = self.config.block_watcher_url.is_some();
-        let block_watcher_task = if let Some(url) = &self.config.block_watcher_url {
-            info!(url = %url, "starting block watcher");
-            Some(
-                BlockWatcher::new(
-                    url.clone(),
-                    Arc::clone(&block_first_seen),
-                    self.cancel_token.clone(),
-                )
-                .start(),
-            )
-        } else {
-            info!("block_watcher_url not configured, using block timestamps for latency");
-            None
-        };
-
         let sender_addresses: Vec<_> = self.accounts.accounts().iter().map(|a| a.address).collect();
-        let mut confirmer = Confirmer::new(
-            &sender_addresses,
-            metrics_tx,
-            Arc::clone(&self.stop_flag),
-            Arc::clone(&flashblock_times),
-            Arc::clone(&block_first_seen),
-            block_watcher_enabled,
-            self.batch_rpc.clone(),
-        );
-        let confirmer_handle = confirmer.handle();
-        let confirmer_handle_for_run = confirmer_handle.clone();
+        let results_tracker = ResultsTracker::new(&sender_addresses);
 
-        let confirmer_client = RpcClient::new(self.config.rpc_http_url.clone());
-        let confirmer_task = tokio::spawn(async move {
-            confirmer.run(confirmer_client, &confirmer_handle_for_run).await
-        });
+        info!(url = %self.config.flashblocks_ws, "starting flashblock transaction watcher");
+        let flashblock_watcher_task = Some(
+            FlashblockWatcher::new(
+                self.config.flashblocks_ws.clone(),
+                results_tracker.clone(),
+                self.cancel_token.clone(),
+            )
+            .start(),
+        );
+
+        info!(url = %self.config.query_rpc, "starting block watcher");
+        let block_watcher_task = Some(
+            BlockWatcher::new(
+                RootProvider::<Base>::new_http(self.config.query_rpc.clone()),
+                results_tracker.clone(),
+                self.cancel_token.clone(),
+            )
+            .start(),
+        );
 
         let max_in_flight_per_sender = self.config.max_in_flight_per_sender;
 
@@ -670,12 +1010,23 @@ impl LoadRunner {
             "starting load test with per-sender in-flight limiting"
         );
 
-        let mut pending_batch: Vec<PreparedTx> = Vec::with_capacity(batch_size);
-        let semaphore = Arc::new(Semaphore::new(SUBMIT_BATCH_CONCURRENCY));
-        let providers = Arc::clone(&self.providers);
+        let mut pending_batch: Vec<PreparedTransaction> = Vec::with_capacity(batch_size);
         let signers = Arc::clone(&self.signers);
         let nonce_managers = Arc::clone(&self.nonce_managers);
-        let batch_rpc = self.batch_rpc.clone();
+        let submission_batch_rpcs = Arc::clone(&self.submission_batch_rpcs);
+        let mut submission_pipeline = SubmissionPipeline::start(
+            signers,
+            nonce_managers,
+            submission_batch_rpcs,
+            results_tracker.clone(),
+            submit_event_tx.clone(),
+            self.config.chain_id,
+            self.config.max_gas_price,
+        );
+        let next_submit_batch_id = AtomicU64::new(0);
+        let mut queued_per_sender: HashMap<Address, u64> =
+            self.accounts.accounts().iter().map(|a| (a.address, 0)).collect();
+
         let mut last_gas_price_refresh = Instant::now();
         let mut last_rate_limiter_update = Instant::now();
         let mut last_progress_report = Instant::now();
@@ -693,7 +1044,7 @@ impl LoadRunner {
         if use_live_display || use_snapshot_tx {
             let snap = self.build_snapshot(
                 start,
-                &confirmer_handle,
+                &results_tracker,
                 max_in_flight_per_sender,
                 account_count,
             );
@@ -711,7 +1062,7 @@ impl LoadRunner {
             // --- Housekeeping (runs once per batch iteration) ---
 
             if last_gas_price_refresh.elapsed() >= GAS_PRICE_REFRESH_INTERVAL {
-                if let Ok(new_price) = self.client.get_gas_price().await
+                if let Ok(new_price) = self.client.get_gas_price().await.rpc("get gas price")
                     && new_price != self.gas_price
                 {
                     debug!(old_price = self.gas_price, new_price, "gas price updated");
@@ -727,27 +1078,28 @@ impl LoadRunner {
                 last_rate_limiter_update = Instant::now();
             }
 
+            Self::drain_submit_events(
+                &mut submit_event_rx,
+                &mut queued_per_sender,
+                &mut self.collector,
+            );
+
             // Drain confirmed metrics non-blocking so the rolling window stays
             // current during the run (not just during the post-run drain).
-            while let Ok(metrics) = metrics_rx.try_recv() {
+            for metrics in results_tracker.drain_confirmed_metrics() {
                 self.collector.record_confirmed(metrics);
             }
-
-            while let Ok(event) = submit_event_rx.try_recv() {
-                match event {
-                    SubmitEvent::Submitted(tx_hash) => self.collector.record_submitted(tx_hash),
-                    SubmitEvent::Failed(reason) => {
-                        self.collector.record_failed(TxHash::ZERO, &reason);
-                    }
-                }
+            let expired = results_tracker.expire_pending(PENDING_CONFIRMATION_TIMEOUT);
+            if expired > 0 {
+                self.collector.record_failures("expired without confirmation", expired);
             }
 
             if use_live_display || use_snapshot_tx {
                 if last_progress_report.elapsed() >= DISPLAY_RENDER_INTERVAL {
-                    self.collector.sample_throughput();
+                    self.collector.sample_throughput(start.elapsed());
                     let snap = self.build_snapshot(
                         start,
-                        &confirmer_handle,
+                        &results_tracker,
                         max_in_flight_per_sender,
                         account_count,
                     );
@@ -760,14 +1112,17 @@ impl LoadRunner {
                     last_progress_report = Instant::now();
                 }
             } else if last_progress_report.elapsed() >= PROGRESS_REPORT_INTERVAL {
-                self.collector.sample_throughput();
+                self.collector.sample_throughput(start.elapsed());
                 let elapsed_secs = start.elapsed().as_secs();
                 let submitted = self.collector.submitted_count();
                 let confirmed = self.collector.confirmed_count();
                 let failed = self.collector.failed_count();
-                let in_flight = confirmer_handle.total_in_flight();
-                let senders_blocked = confirmer_handle.senders_at_limit(max_in_flight_per_sender);
+                let reverted = self.collector.reverted_count();
+                let in_flight = results_tracker.total_in_flight();
+                let senders_blocked = results_tracker.senders_at_limit(max_in_flight_per_sender);
                 let (p50, p99) = self.collector.rolling_p50_p99();
+                let (block_receipt_delay_p50, block_receipt_delay_p99) =
+                    self.collector.rolling_block_receipt_delay_p50_p99();
                 let (flashblocks_p50, flashblocks_p99) =
                     self.collector.rolling_flashblocks_p50_p99();
                 info!(
@@ -775,11 +1130,14 @@ impl LoadRunner {
                     submitted,
                     confirmed,
                     failed,
+                    reverted,
                     in_flight,
                     senders_blocked,
                     gas_price = self.gas_price,
                     p50_ms = p50.as_millis() as u64,
                     p99_ms = p99.as_millis() as u64,
+                    block_receipt_delay_p50_ms = block_receipt_delay_p50.as_millis() as u64,
+                    block_receipt_delay_p99_ms = block_receipt_delay_p99.as_millis() as u64,
                     flashblocks_p50_ms = flashblocks_p50.as_millis() as u64,
                     flashblocks_p99_ms = flashblocks_p99.as_millis() as u64,
                     "progress"
@@ -794,12 +1152,15 @@ impl LoadRunner {
 
             while pending_batch.len() < batch_size && batch_start.elapsed() < batch_timeout {
                 let account = &self.accounts.accounts()[current_account_idx];
-                let sender_in_flight = confirmer_handle.in_flight_for(&account.address);
+                let queued = queued_per_sender.get(&account.address).copied().unwrap_or(0);
+                let sender_in_flight =
+                    results_tracker.in_flight_for(&account.address).saturating_add(queued);
 
                 if sender_in_flight >= max_in_flight_per_sender {
                     debug!(
                         sender = %account.address,
                         in_flight = sender_in_flight,
+                        queued,
                         max = max_in_flight_per_sender,
                         "sender in-flight limit reached, skipping to next"
                     );
@@ -826,7 +1187,17 @@ impl LoadRunner {
                 let data = tx_request.input.input().cloned().unwrap_or_default();
                 let gas_limit = tx_request.gas.unwrap_or(21_000);
 
-                pending_batch.push(PreparedTx { from, to: to_addr, value, data, gas_limit });
+                pending_batch.push(PreparedTransaction {
+                    from,
+                    to: to_addr,
+                    value,
+                    data,
+                    gas_limit,
+                });
+                queued_per_sender
+                    .entry(from)
+                    .and_modify(|count| *count = count.saturating_add(1))
+                    .or_insert(1);
 
                 current_account_idx = (current_account_idx + 1) % account_count;
             }
@@ -843,95 +1214,91 @@ impl LoadRunner {
             rate_limiter.tick_batch(pending_batch.len()).await;
 
             let batch = std::mem::replace(&mut pending_batch, Vec::with_capacity(batch_size));
-            let permit = Arc::clone(&semaphore)
-                .acquire_owned()
-                .await
-                .expect("submit batch semaphore closed");
-            let ctx = BatchSubmitCtx {
-                providers: Arc::clone(&providers),
-                signers: Arc::clone(&signers),
-                batch_rpc: batch_rpc.clone(),
-                nonce_managers: Arc::clone(&nonce_managers),
-                confirmer_handle: confirmer_handle.clone(),
-                submit_event_tx: submit_event_tx.clone(),
-                gas_price: self.gas_price,
-                chain_id: self.config.chain_id,
-                max_gas_price: self.config.max_gas_price,
-            };
-            tokio::spawn(async move {
-                let _permit = permit;
-                let batch_len = batch.len();
-                match AssertUnwindSafe(Self::submit_batch(ctx.clone(), batch)).catch_unwind().await
-                {
-                    Ok(submitted) => debug!(submitted, "batch submitted"),
-                    Err(_) => {
-                        error!(batch_len, "batch submission task panicked");
-                        for _ in 0..batch_len {
-                            let _ = ctx
-                                .submit_event_tx
-                                .send(SubmitEvent::Failed("task panicked".into()))
-                                .await;
-                        }
-                    }
+            let batch_id = next_submit_batch_id.fetch_add(1, Ordering::SeqCst);
+            let batch_len = batch.len();
+            let submit_batch =
+                PreparedBatch { id: batch_id, gas_price: self.gas_price, txs: batch };
+            match submission_pipeline.enqueue_prepared(submit_batch).await {
+                Ok(()) => {
+                    debug!(batch_id, batch_len, "queued submit batch");
                 }
-            });
-        }
-
-        if !pending_batch.is_empty() {
-            let permit = Arc::clone(&semaphore)
-                .acquire_owned()
-                .await
-                .expect("submit batch semaphore closed");
-            let ctx = BatchSubmitCtx {
-                providers: Arc::clone(&providers),
-                signers: Arc::clone(&signers),
-                batch_rpc: batch_rpc.clone(),
-                nonce_managers: Arc::clone(&nonce_managers),
-                confirmer_handle: confirmer_handle.clone(),
-                submit_event_tx: submit_event_tx.clone(),
-                gas_price: self.gas_price,
-                chain_id: self.config.chain_id,
-                max_gas_price: self.config.max_gas_price,
-            };
-            tokio::spawn(async move {
-                let _permit = permit;
-                let batch_len = pending_batch.len();
-                match AssertUnwindSafe(Self::submit_batch(ctx.clone(), pending_batch))
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(submitted) => debug!(submitted, "final batch submitted"),
-                    Err(_) => {
-                        error!(batch_len, "final batch submission task panicked");
-                        for _ in 0..batch_len {
-                            let _ = ctx
-                                .submit_event_tx
-                                .send(SubmitEvent::Failed("task panicked".into()))
-                                .await;
-                        }
-                    }
-                }
-            });
-        }
-
-        let all_permits = Arc::clone(&semaphore)
-            .acquire_many_owned(SUBMIT_BATCH_CONCURRENCY as u32)
-            .await
-            .expect("submit batch semaphore closed");
-        drop(all_permits);
-
-        // Close the channel so the drain below cannot miss late events.
-        drop(submit_event_tx);
-
-        while let Ok(event) = submit_event_rx.try_recv() {
-            match event {
-                SubmitEvent::Submitted(tx_hash) => self.collector.record_submitted(tx_hash),
-                SubmitEvent::Failed(reason) => {
-                    self.collector.record_failed(TxHash::ZERO, &reason);
+                Err(batch) => {
+                    warn!(batch_id, batch_len, "submit queue closed, failing batch");
+                    SubmissionPipeline::fail_prepared_batch(
+                        &submit_event_tx,
+                        batch.txs,
+                        "submit queue closed",
+                    )
+                    .await;
+                    rate_limiter.reset_tick();
+                    break;
                 }
             }
         }
 
+        if !pending_batch.is_empty() {
+            let final_batch_len = pending_batch.len();
+            let batch_id = next_submit_batch_id.fetch_add(1, Ordering::SeqCst);
+            let submit_batch =
+                PreparedBatch { id: batch_id, gas_price: self.gas_price, txs: pending_batch };
+            match submission_pipeline.enqueue_prepared(submit_batch).await {
+                Ok(()) => {
+                    debug!(batch_id, batch_len = final_batch_len, "queued final submit batch");
+                }
+                Err(batch) => {
+                    warn!(batch_id, batch_len = final_batch_len, "submit queue closed");
+                    SubmissionPipeline::fail_prepared_batch(
+                        &submit_event_tx,
+                        batch.txs,
+                        "submit queue closed",
+                    )
+                    .await;
+                }
+            }
+        }
+
+        submission_pipeline.close_input();
+
+        let drain_started = Instant::now();
+        while submission_pipeline.pending_batches() > 0
+            && drain_started.elapsed() < SUBMIT_DRAIN_TIMEOUT
+        {
+            Self::drain_submit_events(
+                &mut submit_event_rx,
+                &mut queued_per_sender,
+                &mut self.collector,
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let pending_submit_batches = submission_pipeline.pending_batches();
+        if pending_submit_batches > 0 {
+            warn!(
+                pending_submit_batches,
+                "timed out waiting for submit queue to drain, closing submit queue"
+            );
+            let failures =
+                submission_pipeline.close_and_fail_queued("submit queue abandoned").await;
+            Self::apply_queued_submit_failures(
+                failures,
+                &mut queued_per_sender,
+                &mut self.collector,
+            );
+        }
+        submission_pipeline.shutdown_and_join(SUBMIT_WORKER_SHUTDOWN_TIMEOUT).await;
+        drop(submission_pipeline);
+
+        // Close the channel so the drain below cannot miss late events.
+        drop(submit_event_tx);
+
+        Self::drain_submit_events(
+            &mut submit_event_rx,
+            &mut queued_per_sender,
+            &mut self.collector,
+        );
+
+        // Keep background watchers alive through the drain so late flashblock
+        // inclusions and block observations can still be joined into metrics.
         self.stop_flag.store(true, Ordering::SeqCst);
 
         if let Some(display) = &self.display {
@@ -939,7 +1306,7 @@ impl LoadRunner {
         }
 
         let submitted = self.collector.submitted_count();
-        let in_flight = confirmer_handle.total_in_flight();
+        let in_flight = results_tracker.total_in_flight();
         let elapsed = start.elapsed();
         info!(
             submitted,
@@ -949,51 +1316,42 @@ impl LoadRunner {
             "load test complete, draining confirmations"
         );
 
-        let drain_timeout = Duration::from_secs(20);
         let drain_start = Instant::now();
-        let confirmer_poll_interval_ms = 600; // Slightly longer than confirmer's 200ms poll
+        let results_poll_interval = Duration::from_millis(600);
         let mut last_confirmed_at = start.elapsed();
 
-        while drain_start.elapsed() < drain_timeout {
-            match tokio::time::timeout(
-                Duration::from_millis(confirmer_poll_interval_ms),
-                metrics_rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(metrics)) => {
+        while drain_start.elapsed() < CONFIRMATION_DRAIN_TIMEOUT {
+            let metrics = results_tracker.drain_confirmed_metrics();
+            if !metrics.is_empty() {
+                last_confirmed_at = start.elapsed();
+                for metrics in metrics {
                     self.collector.record_confirmed(metrics);
-                    last_confirmed_at = start.elapsed();
                 }
-                Ok(None) => break,
-                Err(_) if confirmer_task.is_finished() => {
-                    while let Ok(metrics) = metrics_rx.try_recv() {
-                        self.collector.record_confirmed(metrics);
-                        last_confirmed_at = start.elapsed();
-                    }
-                    break;
-                }
-                Err(_) => continue,
             }
+
+            let expired = results_tracker.expire_pending(PENDING_CONFIRMATION_TIMEOUT);
+            if expired > 0 {
+                self.collector.record_failures("expired without confirmation", expired);
+            }
+
+            if results_tracker.pending_count() == 0 {
+                break;
+            }
+
+            tokio::time::sleep(results_poll_interval).await;
         }
 
-        // Let the confirmer finish gracefully (stop_flag is already set).
-        // Block watcher stays alive so deferred block latencies can still resolve.
-        if tokio::time::timeout(Duration::from_secs(2), confirmer_task).await.is_err() {
-            warn!("confirmer did not shut down in time");
-        }
-
-        while let Ok(metrics) = metrics_rx.try_recv() {
+        for metrics in results_tracker.drain_confirmed_metrics() {
             self.collector.record_confirmed(metrics);
             last_confirmed_at = start.elapsed();
         }
 
-        // Now safe to stop WebSocket tasks — confirmer is done.
+        // Now safe to stop background watcher tasks.
         self.cancel_token.cancel();
 
-        if let Some(task) = flashblock_tracker_task {
+        if let Some(task) = flashblock_watcher_task {
             match tokio::time::timeout(Duration::from_secs(2), task).await {
-                Ok(Err(e)) if e.is_panic() => warn!(error = %e, "flashblock tracker panicked"),
+                Ok(Err(e)) if e.is_panic() => warn!(error = %e, "flashblock watcher panicked"),
                 _ => {}
             }
         }
@@ -1004,25 +1362,22 @@ impl LoadRunner {
             }
         }
 
-        let expired = confirmer_handle.expired_count();
-        if expired > 0 {
-            self.collector.record_failures("expired without confirmation", expired);
-        }
-
         let confirmed = self.collector.confirmed_count();
         info!(confirmed, submitted, "confirmation collection complete");
 
-        Ok(self.collector.summarize(last_confirmed_at))
+        Ok(self.collector.summarize(last_confirmed_at, self.config_summary.clone()))
     }
 
     fn build_snapshot(
         &mut self,
         start: Instant,
-        confirmer_handle: &ConfirmerHandle,
+        results_tracker: &ResultsTracker,
         max_in_flight_per_sender: u64,
         account_count: usize,
     ) -> DisplaySnapshot {
         let (p50, p99) = self.collector.rolling_p50_p99();
+        let (block_receipt_delay_p50, block_receipt_delay_p99) =
+            self.collector.rolling_block_receipt_delay_p50_p99();
         let (flashblocks_p50, flashblocks_p99) = self.collector.rolling_flashblocks_p50_p99();
         DisplaySnapshot {
             elapsed: start.elapsed(),
@@ -1030,13 +1385,16 @@ impl LoadRunner {
             submitted: self.collector.submitted_count(),
             confirmed: self.collector.confirmed_count(),
             failed: self.collector.failed_count(),
-            in_flight: confirmer_handle.total_in_flight(),
-            senders_blocked: confirmer_handle.senders_at_limit(max_in_flight_per_sender),
+            reverted: self.collector.reverted_count(),
+            in_flight: results_tracker.total_in_flight(),
+            senders_blocked: results_tracker.senders_at_limit(max_in_flight_per_sender),
             total_senders: account_count,
             rolling_tps: self.collector.rolling_tps(),
             rolling_gps: self.collector.rolling_gps(),
             p50_latency: p50,
             p99_latency: p99,
+            block_receipt_delay_p50,
+            block_receipt_delay_p99,
             flashblocks_p50_latency: flashblocks_p50,
             flashblocks_p99_latency: flashblocks_p99,
             gas_price_gwei: self.gas_price as f64 / 1e9,
@@ -1048,229 +1406,39 @@ impl LoadRunner {
         }
     }
 
-    async fn submit_batch(ctx: BatchSubmitCtx, batch: Vec<PreparedTx>) -> u64 {
-        let max_fee = ctx.gas_price.saturating_mul(2).min(ctx.max_gas_price);
-        let priority_fee = (ctx.gas_price / 10).max(1);
-        let chain_id = ctx.chain_id;
-
-        // Phase 1: Acquire nonces and sign all transactions locally.
-        let mut signed_txs: Vec<SignedTx> = Vec::with_capacity(batch.len());
-
-        for prepared in &batch {
-            let Some(signer) = ctx.signers.get(&prepared.from) else {
-                warn!(from = %prepared.from, "no signer for sender");
-                let _ = ctx.submit_event_tx.send(SubmitEvent::Failed("no signer".into())).await;
-                continue;
-            };
-
-            let Some(nonce_manager) = ctx.nonce_managers.get(&prepared.from) else {
-                warn!(from = %prepared.from, "no nonce manager for sender");
-                let _ =
-                    ctx.submit_event_tx.send(SubmitEvent::Failed("no nonce manager".into())).await;
-                continue;
-            };
-
-            let nonce_guard = match nonce_manager.next_nonce().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    warn!(from = %prepared.from, error = %e, "failed to acquire nonce");
-                    let _ = ctx
-                        .submit_event_tx
-                        .send(SubmitEvent::Failed("nonce acquisition failed".into()))
-                        .await;
-                    continue;
+    fn drain_submit_events(
+        submit_event_rx: &mut mpsc::Receiver<SubmitEvent>,
+        queued_per_sender: &mut HashMap<Address, u64>,
+        collector: &mut MetricsCollector,
+    ) {
+        while let Ok(event) = submit_event_rx.try_recv() {
+            match event {
+                SubmitEvent::Submitted(tx_hash) => collector.record_submitted(tx_hash),
+                SubmitEvent::Failed(reason) => {
+                    collector.record_failed(TxHash::ZERO, &reason);
                 }
-            };
-            let nonce = nonce_guard.nonce();
-
-            let mut tx = TransactionRequest::default()
-                .with_from(prepared.from)
-                .with_value(prepared.value)
-                .with_input(prepared.data.clone())
-                .with_nonce(nonce)
-                .with_chain_id(chain_id)
-                .with_max_fee_per_gas(max_fee)
-                .with_max_priority_fee_per_gas(priority_fee)
-                .with_gas_limit(prepared.gas_limit);
-            if let Some(to) = prepared.to {
-                tx = tx.with_to(to);
-            }
-
-            let typed_tx = match tx.build_typed_tx() {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(from = %prepared.from, nonce, error = ?e, "failed to build typed tx");
-                    nonce_guard.rollback();
-                    let _ = ctx
-                        .submit_event_tx
-                        .send(SubmitEvent::Failed("tx build failed".into()))
-                        .await;
-                    continue;
-                }
-            };
-
-            let sig_hash = typed_tx.signature_hash();
-            let signature = match signer.sign_hash_sync(&sig_hash) {
-                Ok(sig) => sig,
-                Err(e) => {
-                    warn!(from = %prepared.from, nonce, error = %e, "failed to sign tx");
-                    nonce_guard.rollback();
-                    let _ = ctx
-                        .submit_event_tx
-                        .send(SubmitEvent::Failed("signing failed".into()))
-                        .await;
-                    continue;
-                }
-            };
-
-            let signed = typed_tx.into_signed(signature);
-            let tx_hash = *signed.hash();
-            let raw = Bytes::from(signed.encoded_2718());
-
-            // Drop the nonce guard immediately after signing. The guard
-            // holds the NonceManager mutex; keeping it alive until after the
-            // batch RPC send would block concurrent batch tasks that share
-            // the same sender, and cause a deadlock when batch_size >
-            // sender_count (duplicate senders in the same batch).
-            drop(nonce_guard);
-
-            signed_txs.push(SignedTx { raw, tx_hash, from: prepared.from, nonce });
-        }
-
-        if signed_txs.is_empty() {
-            return 0;
-        }
-
-        // Phase 2: Send all signed transactions in a single JSON-RPC batch.
-        let raw_list: Vec<Bytes> = signed_txs.iter().map(|s| s.raw.clone()).collect();
-        let batch_results = match ctx.batch_rpc.send_raw_transactions(&raw_list).await {
-            Ok(results) => results,
-            Err(e) => {
-                warn!(error = %e, count = signed_txs.len(), "batch RPC failed, falling back to individual sends");
-                return Self::submit_individually(ctx, signed_txs).await;
-            }
-        };
-
-        // Phase 3: Process batch results.
-        let mut submitted = 0u64;
-        let mut retry_txs: Vec<SignedTx> = Vec::new();
-
-        for (signed, result) in signed_txs.into_iter().zip(batch_results) {
-            match result {
-                BatchSendResult::Success(hash) => {
-                    // Server may return a different hash than we computed locally
-                    // (shouldn't happen, but use server's hash for tracking).
-                    let tracked_hash = if hash != signed.tx_hash {
-                        debug!(
-                            local = %signed.tx_hash,
-                            server = %hash,
-                            "tx hash mismatch, using server hash"
-                        );
-                        hash
-                    } else {
-                        signed.tx_hash
-                    };
-                    ctx.confirmer_handle.record_submitted(tracked_hash, signed.from).await;
-                    let _ = ctx.submit_event_tx.send(SubmitEvent::Submitted(tracked_hash)).await;
-                    debug!(tx_hash = %tracked_hash, from = %signed.from, nonce = signed.nonce, "tx submitted (batch)");
-                    submitted += 1;
-                }
-                BatchSendResult::Error(ref msg) => {
-                    let is_txpool_full =
-                        msg.contains("txpool is full") || msg.contains("transaction pool is full");
-
-                    if is_txpool_full {
-                        retry_txs.push(signed);
-                        continue;
+                SubmitEvent::Released(from) => {
+                    if let Some(count) = queued_per_sender.get_mut(&from) {
+                        *count = count.saturating_sub(1);
                     }
-
-                    if msg.contains("nonce too low") {
-                        debug!(from = %signed.from, nonce = signed.nonce, "nonce too low, already confirmed on chain");
-                        let _ = ctx
-                            .submit_event_tx
-                            .send(SubmitEvent::Failed("nonce too low".into()))
-                            .await;
-                        continue;
-                    }
-
-                    debug!(from = %signed.from, nonce = signed.nonce, error = %msg, "tx rejected in batch");
-                    let _ = ctx.submit_event_tx.send(SubmitEvent::Failed(msg.clone())).await;
                 }
             }
         }
-
-        // Phase 4: Retry txpool-full rejections individually with backoff.
-        if !retry_txs.is_empty() {
-            debug!(count = retry_txs.len(), "retrying txpool-full rejections individually");
-            submitted += Self::submit_individually(ctx, retry_txs).await;
-        }
-
-        submitted
     }
 
-    async fn submit_individually(ctx: BatchSubmitCtx, signed_txs: Vec<SignedTx>) -> u64 {
-        let mut submitted = 0u64;
-
-        for signed in signed_txs {
-            let Some(provider) = ctx.providers.get(&signed.from) else {
-                warn!(from = %signed.from, "no cached provider for sender");
-                let _ = ctx.submit_event_tx.send(SubmitEvent::Failed("no provider".into())).await;
-                continue;
-            };
-
-            let mut attempts = 0u32;
-            let max_attempts = 3u32;
-            let mut backoff = AdaptiveBackoff::default();
-
-            loop {
-                match provider.send_raw_transaction(&signed.raw).await {
-                    Ok(pending) => {
-                        let tx_hash = *pending.tx_hash();
-                        ctx.confirmer_handle.record_submitted(tx_hash, signed.from).await;
-                        let _ = ctx.submit_event_tx.send(SubmitEvent::Submitted(tx_hash)).await;
-                        debug!(tx_hash = %tx_hash, from = %signed.from, nonce = signed.nonce, "tx submitted (individual fallback)");
-                        submitted += 1;
-                        break;
-                    }
-                    Err(e) => {
-                        let error_str = e.to_string();
-                        attempts += 1;
-
-                        let is_txpool_full = error_str.contains("txpool is full")
-                            || error_str.contains("transaction pool is full");
-
-                        if is_txpool_full && attempts < max_attempts {
-                            backoff.record_error();
-                            let delay = backoff.current();
-                            debug!(
-                                attempt = attempts,
-                                backoff_ms = delay.as_millis(),
-                                from = %signed.from,
-                                nonce = signed.nonce,
-                                "txpool full, retrying with backoff"
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-
-                        if error_str.contains("nonce too low") {
-                            debug!(from = %signed.from, nonce = signed.nonce, "nonce too low");
-                            let _ = ctx
-                                .submit_event_tx
-                                .send(SubmitEvent::Failed("nonce too low".into()))
-                                .await;
-                            break;
-                        }
-
-                        debug!(from = %signed.from, nonce = signed.nonce, error = %error_str, "tx submission failed");
-                        let _ = ctx.submit_event_tx.send(SubmitEvent::Failed(error_str)).await;
-                        break;
-                    }
-                }
+    fn apply_queued_submit_failures(
+        failures: QueuedSubmitFailures,
+        queued_per_sender: &mut HashMap<Address, u64>,
+        collector: &mut MetricsCollector,
+    ) {
+        for (from, released) in failures.released_by_sender {
+            if let Some(count) = queued_per_sender.get_mut(&from) {
+                *count = count.saturating_sub(released);
             }
         }
-
-        submitted
+        if failures.failed_count > 0 {
+            collector.record_failures(failures.reason, failures.failed_count);
+        }
     }
 
     /// Drains all test account balances back to the funder address.
@@ -1281,10 +1449,10 @@ impl LoadRunner {
     pub async fn drain_accounts(&self, funding_key: PrivateKeySigner) -> Result<U256> {
         let funder_address = funding_key.address();
         let client = self.client.clone();
-        let rpc_url = self.config.rpc_http_url.clone();
+        let primary_submission_rpc = self.config.primary_submission_rpc().clone();
         let chain_id = self.config.chain_id;
 
-        let gas_price = client.get_gas_price().await?;
+        let gas_price = client.get_gas_price().await.rpc("get gas price")?;
         let max_priority_fee = (gas_price / 10).max(1);
         // Ensure max_fee >= max_priority_fee (EIP-1559 requirement).
         let max_fee =
@@ -1306,9 +1474,13 @@ impl LoadRunner {
             .into_iter()
             .map(|(address, signer)| {
                 let client = client.clone();
-                let rpc_url = rpc_url.clone();
+                let primary_submission_rpc = primary_submission_rpc.clone();
                 async move {
-                    let balance = client.get_pending_balance(address).await?;
+                    let balance = client
+                        .get_balance(address)
+                        .block_id(BlockNumberOrTag::Pending.into())
+                        .await
+                        .rpc("get pending balance")?;
                     if balance <= drain_gas_cost {
                         debug!(
                             address = %address,
@@ -1320,12 +1492,12 @@ impl LoadRunner {
 
                     let send_amount = balance.saturating_sub(drain_gas_cost);
                     let wallet = EthereumWallet::from(signer);
-                    let provider = create_wallet_provider(rpc_url, wallet);
+                    let provider = create_wallet_provider(primary_submission_rpc, wallet);
                     let nonce = provider
                         .get_transaction_count(address)
                         .pending()
                         .await
-                        .map_err(|e| BaselineError::Rpc(e.to_string()))?;
+                        .rpc("get pending transaction count")?;
 
                     let tx = TransactionRequest::default()
                         .with_to(funder_address)
@@ -1345,7 +1517,7 @@ impl LoadRunner {
                                 tx_hash = %tx_hash,
                                 "drain tx sent"
                             );
-                            Ok(Some((tx_hash, address, send_amount)))
+                            Ok(Some((address, send_amount)))
                         }
                         Err(e) => {
                             warn!(from = %address, error = %e, "drain tx failed, skipping");
@@ -1366,8 +1538,8 @@ impl LoadRunner {
         let mut pending_txs = Vec::new();
         let mut total_drained = U256::ZERO;
         for result in drain_results {
-            if let Some((tx_hash, address, amount)) = result? {
-                pending_txs.push((tx_hash, address));
+            if let Some((address, amount)) = result? {
+                pending_txs.push(address);
                 total_drained = total_drained.saturating_add(amount);
             }
         }
@@ -1377,13 +1549,14 @@ impl LoadRunner {
             return Ok(U256::ZERO);
         }
 
-        let pb_confirm = self.progress_bar(pending_txs.len() as u64, "Confirming drain txs");
-        info!(count = pending_txs.len(), total = %total_drained, "waiting for drain txs to confirm");
+        let pb_confirm = self.progress_bar(pending_txs.len() as u64, "Waiting for drained funds");
+        info!(count = pending_txs.len(), total = %total_drained, "waiting for drained balances");
 
         if let Err(e) =
-            Self::await_confirmations(&self.batch_rpc, &mut pending_txs, &pb_confirm).await
+            Self::await_drained_balances(&client, &mut pending_txs, drain_gas_cost, &pb_confirm)
+                .await
         {
-            warn!(error = %e, "some drain txs did not confirm within timeout");
+            warn!(error = %e, "some drain balances did not settle within timeout");
         }
         pb_confirm.finish_and_clear();
 
@@ -1405,57 +1578,156 @@ impl LoadRunner {
         pb
     }
 
-    async fn await_confirmations(
-        batch_rpc: &BatchRpcClient,
-        pending_txs: &mut Vec<(TxHash, Address)>,
+    /// Waits for account balances to reach a target after funding transfers.
+    async fn await_balances(
+        client: &QueryProvider,
+        pending_accounts: &mut Vec<Address>,
+        target_balance: U256,
         pb: &ProgressBar,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let timeout = Duration::from_secs(60);
         let poll_interval = Duration::from_millis(500);
         let start = Instant::now();
 
-        while !pending_txs.is_empty() && start.elapsed() < timeout {
+        let mut settled = 0usize;
+
+        while !pending_accounts.is_empty() && start.elapsed() < timeout {
             tokio::time::sleep(poll_interval).await;
 
-            let hashes: Vec<TxHash> = pending_txs.iter().map(|(h, _)| *h).collect();
-            let results = match batch_rpc.batch_get_transaction_receipts(&hashes).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(error = %e, "batch receipt fetch failed during confirmation wait");
-                    continue;
-                }
-            };
-
             let mut still_pending = Vec::new();
-            for ((tx_hash, address), receipt_opt) in pending_txs.drain(..).zip(results.into_iter())
-            {
-                if receipt_opt.is_some() {
-                    debug!(tx_hash = %tx_hash, address = %address, "tx confirmed");
-                    pb.inc(1);
-                } else {
-                    still_pending.push((tx_hash, address));
+            for address in pending_accounts.drain(..) {
+                match client.get_balance(address).await.rpc("get balance") {
+                    Ok(balance) if balance >= target_balance => {
+                        debug!(address = %address, balance = %balance, "funding balance settled");
+                        settled += 1;
+                        pb.inc(1);
+                    }
+                    Ok(_) => {
+                        still_pending.push(address);
+                    }
+                    Err(e) => {
+                        warn!(address = %address, error = %e, "failed to check funding balance");
+                        still_pending.push(address);
+                    }
                 }
             }
-            *pending_txs = still_pending;
+            *pending_accounts = still_pending;
         }
 
-        if !pending_txs.is_empty() {
-            let unconfirmed: Vec<_> = pending_txs.iter().map(|(_, addr)| addr).collect();
+        if !pending_accounts.is_empty() {
             return Err(BaselineError::Transaction(format!(
-                "txs did not confirm within timeout: {unconfirmed:?}"
+                "accounts did not reach funding target within timeout: {pending_accounts:?}"
             )));
         }
 
-        Ok(())
+        Ok(settled)
+    }
+
+    /// Waits for token balances to reach a target after mint/distribution transactions.
+    async fn await_token_balances(
+        client: &QueryProvider,
+        pending_accounts: &mut Vec<(Address, Address)>,
+        target_balance: U256,
+        pb: &ProgressBar,
+    ) -> Result<usize> {
+        let timeout = Duration::from_secs(60);
+        let poll_interval = Duration::from_millis(500);
+        let start = Instant::now();
+        let mut settled = 0usize;
+
+        while !pending_accounts.is_empty() && start.elapsed() < timeout {
+            tokio::time::sleep(poll_interval).await;
+
+            let mut still_pending = Vec::new();
+            for (token, sender) in pending_accounts.drain(..) {
+                let call_data = Self::encode_erc20_balance_of(sender);
+                match client
+                    .call(TransactionRequest::default().with_to(token).with_input(call_data).into())
+                    .await
+                    .rpc("eth_call")
+                {
+                    Ok(bytes) if U256::from_be_slice(bytes.as_ref()) >= target_balance => {
+                        debug!(token = %token, sender = %sender, "token balance settled");
+                        settled += 1;
+                        pb.inc(1);
+                    }
+                    Ok(_) => {
+                        still_pending.push((token, sender));
+                    }
+                    Err(e) => {
+                        warn!(
+                            token = %token,
+                            sender = %sender,
+                            error = %e,
+                            "failed to check token balance"
+                        );
+                        still_pending.push((token, sender));
+                    }
+                }
+            }
+            *pending_accounts = still_pending;
+        }
+
+        if !pending_accounts.is_empty() {
+            return Err(BaselineError::Transaction(format!(
+                "token balances did not reach target within timeout: {pending_accounts:?}"
+            )));
+        }
+
+        Ok(settled)
+    }
+
+    /// Waits for source account balances to drop to the post-drain dust threshold.
+    async fn await_drained_balances(
+        client: &QueryProvider,
+        pending_accounts: &mut Vec<Address>,
+        max_remaining: U256,
+        pb: &ProgressBar,
+    ) -> Result<usize> {
+        let timeout = Duration::from_secs(60);
+        let poll_interval = Duration::from_millis(500);
+        let start = Instant::now();
+        let mut settled = 0usize;
+
+        while !pending_accounts.is_empty() && start.elapsed() < timeout {
+            tokio::time::sleep(poll_interval).await;
+
+            let mut still_pending = Vec::new();
+            for address in pending_accounts.drain(..) {
+                match client.get_balance(address).await.rpc("get balance") {
+                    Ok(balance) if balance <= max_remaining => {
+                        debug!(address = %address, balance = %balance, "drain balance settled");
+                        settled += 1;
+                        pb.inc(1);
+                    }
+                    Ok(_) => {
+                        still_pending.push(address);
+                    }
+                    Err(e) => {
+                        warn!(address = %address, error = %e, "failed to check drain balance");
+                        still_pending.push(address);
+                    }
+                }
+            }
+            *pending_accounts = still_pending;
+        }
+
+        if !pending_accounts.is_empty() {
+            return Err(BaselineError::Transaction(format!(
+                "accounts did not drain within timeout: {pending_accounts:?}"
+            )));
+        }
+
+        Ok(settled)
     }
 
     /// Signals the load test to stop gracefully.
     ///
-    /// Only sets `stop_flag` — does **not** cancel WebSocket tasks or clean up
-    /// resources. The caller must ensure [`run()`](Self::run) completes, which
-    /// handles draining confirmations and cancelling background tasks.
+    /// Sets `stop_flag` and cancels background watcher tasks. The caller must ensure
+    /// [`run()`](Self::run) completes, which handles draining confirmations.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
+        self.cancel_token.cancel();
     }
 
     /// Returns a clone of the stop flag for external coordination.
@@ -1500,7 +1772,7 @@ impl std::fmt::Debug for LoadRunner {
         f.debug_struct("LoadRunner")
             .field("config", &self.config)
             .field("accounts", &self.accounts.len())
-            .field("providers_cached", &self.providers.len())
+            .field("signers_cached", &self.signers.len())
             .finish_non_exhaustive()
     }
 }

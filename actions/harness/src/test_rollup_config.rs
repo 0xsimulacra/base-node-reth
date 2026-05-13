@@ -90,6 +90,23 @@ impl TestRollupConfigBuilder {
         self
     }
 
+    /// Activates all forks from Canyon through Granite at genesis, leaving Holocene
+    /// and later as `None`.
+    ///
+    /// Replaces the entire hardfork schedule. Use when a test needs the last
+    /// pre-Holocene cumulative schedule.
+    pub fn through_granite(mut self) -> Self {
+        self.config.hardforks = HardForkConfig {
+            canyon_time: Some(0),
+            delta_time: Some(0),
+            ecotone_time: Some(0),
+            fjord_time: Some(0),
+            granite_time: Some(0),
+            ..Default::default()
+        };
+        self
+    }
+
     /// Activates all forks from Canyon through Holocene at genesis, leaving Isthmus
     /// and later as `None`.
     ///
@@ -139,10 +156,18 @@ impl TestRollupConfigBuilder {
 
     /// Sets the Base Azul activation timestamp.
     ///
-    /// Base Azul is a standalone Base-specific fork, independent of the OP
-    /// cascade chain. Chaining after any `through_*` method is fine.
+    /// Base Azul is a standalone Base-specific fork, independent of the
+    /// inherited fork cascade. Chaining after any `through_*` method is fine.
     pub const fn with_azul_at(mut self, t: u64) -> Self {
         self.config.hardforks.base.azul = Some(t);
+        self
+    }
+
+    /// Sets the Beryl activation timestamp.
+    ///
+    /// Beryl is a standalone Base-specific fork, independent of the inherited fork cascade.
+    pub const fn with_beryl_at(mut self, t: u64) -> Self {
+        self.config.hardforks.base.beryl = Some(t);
         self
     }
 
@@ -162,6 +187,7 @@ impl TestRollupConfigBuilder {
         self.config.hardforks.isthmus_time = Some(0);
         self.config.hardforks.jovian_time = Some(0);
         self.config.hardforks.base.azul = Some(0);
+        self.config.hardforks.base.beryl = Some(0);
         self
     }
 

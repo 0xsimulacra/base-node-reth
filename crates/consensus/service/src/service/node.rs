@@ -27,12 +27,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AlloyL1BlockFetcher, Conductor, ConductorClient, DelayedL1OriginSelectorProvider,
     DelegateDerivationActor, DerivationActor, DerivationDelegateClient, DerivationError,
-    EngineActor, EngineActorRequest, EngineConfig, EngineProcessor, EngineRpcProcessor,
-    L1OriginSelector, L1WatcherActor, L1WatcherQueryProcessor, NetworkActor, NetworkBuilder,
-    NetworkConfig, NodeActor, NodeMode, PayloadBuilder, QueuedDerivationEngineClient,
-    QueuedEngineDerivationClient, QueuedEngineRpcClient, QueuedL1WatcherDerivationClient,
-    QueuedNetworkEngineClient, QueuedSequencerAdminAPIClient, QueuedSequencerEngineClient,
-    RecoveryModeGuard, RpcActor, RpcContext, SequencerActor, SequencerConfig,
+    EngineActor, EngineActorRequest, EngineConfig, EngineProcessor, EngineProcessorOptions,
+    EngineRpcProcessor, L1OriginSelector, L1WatcherActor, L1WatcherQueryProcessor, NetworkActor,
+    NetworkBuilder, NetworkConfig, NodeActor, NodeMode, PayloadBuilder,
+    QueuedDerivationEngineClient, QueuedEngineDerivationClient, QueuedEngineRpcClient,
+    QueuedL1WatcherDerivationClient, QueuedNetworkEngineClient, QueuedSequencerAdminAPIClient,
+    QueuedSequencerEngineClient, RecoveryModeGuard, RpcActor, RpcContext, SequencerActor,
+    SequencerConfig,
     actors::{BlockStream, NetworkInboundData, QueuedUnsafePayloadGossipClient},
 };
 
@@ -232,20 +233,25 @@ impl RollupNode {
         derivation_client: QueuedEngineDerivationClient,
         unsafe_head_tx: watch::Sender<L2BlockInfo>,
         conductor: Option<Arc<dyn Conductor>>,
-    ) -> EngineActor<EngineProcessor<E, QueuedEngineDerivationClient>, EngineRpcProcessor<E>> {
+    ) -> (EngineActor<EngineProcessor<E, QueuedEngineDerivationClient>>, EngineRpcProcessor<E>)
+    {
         let engine_state = EngineState::default();
         let (engine_state_tx, engine_state_rx) = watch::channel(engine_state);
         let (engine_queue_length_tx, engine_queue_length_rx) = watch::channel(0);
         let engine = Engine::new(engine_state, engine_state_tx, engine_queue_length_tx);
 
+        let mode = self.mode();
         let engine_processor = EngineProcessor::new(
             Arc::clone(&engine_client),
             Arc::clone(&self.config),
             derivation_client,
             engine,
-            if self.mode().is_sequencer() { Some(unsafe_head_tx) } else { None },
-            conductor,
-            self.sequencer_config.sequencer_stopped,
+            EngineProcessorOptions {
+                node_mode: mode,
+                unsafe_head_tx: if mode.is_sequencer() { Some(unsafe_head_tx) } else { None },
+                conductor,
+                sequencer_stopped: self.sequencer_config.sequencer_stopped,
+            },
         );
 
         let engine_rpc_processor = EngineRpcProcessor::new(
@@ -255,12 +261,10 @@ impl RollupNode {
             engine_queue_length_rx,
         );
 
-        EngineActor::new(
-            cancellation_token,
-            engine_request_rx,
-            engine_processor,
-            engine_rpc_processor,
-        )
+        let engine_actor =
+            EngineActor::new(cancellation_token, engine_request_rx, engine_processor);
+
+        (engine_actor, engine_rpc_processor)
     }
 
     /// Starts the rollup node service.
@@ -371,6 +375,7 @@ impl RollupNode {
         let (derivation_actor_request_tx, derivation_actor_request_rx) = mpsc::channel(1024);
 
         let (engine_actor_request_tx, engine_actor_request_rx) = mpsc::channel(1024);
+        let (engine_rpc_request_tx, engine_rpc_request_rx) = mpsc::channel(1024);
         let (unsafe_head_tx, unsafe_head_rx) = watch::channel(L2BlockInfo::default());
 
         // Create the conductor client early — the engine processor needs it for the
@@ -386,7 +391,7 @@ impl RollupNode {
         let engine_conductor: Option<Arc<dyn Conductor>> =
             conductor.clone().map(|c| Arc::new(c) as Arc<dyn Conductor>);
 
-        let engine_actor = self.create_engine_actor(
+        let (engine_actor, engine_rpc_processor) = self.create_engine_actor(
             engine_client,
             cancellation.clone(),
             engine_actor_request_rx,
@@ -532,10 +537,14 @@ impl RollupNode {
         };
 
         // Create the RPC server actor.
-        let rpc = self.rpc_builder().map(|b| {
+        let rpc_builder = self.rpc_builder();
+        let engine_rpc_actor = rpc_builder
+            .as_ref()
+            .map(|_| (engine_rpc_processor, (cancellation.clone(), engine_rpc_request_rx)));
+        let rpc = rpc_builder.map(|b| {
             RpcActor::new(
                 b,
-                QueuedEngineRpcClient::new(engine_actor_request_tx.clone()),
+                QueuedEngineRpcClient::new(engine_rpc_request_tx),
                 sequencer_admin_client,
                 safe_db_reader,
             )
@@ -559,6 +568,7 @@ impl RollupNode {
                 Some((l1_query_processor, ())),
                 Some((derivation, ())),
                 Some((engine_actor, ())),
+                engine_rpc_actor,
             ]
         );
         Ok(())

@@ -1,7 +1,9 @@
 //! CLI Options Metrics
 
-use base_client_cli::P2PArgs;
 use base_common_genesis::RollupConfig;
+use base_consensus_cli::P2PArgs;
+
+use crate::bootnode::BootnodeP2PArgs;
 
 /// Metrics to record various CLI options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,9 @@ impl CliMetrics {
     /// The high-tide peer count.
     pub const P2P_PEERS_HI: &'static str = "base_node_peers_hi";
 
+    /// The identify peerstore size.
+    pub const P2P_IDENTIFY_PEERSTORE_SIZE: &'static str = "base_node_identify_peerstore_size";
+
     /// The gossip mesh d option.
     pub const P2P_GOSSIP_MESH_D: &'static str = "base_node_gossip_mesh_d";
 
@@ -64,6 +69,9 @@ impl CliMetrics {
 
     /// Top-level rollup config settings.
     pub const ROLLUP_CONFIG: &'static str = "base_node_rollup_config";
+
+    /// Whether the consensus bootnode is up.
+    pub const BOOTNODE_UP: &'static str = "base_node_bootnode_up";
 }
 
 /// Initializes metrics for the P2P configuration.
@@ -92,6 +100,7 @@ pub fn init_p2p_metrics(p2p: &P2PArgs) {
             ),
             (CliMetrics::P2P_PEERS_LO, p2p.peers_lo.to_string()),
             (CliMetrics::P2P_PEERS_HI, p2p.peers_hi.to_string()),
+            (CliMetrics::P2P_IDENTIFY_PEERSTORE_SIZE, p2p.identify_peerstore_size.to_string()),
             (CliMetrics::P2P_GOSSIP_MESH_D, p2p.gossip_mesh_d.to_string()),
             (CliMetrics::P2P_GOSSIP_MESH_D_LO, p2p.gossip_mesh_dlo.to_string()),
             (CliMetrics::P2P_GOSSIP_MESH_D_HI, p2p.gossip_mesh_dhi.to_string()),
@@ -100,6 +109,30 @@ pub fn init_p2p_metrics(p2p: &P2PArgs) {
         ]
     )
     .set(1.0);
+}
+
+/// Initializes metrics for the bootnode P2P discovery configuration.
+pub fn init_bootnode_p2p_metrics(p2p: &BootnodeP2PArgs) {
+    metrics::describe_gauge!(
+        CliMetrics::IDENTIFIER,
+        "P2P discovery configuration settings for the Base consensus bootnode"
+    );
+    metrics::describe_gauge!(CliMetrics::BOOTNODE_UP, "Whether the Base consensus bootnode is up");
+    metrics::gauge!(
+        CliMetrics::IDENTIFIER,
+        &[
+            (CliMetrics::P2P_DISCOVERY_INTERVAL, p2p.discovery_interval.to_string()),
+            (CliMetrics::P2P_ADVERTISE_IP, p2p.advertised_ip().to_string()),
+            (CliMetrics::P2P_ADVERTISE_TCP_PORT, p2p.advertised_tcp_port().to_string()),
+            (CliMetrics::P2P_ADVERTISE_UDP_PORT, p2p.advertised_udp_port().to_string()),
+        ]
+    )
+    .set(1.0);
+}
+
+/// Records that the bootnode finished startup.
+pub fn record_bootnode_up() {
+    metrics::gauge!(CliMetrics::BOOTNODE_UP).set(1.0);
 }
 
 /// Initializes metrics for the rollup config.

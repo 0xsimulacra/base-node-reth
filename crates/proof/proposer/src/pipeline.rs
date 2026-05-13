@@ -49,7 +49,6 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     Metrics,
-    constants::PROPOSAL_TIMEOUT,
     driver::{DriverConfig, RecoveredState},
     error::ProposerError,
     output_proposer::OutputProposer,
@@ -85,7 +84,7 @@ pub struct PipelineConfig {
 /// - No cache exists (cold start / pipeline reset).
 /// - The anchor advanced past the cached tip (governance intervention).
 /// - `game_count` decreased (L1 reorg removed games).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CachedRecovery {
     /// Factory `game_count` at the time of the last walk.
     game_count: u64,
@@ -578,11 +577,20 @@ where
             }
             SubmitOutcome::Failed { target_block, proof, error } => {
                 Metrics::errors_total(error.metric_label()).increment(1);
-                warn!(
-                    error = %error,
-                    target_block,
-                    "Submission failed, will retry"
-                );
+                // Drop the cache only when the contract explicitly reports
+                // the parent is no longer valid; transient failures (RPC,
+                // gas/nonce, signing) leave it intact to avoid an
+                // unnecessary forward walk on the next tick.
+                if error.is_invalid_parent_game() {
+                    warn!(
+                        error = %error,
+                        target_block,
+                        "Submission rejected: parent game invalid, dropping recovery cache"
+                    );
+                    state.cached_recovery = None;
+                } else {
+                    warn!(error = %error, target_block, "Submission failed, will retry");
+                }
                 state.proved.insert(target_block, proof);
                 state.submitting = None;
                 state.record_gauges();
@@ -720,12 +728,14 @@ where
             .await
             .map_err(|e| ProposerError::Contract(format!("recovery game_count failed: {e}")))?;
 
-        // Read the anchor root early so it can be included in the cache key.
-        let anchor = self
+        // Read the anchor root and anchor game from one L1 snapshot so
+        // recovery cannot combine an old root with a newer anchor game.
+        let anchor_snapshot = self
             .anchor_registry
-            .get_anchor_root()
+            .anchor_snapshot()
             .await
-            .map_err(|e| ProposerError::Contract(format!("get_anchor_root failed: {e}")))?;
+            .map_err(|e| ProposerError::Contract(format!("anchor_snapshot failed: {e}")))?;
+        let anchor = anchor_snapshot.anchor_root;
 
         // The cached tip is valid as long as the anchor hasn't advanced past
         // it. The anchor advances when games resolve (~every 20 min after the
@@ -764,11 +774,19 @@ where
                 );
                 cached.state
             }
-            _ => RecoveredState {
-                parent_address: self.config.driver.anchor_state_registry_address,
-                output_root: anchor.root,
-                l2_block_number: anchor.l2_block_number,
-            },
+            _ => {
+                let parent_address = if anchor_snapshot.anchor_game.is_zero() {
+                    self.config.driver.anchor_state_registry_address
+                } else {
+                    anchor_snapshot.anchor_game
+                };
+
+                RecoveredState {
+                    parent_address,
+                    output_root: anchor.root,
+                    l2_block_number: anchor.l2_block_number,
+                }
+            }
         };
 
         let state = self.forward_walk(&start).await?;
@@ -935,6 +953,25 @@ where
         &self,
         blocks: Vec<u64>,
     ) -> Result<HashMap<u64, B256>, ProposerError> {
+        self.fetch_canonical_roots_with(blocks, false).await
+    }
+
+    /// Concurrently fetches canonical output roots, bypassing the output cache.
+    async fn fetch_fresh_canonical_roots(
+        &self,
+        blocks: Vec<u64>,
+    ) -> Result<HashMap<u64, B256>, ProposerError> {
+        self.fetch_canonical_roots_with(blocks, true).await
+    }
+
+    /// Concurrently fetches canonical output roots with configurable cache usage.
+    ///
+    /// When `bypass_cache` is true, each root is fetched directly from the rollup node.
+    async fn fetch_canonical_roots_with(
+        &self,
+        blocks: Vec<u64>,
+        bypass_cache: bool,
+    ) -> Result<HashMap<u64, B256>, ProposerError> {
         if blocks.is_empty() {
             return Ok(HashMap::new());
         }
@@ -942,11 +979,12 @@ where
             .map(|block_number| {
                 let rollup = &self.rollup_client;
                 async move {
-                    rollup
-                        .output_at_block(block_number)
-                        .await
-                        .map(|out| (block_number, out.output_root))
-                        .map_err(ProposerError::Rpc)
+                    let output = if bypass_cache {
+                        rollup.fresh_output_at_block(block_number).await
+                    } else {
+                        rollup.output_at_block(block_number).await
+                    };
+                    output.map(|out| (block_number, out.output_root)).map_err(ProposerError::Rpc)
                 }
             })
             .buffered(self.config.recovery_scan_concurrency)
@@ -1063,7 +1101,7 @@ where
         // JIT validation: check that the proved output root still matches canonical.
         let canonical_output = self
             .rollup_client
-            .output_at_block(target_block)
+            .fresh_output_at_block(target_block)
             .await
             .map_err(|e| SubmitAction::Failed(ProposerError::Rpc(e)))?;
 
@@ -1091,13 +1129,15 @@ where
             .extract_intermediate_roots(starting_block_number, proposals, &intermediate_blocks)
             .map_err(SubmitAction::Failed)?;
 
-        // Fetch canonical roots for non-target intermediate blocks only;
-        // the target block was already fetched for the JIT check above.
+        // Fetch fresh canonical roots for non-target intermediate blocks only;
+        // the target block was already fetched fresh for the JIT check above.
         let non_target_blocks: Vec<u64> =
             intermediate_blocks.iter().copied().filter(|&b| b != target_block).collect();
 
-        let mut canonical_map: HashMap<u64, B256> =
-            self.fetch_canonical_roots(non_target_blocks).await.map_err(SubmitAction::Failed)?;
+        let mut canonical_map: HashMap<u64, B256> = self
+            .fetch_fresh_canonical_roots(non_target_blocks)
+            .await
+            .map_err(SubmitAction::Failed)?;
         canonical_map.insert(target_block, canonical_output.output_root);
 
         for (root, block) in intermediate_roots.iter().zip(intermediate_blocks.iter()) {
@@ -1164,26 +1204,20 @@ where
             "Proposing output (creating dispute game)"
         );
 
-        // Submit with timeout.
         let mut propose_timer = base_metrics::timed!(Metrics::proposal_l1_tx_duration_seconds());
-        let propose_result = tokio::time::timeout(
-            PROPOSAL_TIMEOUT,
-            self.output_proposer.propose_output(
-                aggregate_proposal,
-                parent_address,
-                &intermediate_roots,
-            ),
-        )
-        .await;
+        let propose_result = self
+            .output_proposer
+            .propose_output(aggregate_proposal, parent_address, &intermediate_roots)
+            .await;
 
         match propose_result {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 drop(propose_timer);
                 info!(target_block, "Dispute game created successfully");
                 Metrics::l2_output_proposals_total().increment(1);
                 Ok(())
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 if e.is_game_already_exists() {
                     drop(propose_timer);
                     info!(
@@ -1191,17 +1225,18 @@ where
                         "Game already exists, next tick will load fresh state from chain"
                     );
                     Err(SubmitAction::GameAlreadyExists)
+                } else if e.is_l1_origin_too_old() {
+                    propose_timer.disarm();
+                    warn!(
+                        error = %e,
+                        target_block,
+                        "Proof L1 origin is too old, discarding proof to re-prove"
+                    );
+                    Err(SubmitAction::Discard(e))
                 } else {
                     propose_timer.disarm();
                     Err(SubmitAction::Failed(e))
                 }
-            }
-            Err(_) => {
-                propose_timer.disarm();
-                Err(SubmitAction::Failed(ProposerError::Internal(format!(
-                    "dispute game creation timed out after {}s",
-                    PROPOSAL_TIMEOUT.as_secs()
-                ))))
             }
         }
     }
@@ -1305,6 +1340,7 @@ mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use alloy_primitives::{Address, B256};
+    use async_trait::async_trait;
     use base_proof_primitives::{ProofResult, Proposal, ProverClient};
     use rstest::rstest;
     use tokio_util::sync::CancellationToken;
@@ -1412,6 +1448,23 @@ mod tests {
         MockDisputeGameFactory,
     >;
 
+    #[derive(Debug)]
+    struct SnapshotOnlyAnchorStateRegistry {
+        snapshot: base_proof_contracts::AnchorSnapshot,
+    }
+
+    #[async_trait::async_trait]
+    impl AnchorStateRegistryClient for SnapshotOnlyAnchorStateRegistry {
+        async fn anchor_snapshot(
+            &self,
+        ) -> std::result::Result<
+            base_proof_contracts::AnchorSnapshot,
+            base_proof_contracts::ContractError,
+        > {
+            Ok(self.snapshot)
+        }
+    }
+
     fn test_pipeline(
         pipeline_config: PipelineConfig,
         safe_block_number: u64,
@@ -1428,8 +1481,10 @@ mod tests {
             output_roots: HashMap::new(),
             max_safe_block: None,
         });
-        let anchor_registry =
-            Arc::new(MockAnchorStateRegistry { anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK) });
+        let anchor_registry = Arc::new(MockAnchorStateRegistry {
+            anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK),
+            anchor_game: Address::ZERO,
+        });
         let factory = Arc::new(MockDisputeGameFactory::with_games(vec![]));
 
         ProvingPipeline::new(
@@ -1468,6 +1523,63 @@ mod tests {
         block_interval: u64,
         intermediate_block_interval: u64,
     ) -> TestPipeline {
+        recovery_pipeline_full_with_output_proposer(
+            factory,
+            output_roots,
+            anchor_block,
+            block_interval,
+            intermediate_block_interval,
+            Arc::new(MockOutputProposer),
+        )
+    }
+
+    fn recovery_pipeline_full_with_output_proposer(
+        factory: MockDisputeGameFactory,
+        output_roots: HashMap<u64, B256>,
+        anchor_block: u64,
+        block_interval: u64,
+        intermediate_block_interval: u64,
+        output_proposer: Arc<dyn OutputProposer>,
+    ) -> TestPipeline {
+        recovery_pipeline_full_with_anchor_game_and_output_proposer(
+            factory,
+            output_roots,
+            anchor_block,
+            Address::ZERO,
+            block_interval,
+            intermediate_block_interval,
+            output_proposer,
+        )
+    }
+
+    fn recovery_pipeline_full_with_anchor_game(
+        factory: MockDisputeGameFactory,
+        output_roots: HashMap<u64, B256>,
+        anchor_block: u64,
+        anchor_game: Address,
+        block_interval: u64,
+        intermediate_block_interval: u64,
+    ) -> TestPipeline {
+        recovery_pipeline_full_with_anchor_game_and_output_proposer(
+            factory,
+            output_roots,
+            anchor_block,
+            anchor_game,
+            block_interval,
+            intermediate_block_interval,
+            Arc::new(MockOutputProposer),
+        )
+    }
+
+    fn recovery_pipeline_full_with_anchor_game_and_output_proposer(
+        factory: MockDisputeGameFactory,
+        output_roots: HashMap<u64, B256>,
+        anchor_block: u64,
+        anchor_game: Address,
+        block_interval: u64,
+        intermediate_block_interval: u64,
+        output_proposer: Arc<dyn OutputProposer>,
+    ) -> TestPipeline {
         let cancel = CancellationToken::new();
         let l1 = Arc::new(MockL1 { latest_block_number: TEST_L1_BLOCK_NUMBER });
         let l2 = Arc::new(MockL2 { block_not_found: true, canonical_hash: None });
@@ -1478,8 +1590,10 @@ mod tests {
             output_roots,
             max_safe_block: None,
         });
-        let anchor_registry =
-            Arc::new(MockAnchorStateRegistry { anchor_root: test_anchor_root(anchor_block) });
+        let anchor_registry = Arc::new(MockAnchorStateRegistry {
+            anchor_root: test_anchor_root(anchor_block),
+            anchor_game,
+        });
 
         ProvingPipeline::new(
             PipelineConfig {
@@ -1501,7 +1615,7 @@ mod tests {
             anchor_registry,
             Arc::new(factory),
             Arc::new(MockAggregateVerifier::default()),
-            Arc::new(MockOutputProposer),
+            output_proposer,
             cancel,
         )
     }
@@ -1581,6 +1695,87 @@ mod tests {
         );
         assert_eq!(state.l2_block_number, TEST_ANCHOR_BLOCK, "should return anchor block");
         assert!(cache.is_some(), "cache should still be populated");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_recovery_cold_start_uses_anchor_game_after_anchor_advance() {
+        let anchor_game = proxy_addr(0);
+        let anchor_block = TEST_BLOCK_INTERVAL;
+
+        let mut factory = MockDisputeGameFactory::with_games(vec![]);
+        factory.game_count_override = Some(1);
+        let pipeline = recovery_pipeline_full_with_anchor_game(
+            factory,
+            HashMap::new(),
+            anchor_block,
+            anchor_game,
+            TEST_BLOCK_INTERVAL,
+            TEST_BLOCK_INTERVAL,
+        );
+
+        let mut cache: Option<CachedRecovery> = None;
+        let state = pipeline.recover_latest_state(&mut cache).await.unwrap();
+
+        assert_eq!(state.parent_address, anchor_game, "advanced anchor game should be the parent");
+        assert_eq!(state.l2_block_number, anchor_block, "should propose after the live anchor");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_recovery_reads_anchor_root_and_game_from_one_snapshot() {
+        let anchor_game = proxy_addr(0);
+        let anchor_root = B256::repeat_byte(0xAA);
+        let anchor_block = TEST_BLOCK_INTERVAL;
+        let cancel = CancellationToken::new();
+        let l1 = Arc::new(MockL1 { latest_block_number: TEST_L1_BLOCK_NUMBER });
+        let l2 = Arc::new(MockL2 { block_not_found: true, canonical_hash: None });
+        let prover: Arc<dyn ProverClient> =
+            Arc::new(MockProver { delay: MOCK_PROVER_DELAY, block_interval: TEST_BLOCK_INTERVAL });
+        let rollup = Arc::new(MockRollupClient {
+            sync_status: test_sync_status(TEST_BLOCK_INTERVAL * 2, B256::ZERO),
+            output_roots: HashMap::new(),
+            max_safe_block: None,
+        });
+        let anchor_registry = Arc::new(SnapshotOnlyAnchorStateRegistry {
+            snapshot: base_proof_contracts::AnchorSnapshot {
+                anchor_root: base_proof_contracts::AnchorRoot {
+                    root: anchor_root,
+                    l2_block_number: anchor_block,
+                },
+                anchor_game,
+            },
+        });
+        let mut factory = MockDisputeGameFactory::with_games(vec![]);
+        factory.game_count_override = Some(1);
+
+        let pipeline = ProvingPipeline::new(
+            PipelineConfig {
+                max_parallel_proofs: 4,
+                max_retries: 3,
+                recovery_scan_concurrency: 8,
+                tee_prover_registry_address: None,
+                driver: DriverConfig {
+                    block_interval: TEST_BLOCK_INTERVAL,
+                    intermediate_block_interval: TEST_BLOCK_INTERVAL,
+                    ..Default::default()
+                },
+            },
+            prover,
+            l1,
+            l2,
+            rollup,
+            anchor_registry,
+            Arc::new(factory),
+            Arc::new(MockAggregateVerifier::default()),
+            Arc::new(MockOutputProposer),
+            cancel,
+        );
+
+        let mut cache: Option<CachedRecovery> = None;
+        let state = pipeline.recover_latest_state(&mut cache).await.unwrap();
+
+        assert_eq!(state.parent_address, anchor_game);
+        assert_eq!(state.output_root, anchor_root);
+        assert_eq!(state.l2_block_number, anchor_block);
     }
 
     // ---- Recovery: forward walk ----
@@ -1670,8 +1865,10 @@ mod tests {
             output_roots,
             max_safe_block: Some(TEST_BLOCK_INTERVAL * 2),
         });
-        let anchor_registry =
-            Arc::new(MockAnchorStateRegistry { anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK) });
+        let anchor_registry = Arc::new(MockAnchorStateRegistry {
+            anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK),
+            anchor_game: Address::ZERO,
+        });
 
         let pipeline = ProvingPipeline::new(
             PipelineConfig {
@@ -1928,8 +2125,10 @@ mod tests {
             output_roots: HashMap::new(),
             max_safe_block: None,
         });
-        let anchor_registry =
-            Arc::new(MockAnchorStateRegistry { anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK) });
+        let anchor_registry = Arc::new(MockAnchorStateRegistry {
+            anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK),
+            anchor_game: Address::ZERO,
+        });
         let factory = Arc::new(MockDisputeGameFactory::with_games(vec![]));
 
         let pipeline = ProvingPipeline::new(
@@ -2000,8 +2199,10 @@ mod tests {
             output_roots: HashMap::new(),
             max_safe_block: None,
         });
-        let anchor_registry =
-            Arc::new(MockAnchorStateRegistry { anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK) });
+        let anchor_registry = Arc::new(MockAnchorStateRegistry {
+            anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK),
+            anchor_game: Address::ZERO,
+        });
         let factory = Arc::new(MockDisputeGameFactory::with_games(vec![]));
 
         let pipeline = ProvingPipeline::new(
@@ -2094,6 +2295,87 @@ mod tests {
         assert!(state.cached_recovery.is_none(), "reset() should clear cached_recovery");
     }
 
+    /// Pipeline, primed state with a cached recovery tip, and a proof ready
+    /// for `handle_submit_result(SubmitOutcome::Failed { .. })` tests.
+    fn submission_failure_fixture() -> (TestPipeline, PipelineState, ProofResult) {
+        let pipeline =
+            recovery_pipeline(MockDisputeGameFactory::with_games(vec![]), HashMap::new());
+        let target_block = TEST_BLOCK_INTERVAL;
+        let proposal = test_proposal(target_block);
+        let proof =
+            ProofResult::Tee { aggregate_proposal: proposal.clone(), proposals: vec![proposal] };
+
+        let mut state = PipelineState::new();
+        state.submitting = Some(target_block);
+        state.cached_recovery = Some(CachedRecovery {
+            game_count: 1,
+            state: RecoveredState {
+                parent_address: proxy_addr(0),
+                output_root: B256::repeat_byte(0x01),
+                l2_block_number: target_block,
+            },
+        });
+
+        (pipeline, state, proof)
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_invalid_parent_game_submission_clears_cached_recovery() {
+        let (pipeline, mut state, proof) = submission_failure_fixture();
+        let target_block = TEST_BLOCK_INTERVAL;
+        let cached_before = state.cached_recovery;
+
+        let chain_next = pipeline
+            .handle_submit_result(
+                Ok(SubmitOutcome::Failed {
+                    target_block,
+                    proof,
+                    error: ProposerError::InvalidParentGame,
+                }),
+                &mut state,
+            )
+            .await;
+
+        assert!(cached_before.is_some());
+        assert!(!chain_next, "failed submission should not chain another submit");
+        assert!(state.cached_recovery.is_none(), "InvalidParentGame must drop the cache");
+        assert!(state.proved.contains_key(&target_block), "proof should be re-queued for retry");
+        assert!(state.submitting.is_none(), "submitting slot should be released");
+    }
+
+    #[rstest]
+    #[case::contract_revert(ProposerError::Contract("mock submission failure".into()))]
+    #[case::rpc_transport(ProposerError::Rpc(base_proof_rpc::RpcError::Transport("rpc down".into())))]
+    #[case::rpc_timeout(ProposerError::Rpc(base_proof_rpc::RpcError::Timeout("slow rpc".into())))]
+    #[case::tx_manager_nonce(ProposerError::TxManager(
+        base_tx_manager::TxManagerError::NonceTooLow
+    ))]
+    #[case::tx_reverted(ProposerError::TxReverted("0xdeadbeef".into()))]
+    #[case::internal(ProposerError::Internal("bug".into()))]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_transient_failed_submission_preserves_cached_recovery(
+        #[case] error: ProposerError,
+    ) {
+        let (pipeline, mut state, proof) = submission_failure_fixture();
+        let target_block = TEST_BLOCK_INTERVAL;
+        let cached_before = state.cached_recovery;
+
+        let chain_next = pipeline
+            .handle_submit_result(
+                Ok(SubmitOutcome::Failed { target_block, proof, error }),
+                &mut state,
+            )
+            .await;
+
+        assert!(!chain_next, "transient failure should not chain another submit");
+        assert_eq!(
+            state.cached_recovery, cached_before,
+            "transient failure must preserve the cached recovery tip"
+        );
+        assert!(state.proved.contains_key(&target_block), "proof should be re-queued for retry");
+        assert!(state.submitting.is_none(), "submitting slot should be released");
+    }
+
     // ---- Intermediate output root validation (submission) tests ----
 
     /// Shared block intervals for submission validation tests.
@@ -2116,6 +2398,39 @@ mod tests {
         ProofResult::Tee { aggregate_proposal: aggregate, proposals }
     }
 
+    #[derive(Debug)]
+    struct DelayedOutputProposer {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl OutputProposer for DelayedOutputProposer {
+        async fn propose_output(
+            &self,
+            _proposal: &Proposal,
+            _parent_address: Address,
+            _intermediate_roots: &[B256],
+        ) -> Result<(), ProposerError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct L1OriginTooOldOutputProposer;
+
+    #[async_trait]
+    impl OutputProposer for L1OriginTooOldOutputProposer {
+        async fn propose_output(
+            &self,
+            _proposal: &Proposal,
+            _parent_address: Address,
+            _intermediate_roots: &[B256],
+        ) -> Result<(), ProposerError> {
+            Err(ProposerError::L1OriginTooOld)
+        }
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn test_validate_and_submit_intermediate_roots_match() {
         // MockRollupClient returns B256::repeat_byte(n) for blocks without
@@ -2126,6 +2441,50 @@ mod tests {
         let result =
             pipeline.validate_and_submit(&proof_result, SUBMIT_BLOCK_INTERVAL, Address::ZERO).await;
         assert!(result.is_ok(), "all roots match, submission should succeed");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_validate_and_submit_does_not_apply_outer_timeout() {
+        let pipeline = recovery_pipeline_full_with_output_proposer(
+            MockDisputeGameFactory::with_games(vec![]),
+            HashMap::new(),
+            TEST_ANCHOR_BLOCK,
+            SUBMIT_BLOCK_INTERVAL,
+            SUBMIT_INTERMEDIATE_INTERVAL,
+            Arc::new(DelayedOutputProposer {
+                delay: crate::constants::PROPOSAL_TIMEOUT + Duration::from_secs(1),
+            }),
+        );
+        let proof_result = submit_proof_result(SUBMIT_BLOCK_INTERVAL);
+
+        let result =
+            pipeline.validate_and_submit(&proof_result, SUBMIT_BLOCK_INTERVAL, Address::ZERO).await;
+
+        assert!(
+            result.is_ok(),
+            "submission should rely on tx-manager timeout, not an outer timeout"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_validate_and_submit_discards_l1_origin_too_old() {
+        let pipeline = recovery_pipeline_full_with_output_proposer(
+            MockDisputeGameFactory::with_games(vec![]),
+            HashMap::new(),
+            TEST_ANCHOR_BLOCK,
+            SUBMIT_BLOCK_INTERVAL,
+            SUBMIT_INTERMEDIATE_INTERVAL,
+            Arc::new(L1OriginTooOldOutputProposer),
+        );
+        let proof_result = submit_proof_result(SUBMIT_BLOCK_INTERVAL);
+
+        let result =
+            pipeline.validate_and_submit(&proof_result, SUBMIT_BLOCK_INTERVAL, Address::ZERO).await;
+
+        assert!(
+            matches!(result, Err(SubmitAction::Discard(ProposerError::L1OriginTooOld))),
+            "stale L1 origin should discard the proof, got {result:?}"
+        );
     }
 
     #[rstest]
