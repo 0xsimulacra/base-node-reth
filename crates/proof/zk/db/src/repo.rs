@@ -212,6 +212,26 @@ impl ProofRequestRepo {
                     return Ok(CreateProofRequestOutcome::RetryExhausted(id));
                 }
 
+                // Fail any active sessions before resetting so the requeued run cannot
+                // collide with `idx_proof_sessions_request_type_active_unique`. Mirrors
+                // the cleanup in `retry_or_fail_stuck_request`.
+                sqlx::query(
+                    r#"
+                    UPDATE proof_sessions
+                    SET status = $1,
+                        error_message = COALESCE(error_message, $2),
+                        completed_at = NOW()
+                    WHERE proof_request_id = $3 AND status IN ($4, $5)
+                    "#,
+                )
+                .bind(SessionStatus::Failed.as_str())
+                .bind("cleared during create_with_outbox requeue")
+                .bind(id)
+                .bind(SessionStatus::Submitting.as_str())
+                .bind(SessionStatus::Running.as_str())
+                .execute(&mut *tx)
+                .await?;
+
                 sqlx::query(
                     r#"
                     UPDATE proof_requests
@@ -502,6 +522,26 @@ impl ProofRequestRepo {
 
         let retry_count: i32 = row.get("retry_count");
 
+        // Fail any active sessions before resetting so the retried run cannot collide with
+        // `idx_proof_sessions_request_type_active_unique`. No-op on the normal reaper path,
+        // since `get_stuck_requests` already excludes requests that have an active session.
+        sqlx::query(
+            r#"
+            UPDATE proof_sessions
+            SET status = $1,
+                error_message = COALESCE(error_message, $2),
+                completed_at = NOW()
+            WHERE proof_request_id = $3 AND status IN ($4, $5)
+            "#,
+        )
+        .bind(SessionStatus::Failed.as_str())
+        .bind("cleared during stuck-request retry")
+        .bind(id)
+        .bind(SessionStatus::Submitting.as_str())
+        .bind(SessionStatus::Running.as_str())
+        .execute(&mut *tx)
+        .await?;
+
         if retry_count >= max_retries {
             sqlx::query(
                 r#"
@@ -605,6 +645,116 @@ impl ProofRequestRepo {
         Ok(id)
     }
 
+    /// Reserve a `(proof_request_id, session_type)` slot for a future backend submission.
+    /// Returns `Some(reservation_id)` for the single race winner; `None` if another
+    /// caller already holds an active (`SUBMITTING` or `RUNNING`) row.
+    ///
+    /// The row is inserted as `SUBMITTING` so sync loops (which only poll `RUNNING`
+    /// rows) skip it until activation. Callers must follow up with
+    /// [`Self::activate_reserved_proof_session`] on success or
+    /// [`Self::fail_reserved_proof_session`] on failure.
+    pub async fn reserve_proof_session(
+        &self,
+        proof_request_id: Uuid,
+        session_type: SessionType,
+    ) -> Result<Option<String>> {
+        let reservation_id = format!(
+            "reservation-{}-{}",
+            session_type.as_str().to_ascii_lowercase(),
+            Uuid::new_v4()
+        );
+
+        // ON CONFLICT predicate mirrors the partial unique index predicate.
+        let row = sqlx::query(
+            r#"
+            INSERT INTO proof_sessions (
+                proof_request_id, session_type, backend_session_id, status, metadata
+            )
+            VALUES ($1, $2, $3, $4, NULL)
+            ON CONFLICT (proof_request_id, session_type)
+                WHERE status IN ('SUBMITTING', 'RUNNING')
+                DO NOTHING
+            RETURNING backend_session_id
+            "#,
+        )
+        .bind(proof_request_id)
+        .bind(session_type.as_str())
+        .bind(&reservation_id)
+        .bind(SessionStatus::Submitting.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get("backend_session_id")))
+    }
+
+    /// Promote a `SUBMITTING` reservation row to `RUNNING` with the real backend session
+    /// id. Returns `false` if the row was no longer eligible (failed or activated
+    /// out-of-band); the caller should then treat the backend job as orphaned.
+    pub async fn activate_reserved_proof_session(
+        &self,
+        reservation_id: &str,
+        session: CreateProofSession,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE proof_sessions
+            SET backend_session_id = $1,
+                metadata = $2,
+                status = $3,
+                error_message = NULL
+            WHERE backend_session_id = $4
+              AND proof_request_id = $5
+              AND session_type = $6
+              AND status = $7
+            "#,
+        )
+        .bind(&session.backend_session_id)
+        .bind(&session.metadata)
+        .bind(SessionStatus::Running.as_str())
+        .bind(reservation_id)
+        .bind(session.proof_request_id)
+        .bind(session.session_type.as_str())
+        .bind(SessionStatus::Submitting.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Mark a `SUBMITTING` reservation row as `FAILED` so the partial unique index
+    /// releases the slot and a future poll can retry. Used when the backend submit step
+    /// itself fails after a successful reservation.
+    pub async fn fail_reserved_proof_session(
+        &self,
+        proof_request_id: Uuid,
+        session_type: SessionType,
+        reservation_id: &str,
+        error_message: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE proof_sessions
+            SET status = $1,
+                error_message = $2,
+                completed_at = NOW()
+            WHERE backend_session_id = $3
+              AND proof_request_id = $4
+              AND session_type = $5
+              AND status = $6
+            "#,
+        )
+        .bind(SessionStatus::Failed.as_str())
+        .bind(error_message)
+        .bind(reservation_id)
+        .bind(proof_request_id)
+        .bind(session_type.as_str())
+        .bind(SessionStatus::Submitting.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Get a proof session by backend session ID
     pub async fn get_session_by_backend_id(
         &self,
@@ -704,7 +854,7 @@ impl ProofRequestRepo {
               AND NOT EXISTS (
                   SELECT 1 FROM proof_sessions ps
                   WHERE ps.proof_request_id = pr.id
-                    AND ps.status = 'RUNNING'
+                    AND ps.status IN ('SUBMITTING', 'RUNNING')
               )
             ORDER BY pr.created_at ASC
             "#,
