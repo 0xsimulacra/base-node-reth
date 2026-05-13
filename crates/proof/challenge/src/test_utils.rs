@@ -695,6 +695,8 @@ pub struct MockZkProofState {
     pub receipt: Vec<u8>,
     /// Error message returned when status is `Failed`.
     pub error_message: Option<String>,
+    /// Every [`ProveBlockRequest`] received by `prove_block`, in call order.
+    pub prove_block_log: Vec<ProveBlockRequest>,
 }
 
 impl Default for MockZkProofProvider {
@@ -707,8 +709,9 @@ impl Default for MockZkProofProvider {
 impl ZkProofProvider for MockZkProofProvider {
     async fn prove_block(
         &self,
-        _request: ProveBlockRequest,
+        request: ProveBlockRequest,
     ) -> Result<ProveBlockResponse, ZkProofError> {
+        self.state.lock().unwrap().prove_block_log.push(request);
         Ok(ProveBlockResponse { session_id: self.session_id.clone() })
     }
 

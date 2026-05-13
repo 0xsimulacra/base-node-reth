@@ -591,6 +591,86 @@ async fn test_step_proof_retry_succeeds() {
     );
 }
 
+// Regression test for CHAIN-4297 / Immunefi #75829: after a FAILED proof, the
+// driver must re-invoke `prove_block` with the same deterministic
+// `session_id` so the service-side fix in `create_with_outbox` can requeue
+// the row. Independent of the DB layer; fails on a challenger-side regression
+// such as dropping the retry call or losing `derive_session_id` determinism.
+#[tokio::test]
+async fn test_step_proof_retry_reuses_deterministic_session_id() {
+    let (l2, factory, verifier) = invalid_game_mocks();
+
+    // Invalid index is 1 (see `invalid_game_mocks`: `vec![root_15, BOGUS_ROOT]`).
+    let expected_session_id = PendingProof::derive_session_id(addr(0), 1);
+
+    let zk = Arc::new(MockZkProofProvider {
+        session_id: expected_session_id.clone(),
+        state: Mutex::new(MockZkProofState {
+            proof_status: ProofJobStatus::Failed as i32,
+            error_message: Some("transient backend error".into()),
+            ..Default::default()
+        }),
+    });
+
+    let tx_manager = default_tx_manager();
+    let mut driver = test_driver(factory, Arc::clone(&verifier), l2, Arc::clone(&zk), tx_manager);
+
+    // Step 1: initial prove_block call from initiate_zk_proof.
+    driver.step().await.unwrap();
+    {
+        let log = &zk.state.lock().unwrap().prove_block_log;
+        assert_eq!(log.len(), 1, "exactly one prove_block call on initiation");
+        assert_eq!(
+            log[0].session_id.as_deref(),
+            Some(expected_session_id.as_str()),
+            "challenger must use the deterministic session_id on initiation",
+        );
+    }
+
+    // Step 2: poll observes Failed → NeedsRetry → handle_proof_retry must
+    // invoke prove_block again, reusing the same deterministic session_id.
+    driver.step().await.unwrap();
+    {
+        let log = &zk.state.lock().unwrap().prove_block_log;
+        assert_eq!(log.len(), 2, "retry must invoke prove_block a second time");
+        assert_eq!(
+            log[1].session_id.as_deref(),
+            Some(expected_session_id.as_str()),
+            "retry must reuse the deterministic session_id so the service can requeue",
+        );
+        assert_eq!(
+            log[0].session_id, log[1].session_id,
+            "the deterministic session_id must be stable across retries",
+        );
+    }
+
+    let entry = driver.pending_proofs.get(&addr(0)).expect("entry should be retained after retry");
+    assert!(
+        matches!(entry.phase, ProofPhase::AwaitingProof { ref session_id, .. } if session_id == &expected_session_id),
+        "post-retry phase must be AwaitingProof with the deterministic session_id",
+    );
+    assert_eq!(entry.retry_count, 1);
+
+    // Simulate the service requeuing on the second prove_block and the proof
+    // eventually succeeding on the retry session.
+    {
+        let mut state = zk.state.lock().unwrap();
+        state.proof_status = ProofJobStatus::Succeeded as i32;
+        state.receipt = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        state.error_message = None;
+    }
+    verifier.update_game(
+        addr(0),
+        MockGameState { status: GameStatus::ChallengerWins, ..game_state(20) },
+    );
+
+    driver.step().await.unwrap();
+    assert!(
+        !driver.pending_proofs.contains_key(&addr(0)),
+        "entry should be removed after successful retry submission",
+    );
+}
+
 #[tokio::test]
 async fn test_step_proof_exceeds_max_retries() {
     let (l2, factory, verifier) = invalid_game_mocks();
