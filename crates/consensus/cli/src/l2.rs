@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use alloy_rpc_types_engine::JwtSecret;
 use base_jwt::{JwtError, JwtSecretReader, JwtValidator};
+use tracing::warn;
 use url::Url;
 
 const DEFAULT_L2_ENGINE_TIMEOUT: u64 = 30_000;
@@ -72,8 +73,26 @@ impl L2ClientArgs {
     /// Since the engine client will fail if the jwt token is invalid, this ensures
     /// that the jwt token passed as a cli arg is correct.
     pub async fn validate_jwt(&self) -> eyre::Result<JwtSecret> {
+        self.resolve_jwt_secret_for_endpoint(&self.l2_engine_rpc).await
+    }
+
+    /// Resolves and validates the L2 JWT secret for the given engine endpoint.
+    pub async fn resolve_jwt_secret_for_endpoint(
+        &self,
+        l2_engine_rpc: &Url,
+    ) -> eyre::Result<JwtSecret> {
+        if l2_engine_rpc.scheme() == "file" {
+            return Ok(self.jwt_secret().unwrap_or_else(|e| {
+                warn!(
+                    error = %e,
+                    "Failed to load JWT secret for IPC endpoint, generating random secret"
+                );
+                JwtSecret::random()
+            }));
+        }
+
         let jwt_secret = self.jwt_secret().map_err(|e| eyre::eyre!(e))?;
         let validator = JwtValidator::new(jwt_secret);
-        validator.validate_with_engine(self.l2_engine_rpc.clone()).await.map_err(|e| eyre::eyre!(e))
+        validator.validate_with_engine(l2_engine_rpc.clone()).await.map_err(|e| eyre::eyre!(e))
     }
 }
