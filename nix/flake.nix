@@ -11,13 +11,12 @@
   inputs.foundry.url = "github:shazow/foundry.nix/stable";
 
   outputs =
-    {
-      nixpkgs,
-      flake-utils,
-      systems,
-      fenix,
-      foundry,
-      ...
+    { nixpkgs
+    , flake-utils
+    , systems
+    , fenix
+    , foundry
+    , ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -82,6 +81,19 @@
               ;;
           esac
         '';
+
+        _pkgGo = pkgs.go_1_26;
+        _pkgGoModule = pkgs.buildGo126Module;
+
+        _pkgGopls = pkgs.gopls.override {
+          buildGoLatestModule = _pkgGoModule;
+        };
+
+        _pkgGoTools = pkgs.gotools.override {
+          buildGoModule = _pkgGoModule;
+          go = _pkgGo;
+        };
+
       in
       {
         devShells.default = pkgs.mkShell {
@@ -109,10 +121,17 @@
             pkgs.foundry-bin
 
             pkgs.protobuf
+
+            # go is used by some test pkags here in thsi repo
+            _pkgGo
+            _pkgGopls
+            _pkgGoTools
           ];
 
           buildInputs = [
             pkgs.openssl
+            pkgs.zlib
+            pkgs.sqlite
           ];
 
           packages = [
@@ -137,6 +156,9 @@
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             pkgs.openssl
             pkgs.llvmPackages.libclang.lib
+            pkgs.zlib
+            pkgs.sqlite
+            pkgs.stdenv.cc.cc.lib
           ];
 
           # instead of using .cargo/config.toml
