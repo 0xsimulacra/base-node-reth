@@ -2,7 +2,7 @@ use alloc::string::String;
 
 use alloy_primitives::{Address, LogData, U256, address};
 use base_precompile_macros::contract;
-use base_precompile_storage::{BasePrecompileError, Handler, Mapping, Result};
+use base_precompile_storage::{BasePrecompileError, Handler, Mapping, Result, StorageCtx};
 
 use crate::token::common::TokenAccounting;
 
@@ -23,6 +23,15 @@ pub struct DefaultTokenStorage {
     pub minimum_redeemable: U256,                             // slot 9
     pub contract_uri: String,                                 // slot 10
     pub capabilities: U256,                                   // slot 11
+}
+
+impl<'a> DefaultTokenStorage<'a> {
+    /// Creates a `DefaultTokenStorage` instance targeting `addr`.
+    ///
+    /// Used by the factory to initialize token storage at a dynamically computed address.
+    pub fn from_address(addr: Address, storage: StorageCtx<'a>) -> Self {
+        Self::__new(addr, storage)
+    }
 }
 
 impl TokenAccounting for DefaultTokenStorage<'_> {
