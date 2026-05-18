@@ -17,3 +17,10 @@ pub use spec::BasePrecompileSpec;
 mod bn254_pair;
 
 mod bls12_381;
+
+mod token;
+pub use token::{
+    Burnable, CAPABILITY_CAP_MUTABLE, CAPABILITY_PAUSABLE, Configurable, DEFAULT_TOKEN_ADDRESS,
+    DefaultToken, DefaultTokenEvm, DefaultTokenStorage, IDefaultToken, Mintable, Pausable,
+    Permittable, Redeemable, Token, TokenAccounting, Transferable,
+};
