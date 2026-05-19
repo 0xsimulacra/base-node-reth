@@ -5,7 +5,9 @@ use base_precompile_storage::{BasePrecompileError, Handler, Result};
 use revm::state::Bytecode;
 
 use super::variant::TokenVariant;
-use crate::token::{B20Token, B20TokenStorage, TokenAccounting, abi::ITokenFactory};
+use crate::token::{
+    B20Token, B20TokenStorage, TokenAccounting, abi::ITokenFactory, policy_registry::PolicyHandle,
+};
 
 /// Singleton precompile address for the `TokenFactory`.
 const FACTORY_ADDRESS: Address = address!("b02f000000000000000000000000000000000000");
@@ -93,8 +95,11 @@ impl<'a> TokenFactory<'a> {
         }
 
         for calldata in p.postCreateCalls {
-            B20Token::with_storage(B20TokenStorage::from_address(token_address, self.storage))
-                .inner(self.storage, &calldata)?;
+            B20Token::with_storage_and_policy(
+                B20TokenStorage::from_address(token_address, self.storage),
+                PolicyHandle::new(self.storage),
+            )
+            .inner(self.storage, &calldata)?;
         }
 
         self.emit_event(ITokenFactory::TokenCreated {
@@ -194,8 +199,14 @@ mod tests {
         )
     }
 
-    fn token_at<'a>(addr: Address, ctx: StorageCtx<'a>) -> B20Token<B20TokenStorage<'a>> {
-        B20Token::with_storage(B20TokenStorage::from_address(addr, ctx))
+    fn token_at<'a>(
+        addr: Address,
+        ctx: StorageCtx<'a>,
+    ) -> B20Token<B20TokenStorage<'a>, PolicyHandle<'a>> {
+        B20Token::with_storage_and_policy(
+            B20TokenStorage::from_address(addr, ctx),
+            PolicyHandle::new(ctx),
+        )
     }
 
     fn assert_output(output: Bytes, expected: impl AsRef<[u8]>) {

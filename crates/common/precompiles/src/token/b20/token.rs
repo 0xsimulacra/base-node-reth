@@ -1,47 +1,42 @@
 //! `B20Token` struct — the concrete B-20 token type.
 
 use alloy_primitives::Address;
-use base_precompile_storage::StorageCtx;
 
-use super::storage::B20TokenStorage;
-use crate::token::common::{
-    Burnable, Configurable, Mintable, Pausable, Permittable, Redeemable, Token, TokenAccounting,
-    Transferable,
+use crate::token::{
+    Policy,
+    common::{
+        Burnable, Configurable, Mintable, Pausable, Permittable, Redeemable, Token,
+        TokenAccounting, Transferable,
+    },
 };
 
 /// EVM precompile for the B-20 token variant.
 ///
 /// The generic `S` lets callers swap in an in-memory [`TokenAccounting`]
-/// implementation for unit tests without touching real EVM storage. In
-/// production, the storage adapter is bound to the address selected by the
-/// dynamic precompile lookup.
+/// implementation for unit tests without touching real EVM storage. The
+/// generic `P` provides the [`Policy`] implementation consulted on
+/// every transfer and mint. In production, [`B20Token::with_storage_and_policy`]
+/// wires in [`B20TokenStorage`] and [`Policy`].
 #[derive(Debug, Clone)]
-pub struct B20Token<S: TokenAccounting> {
+pub struct B20Token<S: TokenAccounting, P: Policy> {
     pub(super) accounting: S,
+    pub(super) policy: P,
 }
 
-impl<'a> B20Token<B20TokenStorage<'a>> {
-    /// Creates a new `B20Token` backed by [`B20TokenStorage`].
-    pub fn new(storage: StorageCtx<'a>) -> Self {
-        Self { accounting: B20TokenStorage::new(storage) }
-    }
-}
-
-impl<S: TokenAccounting> B20Token<S> {
-    /// Creates a `B20Token` backed by the provided storage adapter.
-    ///
-    /// Use this in tests to inject an in-memory [`TokenAccounting`] implementation.
-    pub const fn with_storage(accounting: S) -> Self {
-        Self { accounting }
+impl<S: TokenAccounting, P: Policy> B20Token<S, P> {
+    /// Creates a `B20Token` backed by the provided storage and policy adapters.
+    pub const fn with_storage_and_policy(accounting: S, policy: P) -> Self {
+        Self { accounting, policy }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Token: wire the accounting field and dynamic token address
+// Token: wire the accounting and policy fields, dynamic token address
 // ---------------------------------------------------------------------------
 
-impl<S: TokenAccounting> Token for B20Token<S> {
+impl<S: TokenAccounting, P: Policy> Token for B20Token<S, P> {
     type Accounting = S;
+    type Policy = P;
 
     fn accounting(&self) -> &S {
         &self.accounting
@@ -49,6 +44,14 @@ impl<S: TokenAccounting> Token for B20Token<S> {
 
     fn accounting_mut(&mut self) -> &mut S {
         &mut self.accounting
+    }
+
+    fn policy(&self) -> &P {
+        &self.policy
+    }
+
+    fn policy_mut(&mut self) -> &mut P {
+        &mut self.policy
     }
 
     fn token_address(&self) -> Address {
@@ -60,10 +63,10 @@ impl<S: TokenAccounting> Token for B20Token<S> {
 // Capability selection — B20Token opts in to all capabilities
 // ---------------------------------------------------------------------------
 
-impl<S: TokenAccounting> Transferable for B20Token<S> {}
-impl<S: TokenAccounting> Mintable for B20Token<S> {}
-impl<S: TokenAccounting> Burnable for B20Token<S> {}
-impl<S: TokenAccounting> Redeemable for B20Token<S> {}
-impl<S: TokenAccounting> Pausable for B20Token<S> {}
-impl<S: TokenAccounting> Configurable for B20Token<S> {}
-impl<S: TokenAccounting> Permittable for B20Token<S> {}
+impl<S: TokenAccounting, P: Policy> Transferable for B20Token<S, P> {}
+impl<S: TokenAccounting, P: Policy> Mintable for B20Token<S, P> {}
+impl<S: TokenAccounting, P: Policy> Burnable for B20Token<S, P> {}
+impl<S: TokenAccounting, P: Policy> Redeemable for B20Token<S, P> {}
+impl<S: TokenAccounting, P: Policy> Pausable for B20Token<S, P> {}
+impl<S: TokenAccounting, P: Policy> Configurable for B20Token<S, P> {}
+impl<S: TokenAccounting, P: Policy> Permittable for B20Token<S, P> {}
