@@ -16,6 +16,9 @@ pub use installer::BasePrecompileInstaller;
 mod spec;
 pub use spec::BasePrecompileSpec;
 
+mod activation;
+pub use activation::{ActivationRegistry, ActivationRegistryPrecompile, IActivationRegistry};
+
 mod bn254_pair;
 
 mod bls12_381;
