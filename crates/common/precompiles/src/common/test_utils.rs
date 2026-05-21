@@ -9,7 +9,7 @@ use alloy_primitives::{Address, B256, LogData, U256};
 use base_precompile_storage::Result;
 
 use crate::{
-    IPolicyRegistry, POLICY_ALWAYS_ALLOW, POLICY_ALWAYS_BLOCK, PolicyRegistry,
+    IPolicyRegistry, PolicyRegistry, PolicyRegistryStorage,
     b20::B20Token,
     b20_security::SecurityAccounting,
     b20_stablecoin::{B20StablecoinToken, StablecoinAccounting},
@@ -253,7 +253,7 @@ impl TokenAccounting for InMemoryTokenAccounting {
     }
 
     fn policy_id(&self, policy_type: B256) -> Result<u64> {
-        Ok(*self.policy_ids.get(&policy_type).unwrap_or(&POLICY_ALWAYS_ALLOW))
+        Ok(*self.policy_ids.get(&policy_type).unwrap_or(&PolicyRegistryStorage::ALWAYS_ALLOW_ID))
     }
 
     fn set_policy_id(&mut self, policy_type: B256, policy_id: u64) -> Result<()> {
@@ -315,15 +315,15 @@ impl InMemoryPolicy {
 impl Policy for InMemoryPolicy {
     fn is_authorized(&self, policy_id: u64, account: Address) -> Result<bool> {
         match policy_id {
-            POLICY_ALWAYS_ALLOW => Ok(true),
-            POLICY_ALWAYS_BLOCK => Ok(false),
+            PolicyRegistryStorage::ALWAYS_ALLOW_ID => Ok(true),
+            PolicyRegistryStorage::ALWAYS_BLOCK_ID => Ok(false),
             _ => Ok(*self.authorizations.get(&(policy_id, account)).unwrap_or(&false)),
         }
     }
 
     fn policy_exists(&self, policy_id: u64) -> Result<bool> {
-        Ok(policy_id == POLICY_ALWAYS_ALLOW
-            || policy_id == POLICY_ALWAYS_BLOCK
+        Ok(policy_id == PolicyRegistryStorage::ALWAYS_ALLOW_ID
+            || policy_id == PolicyRegistryStorage::ALWAYS_BLOCK_ID
             || self.policies.contains(&policy_id))
     }
 }
@@ -392,13 +392,8 @@ impl PolicyRegistry for InMemoryPolicy {
     }
 
     fn get_policy_type(&self, policy_id: u64) -> Result<IPolicyRegistry::PolicyType> {
-        Ok(match policy_id {
-            POLICY_ALWAYS_ALLOW => IPolicyRegistry::PolicyType::ALWAYS_ALLOW,
-            POLICY_ALWAYS_BLOCK => IPolicyRegistry::PolicyType::ALWAYS_BLOCK,
-            _ => IPolicyRegistry::PolicyType::try_from((policy_id >> 56) as u8).map_err(|_| {
-                base_precompile_storage::BasePrecompileError::enum_conversion_error()
-            })?,
-        })
+        IPolicyRegistry::PolicyType::try_from((policy_id >> 56) as u8)
+            .map_err(|_| base_precompile_storage::BasePrecompileError::enum_conversion_error())
     }
 
     fn get_policy_admin(&self, _policy_id: u64) -> Result<Address> {
