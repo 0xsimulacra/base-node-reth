@@ -90,13 +90,6 @@ impl PolicyRegistryStorage<'_> {
     /// `updateAllowlist`, `updateBlocklist`).
     const MAX_ACCOUNTS_PER_BATCH: usize = 64;
 
-    fn require_write(&self) -> Result<()> {
-        if self.storage.is_static() {
-            return Err(BasePrecompileError::StaticCallViolation);
-        }
-        Ok(())
-    }
-
     const fn policy_id_type(policy_id: u64) -> u8 {
         (policy_id >> Self::POLICY_ID_TYPE_SHIFT) as u8
     }
@@ -129,7 +122,6 @@ impl PolicyRegistryStorage<'_> {
     /// Validates the policy exists and the caller is its current admin.
     /// Returns `(packed, caller)` on success.
     fn require_admin(&self, policy_id: u64) -> Result<(PackedPolicy, Address)> {
-        self.require_write()?;
         let packed = self.require_custom(policy_id)?;
         let caller = self.storage.caller();
         if packed.admin() != caller {
@@ -168,7 +160,6 @@ impl PolicyRegistryStorage<'_> {
 
     /// Creates a new ALLOWLIST or BLOCKLIST policy, returning its encoded ID.
     pub fn create_policy(&mut self, admin: Address, policy_type: PolicyType) -> Result<u64> {
-        self.require_write()?;
         let policy_type_u8 = policy_type.as_discriminant();
         if admin == Address::ZERO {
             return Err(BasePrecompileError::revert(IPolicyRegistry::ZeroAddress {}));
@@ -260,7 +251,6 @@ impl PolicyRegistryStorage<'_> {
 
     /// Completes a pending admin transfer; caller must be the staged pending admin.
     pub fn finalize_update_admin(&mut self, policy_id: u64) -> Result<()> {
-        self.require_write()?;
         let packed = self.require_custom(policy_id)?;
         let pending = self.pending_admins.at(&policy_id).read()?;
         if pending == Address::ZERO {
