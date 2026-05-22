@@ -10,6 +10,19 @@ use base_precompile_storage::{
 
 use crate::{B20PolicyType, B20TokenRole, IB20, TokenAccounting, TokenVariant};
 
+/// Creation-time parameters for a B-20 token.
+///
+/// Passed to [`B20TokenStorage::initialize`] to write all fields atomically.
+#[derive(Debug)]
+pub struct B20TokenInit {
+    /// Token name.
+    pub name: String,
+    /// Token symbol.
+    pub symbol: String,
+    /// Maximum total supply allowed.
+    pub supply_cap: U256,
+}
+
 /// Core B-20 storage rooted at the `base.b20` ERC-7201 namespace.
 #[derive(Debug, Clone, Storable)]
 #[namespace("base.b20")]
@@ -59,10 +72,10 @@ impl<'a> B20TokenStorage<'a> {
     }
 
     /// Writes all creation-time fields atomically.
-    pub fn initialize(&mut self, name: String, symbol: String, supply_cap: U256) -> Result<()> {
-        self.b20.name.write(name)?;
-        self.b20.symbol.write(symbol)?;
-        self.b20.supply_cap.write(supply_cap)?;
+    pub fn initialize(&mut self, init: B20TokenInit) -> Result<()> {
+        self.b20.name.write(init.name)?;
+        self.b20.symbol.write(init.symbol)?;
+        self.b20.supply_cap.write(init.supply_cap)?;
         Ok(())
     }
 }
