@@ -374,7 +374,7 @@ mod tests {
 
         let output = assert_activated_output(&mut storage);
 
-        assert!(output.reverted);
+        assert!(output.is_revert());
         assert_eq!(storage.get_events(ActivationRegistryStorage::ADDRESS).len(), 0);
     }
 
@@ -387,7 +387,7 @@ mod tests {
         deactivate_feature(&mut storage).unwrap();
         let deactivated_output = assert_activated_output(&mut storage);
 
-        assert!(!activated_output.reverted);
-        assert!(deactivated_output.reverted);
+        assert!(!activated_output.is_revert());
+        assert!(deactivated_output.is_revert());
     }
 }
