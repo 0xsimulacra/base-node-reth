@@ -29,8 +29,8 @@ pub use bls12_381::{
 
 mod common;
 pub use common::{
-    B20Guards, B20TokenRole, Burnable, Configurable, Mintable, Pausable, Permittable, Policy,
-    PolicyRegistry, RoleManaged, Token, TokenAccounting, Transferable,
+    B20Guards, B20TokenRole, Burnable, Configurable, Mintable, Pausable, PermitArgs, Permittable,
+    Policy, PolicyRegistry, RoleManaged, Token, TokenAccounting, Transferable,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use common::{InMemoryPolicy, InMemoryTokenAccounting, TestStablecoinToken, TestToken};
