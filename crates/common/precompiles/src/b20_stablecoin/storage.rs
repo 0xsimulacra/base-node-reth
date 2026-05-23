@@ -5,8 +5,6 @@ use alloc::string::String;
 use alloy_primitives::{Address, B256, LogData, U256};
 use base_precompile_macros::{Storable, contract};
 use base_precompile_storage::{BasePrecompileError, ContractStorage, Handler, Result, StorageCtx};
-#[cfg(feature = "std")]
-use iso_currency::Currency;
 
 use super::accounting::StablecoinAccounting;
 use crate::{
@@ -51,11 +49,10 @@ impl<'a> B20StablecoinStorage<'a> {
 
     /// Writes all creation-time fields atomically.
     ///
-    /// Validates that `currency` is a recognised ISO 4217 code before writing
-    /// anything; reverts `IB20Factory::InvalidCurrency` otherwise.
+    /// Validates that `currency` contains only `A-Z` characters before writing
+    /// anything; reverts `ITokenFactory::InvalidCurrency` otherwise.
     pub fn initialize(&mut self, init: B20StablecoinInit) -> Result<()> {
-        #[cfg(feature = "std")]
-        if Currency::from_code(&init.currency).is_none() {
+        if init.currency.is_empty() || !init.currency.bytes().all(|b| b.is_ascii_uppercase()) {
             return Err(BasePrecompileError::revert(IB20Factory::InvalidCurrency {
                 code: init.currency,
             }));
