@@ -5999,6 +5999,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-snapshotter"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "blake3",
+ "bollard",
+ "clap",
+ "futures",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tar",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
+name = "base-snapshotter-bin"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "base-snapshotter",
+ "clap",
+ "rayon",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "base-snark-e2e"
 version = "0.0.0"
 dependencies = [
@@ -12340,9 +12381,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.29"
+version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "loom"
