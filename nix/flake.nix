@@ -1,13 +1,18 @@
 {
   description = "Rust dev shell with Fenix (stable + nightly) and cargo +nightly shim";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # we should keep using master untill this is merged
+  # https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/rust/fetchcrate.nix
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/master";
   inputs.systems.url = "github:nix-systems/default";
   inputs.flake-utils = {
     url = "github:numtide/flake-utils";
     inputs.systems.follows = "systems";
   };
-  inputs.fenix.url = "github:nix-community/fenix";
+  inputs.fenix={
+    url = "github:nix-community/fenix/monthly";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
   inputs.foundry.url = "github:shazow/foundry.nix/stable";
 
   outputs =
@@ -46,12 +51,12 @@
         ];
 
         # "latest" in Fenix is effectively nightly
-        rustNightly = fenixPkgs.latest.withComponents [
+        rustNightly = fenixPkgs.default.withComponents [
           "cargo"
           "rustc"
           "rustfmt"
           "clippy"
-          "rust-src"
+          # "rust-src" this require using latest (complete toolchain)
         ];
 
         rustAnalyzer = fenixPkgs.rust-analyzer;
