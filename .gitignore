@@ -1,16 +1,15 @@
 target/
-.idea
+.claude/
+.idea/
 .DS_Store
 .devnet/
 .sisyphus/
 eif*.bin
-docs/specs/node_modules/
-docs/specs/dist/
-docs/specs/.vocs/
 *.log
-.direnv
+.direnv/
 .vscode/
 *.env
+!.envrc
 # SP1 ELF binaries are built on demand and not committed.
 crates/proof/succinct/elf/range-elf-embedded
 crates/proof/succinct/elf/aggregation-elf

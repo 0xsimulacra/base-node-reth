@@ -2,8 +2,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use super::guards::B20Guards;
-use crate::{B20TokenRole, IB20, Token, TokenAccounting};
+use crate::{B20Guards, B20TokenRole, IB20, Token, TokenAccounting};
 
 /// Token burn operations.
 ///
@@ -49,7 +48,7 @@ pub trait Burnable: Token {
         privileged: bool,
     ) -> Result<()> {
         self.burn(caller, from, amount, privileged)?;
-        self.accounting_mut().emit_event(IB20::Memo { memo }.encode_log_data())
+        self.accounting_mut().emit_event(IB20::Memo { caller, memo }.encode_log_data())
     }
 
     /// Destroys `amount` from a policy-blocked account. Emits `Transfer` and `BurnedBlocked`.
@@ -77,13 +76,9 @@ mod tests {
     use alloy_primitives::{Address, U256};
     use base_precompile_storage::BasePrecompileError;
 
-    use super::Burnable;
     use crate::{
-        B20PausableFeature, B20PolicyType, B20TokenRole, IB20, POLICY_ALWAYS_BLOCK,
-        common::{
-            Token, TokenAccounting,
-            test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestToken},
-        },
+        B20PausableFeature, B20PolicyType, B20TokenRole, Burnable, IB20, InMemoryPolicy,
+        InMemoryTokenAccounting, PolicyRegistryStorage, TestToken, Token, TokenAccounting,
     };
 
     const CALLER: Address = Address::repeat_byte(0xcc);
@@ -183,7 +178,9 @@ mod tests {
         let mut accounting = InMemoryTokenAccounting::new(TOKEN_ADDR);
         accounting.balances.insert(ALICE, U256::from(100u64));
         accounting.total_supply = U256::from(100u64);
-        accounting.policy_ids.insert(B20PolicyType::TransferSender.id(), POLICY_ALWAYS_BLOCK);
+        accounting
+            .policy_ids
+            .insert(B20PolicyType::TransferSender.id(), PolicyRegistryStorage::ALWAYS_BLOCK_ID);
         let mut token = TestToken::with_storage_and_policy(accounting, InMemoryPolicy::new());
 
         token.burn_blocked(CALLER, ALICE, U256::from(25u64), true).unwrap();
@@ -198,7 +195,9 @@ mod tests {
         let mut accounting = InMemoryTokenAccounting::new(TOKEN_ADDR);
         accounting.balances.insert(ALICE, U256::from(10u64));
         accounting.total_supply = U256::from(10u64);
-        accounting.policy_ids.insert(B20PolicyType::TransferSender.id(), POLICY_ALWAYS_BLOCK);
+        accounting
+            .policy_ids
+            .insert(B20PolicyType::TransferSender.id(), PolicyRegistryStorage::ALWAYS_BLOCK_ID);
         let mut token = TestToken::with_storage_and_policy(accounting, InMemoryPolicy::new());
 
         assert_eq!(

@@ -12,7 +12,7 @@ sol! {
             MINT,
             /// Burn operations.
             BURN,
-            /// Reserved for future redeem operations; no current B-20 operation checks this flag.
+            /// Redeem operations.
             REDEEM
         }
 
@@ -26,16 +26,16 @@ sol! {
         error InvalidReceiver(address receiver);
         error InvalidApprover(address approver);
         error InvalidSpender(address spender);
+        error InvalidAmount();
         error EmptyFeatureSet();
         error InvalidSupplyCap(uint256 currentSupply, uint256 proposedCap);
         error SupplyCapExceeded(uint256 cap, uint256 attempted);
-        error PolicyForbids(bytes32 policyType, uint64 policyId);
+        error PolicyForbids(bytes32 policyScope, uint64 policyId);
         error PolicyNotFound(uint64 policyId);
-        error UnsupportedPolicyType(bytes32 policyType);
+        error UnsupportedPolicyType(bytes32 policyScope);
         error AccountNotBlocked(address account);
         error ExpiredSignature(uint256 deadline);
         error InvalidSigner(address signer, address owner);
-        error Uninitialized();
         error LastAdminCannotRenounce();
         error NotSoleAdmin();
         error AccessControlBadConfirmation();
@@ -43,7 +43,7 @@ sol! {
         // Events
         event Transfer(address indexed from, address indexed to, uint256 amount);
         event Approval(address indexed owner, address indexed spender, uint256 amount);
-        event Memo(bytes32 indexed memo);
+        event Memo(address indexed caller, bytes32 indexed memo);
         event BurnedBlocked(address indexed caller, address indexed from, uint256 amount);
         event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
         event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
@@ -51,11 +51,12 @@ sol! {
         event LastAdminRenounced(address indexed previousAdmin);
         event Paused(address indexed updater, PausableFeature[] features);
         event Unpaused(address indexed updater, PausableFeature[] features);
-        event PolicyUpdated(bytes32 indexed policyType, uint64 oldPolicyId, uint64 newPolicyId);
+        event PolicyUpdated(bytes32 indexed policyScope, uint64 oldPolicyId, uint64 newPolicyId);
         event SupplyCapUpdated(address indexed updater, uint256 oldSupplyCap, uint256 newSupplyCap);
         event ContractURIUpdated();
         event NameUpdated(address indexed updater, string newName);
         event SymbolUpdated(address indexed updater, string newSymbol);
+        event EIP712DomainChanged();
 
         // Role identifiers
         function DEFAULT_ADMIN_ROLE() external view returns (bytes32);
@@ -77,9 +78,6 @@ sol! {
         function symbol() external view returns (string);
         function decimals() external view returns (uint8);
         function totalSupply() external view returns (uint256);
-        function minimumRedeemable() external view returns (uint256);
-        function currency() external view returns (string);
-        function securityIdentifier(string calldata identifierType) external view returns (string);
         function balanceOf(address account) external view returns (uint256);
         function allowance(address owner, address spender) external view returns (uint256);
         function transfer(address to, uint256 amount) external returns (bool);
@@ -87,8 +85,8 @@ sol! {
         function approve(address spender, uint256 amount) external returns (bool);
 
         // Metadata updates
-        function setName(string calldata newName) external;
-        function setSymbol(string calldata newSymbol) external;
+        function updateName(string calldata newName) external;
+        function updateSymbol(string calldata newSymbol) external;
 
         // Memo transfer variants
         function transferWithMemo(address to, uint256 amount, bytes32 memo) external returns (bool);
@@ -117,12 +115,12 @@ sol! {
         function unpause(PausableFeature[] calldata features) external;
 
         // Policy
-        function policyId(bytes32 policyType) external view returns (uint64);
-        function updatePolicy(bytes32 policyType, uint64 newPolicyId) external;
+        function policyId(bytes32 policyScope) external view returns (uint64);
+        function updatePolicy(bytes32 policyScope, uint64 newPolicyId) external;
 
         // Supply cap
         function supplyCap() external view returns (uint256);
-        function setSupplyCap(uint256 newSupplyCap) external;
+        function updateSupplyCap(uint256 newSupplyCap) external;
 
         // Permit (EIP-2612 + ERC-5267)
         function DOMAIN_SEPARATOR() external view returns (bytes32);
@@ -132,6 +130,87 @@ sol! {
 
         // Contract URI (ERC-7572)
         function contractURI() external view returns (string);
-        function setContractURI(string calldata newURI) external;
+        function updateContractURI(string calldata newURI) external;
+    }
+}
+
+impl IB20::IB20Calls {
+    /// Returns the stable label for this decoded B-20 call.
+    pub const fn as_label(&self) -> &'static str {
+        match self {
+            Self::name(_) => "precompile-b20-name",
+            Self::symbol(_) => "precompile-b20-symbol",
+            Self::decimals(_) => "precompile-b20-decimals",
+            Self::totalSupply(_) => "precompile-b20-totalSupply",
+            Self::balanceOf(_) => "precompile-b20-balanceOf",
+            Self::allowance(_) => "precompile-b20-allowance",
+            Self::supplyCap(_) => "precompile-b20-supplyCap",
+            Self::nonces(_) => "precompile-b20-nonces",
+            Self::contractURI(_) => "precompile-b20-contractURI",
+            Self::DEFAULT_ADMIN_ROLE(_) => "precompile-b20-DEFAULT_ADMIN_ROLE",
+            Self::MINT_ROLE(_) => "precompile-b20-MINT_ROLE",
+            Self::BURN_ROLE(_) => "precompile-b20-BURN_ROLE",
+            Self::BURN_BLOCKED_ROLE(_) => "precompile-b20-BURN_BLOCKED_ROLE",
+            Self::PAUSE_ROLE(_) => "precompile-b20-PAUSE_ROLE",
+            Self::UNPAUSE_ROLE(_) => "precompile-b20-UNPAUSE_ROLE",
+            Self::METADATA_ROLE(_) => "precompile-b20-METADATA_ROLE",
+            Self::TRANSFER_SENDER_POLICY(_) => "precompile-b20-TRANSFER_SENDER_POLICY",
+            Self::TRANSFER_RECEIVER_POLICY(_) => "precompile-b20-TRANSFER_RECEIVER_POLICY",
+            Self::TRANSFER_EXECUTOR_POLICY(_) => "precompile-b20-TRANSFER_EXECUTOR_POLICY",
+            Self::MINT_RECEIVER_POLICY(_) => "precompile-b20-MINT_RECEIVER_POLICY",
+            Self::hasRole(_) => "precompile-b20-hasRole",
+            Self::getRoleAdmin(_) => "precompile-b20-getRoleAdmin",
+            Self::pausedFeatures(_) => "precompile-b20-pausedFeatures",
+            Self::policyId(_) => "precompile-b20-policyId",
+            Self::isPaused(_) => "precompile-b20-isPaused",
+            Self::DOMAIN_SEPARATOR(_) => "precompile-b20-DOMAIN_SEPARATOR",
+            Self::eip712Domain(_) => "precompile-b20-eip712Domain",
+            Self::transfer(_) => "precompile-b20-transfer",
+            Self::transferFrom(_) => "precompile-b20-transferFrom",
+            Self::approve(_) => "precompile-b20-approve",
+            Self::transferWithMemo(_) => "precompile-b20-transferWithMemo",
+            Self::transferFromWithMemo(_) => "precompile-b20-transferFromWithMemo",
+            Self::mint(_) => "precompile-b20-mint",
+            Self::mintWithMemo(_) => "precompile-b20-mintWithMemo",
+            Self::burn(_) => "precompile-b20-burn",
+            Self::burnWithMemo(_) => "precompile-b20-burnWithMemo",
+            Self::burnBlocked(_) => "precompile-b20-burnBlocked",
+            Self::pause(_) => "precompile-b20-pause",
+            Self::unpause(_) => "precompile-b20-unpause",
+            Self::updateSupplyCap(_) => "precompile-b20-updateSupplyCap",
+            Self::updateName(_) => "precompile-b20-updateName",
+            Self::updateSymbol(_) => "precompile-b20-updateSymbol",
+            Self::updateContractURI(_) => "precompile-b20-updateContractURI",
+            Self::grantRole(_) => "precompile-b20-grantRole",
+            Self::revokeRole(_) => "precompile-b20-revokeRole",
+            Self::renounceRole(_) => "precompile-b20-renounceRole",
+            Self::renounceLastAdmin(_) => "precompile-b20-renounceLastAdmin",
+            Self::setRoleAdmin(_) => "precompile-b20-setRoleAdmin",
+            Self::updatePolicy(_) => "precompile-b20-updatePolicy",
+            Self::permit(_) => "precompile-b20-permit",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Address, U256};
+
+    use crate::IB20;
+
+    #[test]
+    fn b20_call_labels_are_stable() {
+        assert_eq!(
+            IB20::IB20Calls::transfer(IB20::transferCall { to: Address::ZERO, amount: U256::ZERO })
+                .as_label(),
+            "precompile-b20-transfer"
+        );
+        assert_eq!(
+            IB20::IB20Calls::updateSupplyCap(IB20::updateSupplyCapCall {
+                newSupplyCap: U256::ZERO,
+            })
+            .as_label(),
+            "precompile-b20-updateSupplyCap"
+        );
     }
 }

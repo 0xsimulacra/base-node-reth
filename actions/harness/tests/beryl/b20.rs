@@ -1,7 +1,7 @@
 //! B-20 precompile action tests across the Base Beryl boundary.
 
 use alloy_consensus::TxReceipt;
-use alloy_primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, FixedBytes, TxKind, U256, keccak256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
@@ -13,7 +13,9 @@ use crate::env::BerylTestEnv;
 
 const PERMIT_TYPE: &[u8] =
     b"Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)";
-const DOMAIN_TYPE: &[u8] = b"EIP712Domain(uint256 chainId,address verifyingContract)";
+const DOMAIN_TYPE: &[u8] =
+    b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
+const DOMAIN_VERSION: &[u8] = b"1";
 const MEMO_TRANSFER: B256 = B256::repeat_byte(0x10);
 const MEMO_TRANSFER_FROM: B256 = B256::repeat_byte(0x11);
 const MEMO_MINT: B256 = B256::repeat_byte(0x12);
@@ -267,8 +269,16 @@ async fn b20_staticcall_abi_covers_all_read_methods() {
 
     scenario
         .assert_staticcall_cases(vec![
-            StaticcallCase::word("name", IB20::nameCall {}.abi_encode(), U256::from(32)),
-            StaticcallCase::word("symbol", IB20::symbolCall {}.abi_encode(), U256::from(32)),
+            StaticcallCase::output(
+                "name",
+                IB20::nameCall {}.abi_encode(),
+                IB20::nameCall::abi_encode_returns(&BerylTestEnv::B20_NAME.to_string()),
+            ),
+            StaticcallCase::output(
+                "symbol",
+                IB20::symbolCall {}.abi_encode(),
+                IB20::symbolCall::abi_encode_returns(&BerylTestEnv::B20_SYMBOL.to_string()),
+            ),
             StaticcallCase::word(
                 "decimals",
                 IB20::decimalsCall {}.abi_encode(),
@@ -291,15 +301,13 @@ async fn b20_staticcall_abi_covers_all_read_methods() {
                 U256::from(BerylTestEnv::B20_BOB_ALLOWANCE),
             ),
             StaticcallCase::word(
-                "minimumRedeemable",
-                IB20::minimumRedeemableCall {}.abi_encode(),
-                U256::ZERO,
-            ),
-            StaticcallCase::word(
                 "pausedFeatures",
                 IB20::pausedFeaturesCall {}.abi_encode(),
                 U256::from(32),
-            ),
+            )
+            .with_output(IB20::pausedFeaturesCall::abi_encode_returns(
+                &Vec::<IB20::PausableFeature>::new(),
+            )),
             StaticcallCase::word(
                 "isPaused",
                 IB20::isPausedCall { feature: IB20::PausableFeature::TRANSFER }.abi_encode(),
@@ -309,7 +317,11 @@ async fn b20_staticcall_abi_covers_all_read_methods() {
             StaticcallCase::word(
                 "DOMAIN_SEPARATOR",
                 IB20::DOMAIN_SEPARATORCall {}.abi_encode(),
-                domain_separator_word(scenario.env.chain_id(), scenario.token),
+                domain_separator_word(
+                    scenario.env.chain_id(),
+                    scenario.token,
+                    BerylTestEnv::B20_NAME,
+                ),
             ),
             StaticcallCase::word(
                 "nonces",
@@ -319,12 +331,19 @@ async fn b20_staticcall_abi_covers_all_read_methods() {
             StaticcallCase::word(
                 "eip712Domain",
                 IB20::eip712DomainCall {}.abi_encode(),
-                U256::from(32),
-            ),
-            StaticcallCase::word(
+                eip712_domain_fields_word(),
+            )
+            .with_output(IB20::eip712DomainCall::abi_encode_returns(
+                &eip712_domain_return(
+                    scenario.env.chain_id(),
+                    scenario.token,
+                    BerylTestEnv::B20_NAME,
+                ),
+            )),
+            StaticcallCase::output(
                 "contractURI",
                 IB20::contractURICall {}.abi_encode(),
-                U256::from(32),
+                IB20::contractURICall::abi_encode_returns(&String::new()),
             ),
         ])
         .await;
@@ -368,12 +387,12 @@ async fn b20_extended_mutations_update_state_and_emit_events() {
         amount: U256::from(5),
         memo: MEMO_TRANSFER_FROM,
     });
-    let set_supply_cap = scenario.call_tx(IB20::setSupplyCapCall { newSupplyCap: new_cap });
-    let set_name =
-        scenario.call_tx(IB20::setNameCall { newName: "Action B20 Updated".to_string() });
-    let set_symbol = scenario.call_tx(IB20::setSymbolCall { newSymbol: "AB20U".to_string() });
-    let set_contract_uri =
-        scenario.call_tx(IB20::setContractURICall { newURI: "ipfs://action".to_string() });
+    let update_supply_cap = scenario.call_tx(IB20::updateSupplyCapCall { newSupplyCap: new_cap });
+    let update_name =
+        scenario.call_tx(IB20::updateNameCall { newName: "Action B20 Updated".to_string() });
+    let update_symbol = scenario.call_tx(IB20::updateSymbolCall { newSymbol: "AB20U".to_string() });
+    let update_contract_uri =
+        scenario.call_tx(IB20::updateContractURICall { newURI: "ipfs://action".to_string() });
     let mint =
         scenario.call_tx(IB20::mintCall { to: BerylTestEnv::alice(), amount: U256::from(20) });
     let mint_with_memo = scenario.call_tx(IB20::mintWithMemoCall {
@@ -394,10 +413,10 @@ async fn b20_extended_mutations_update_state_and_emit_events() {
             transfer_with_memo,
             approve_bob,
             transfer_from_with_memo,
-            set_supply_cap,
-            set_name,
-            set_symbol,
-            set_contract_uri,
+            update_supply_cap,
+            update_name,
+            update_symbol,
+            update_contract_uri,
             mint,
             mint_with_memo,
             burn,
@@ -414,8 +433,16 @@ async fn b20_extended_mutations_update_state_and_emit_events() {
         );
     }
 
-    scenario.assert_log(&block, 0, IB20::Memo { memo: MEMO_TRANSFER }.encode_log_data());
-    scenario.assert_log(&block, 2, IB20::Memo { memo: MEMO_TRANSFER_FROM }.encode_log_data());
+    scenario.assert_log(
+        &block,
+        0,
+        IB20::Memo { caller: BerylTestEnv::alice(), memo: MEMO_TRANSFER }.encode_log_data(),
+    );
+    scenario.assert_log(
+        &block,
+        2,
+        IB20::Memo { caller: BerylTestEnv::bob(), memo: MEMO_TRANSFER_FROM }.encode_log_data(),
+    );
     scenario.assert_log(
         &block,
         3,
@@ -442,8 +469,16 @@ async fn b20_extended_mutations_update_state_and_emit_events() {
             .encode_log_data(),
     );
     scenario.assert_log(&block, 6, IB20::ContractURIUpdated {}.encode_log_data());
-    scenario.assert_log(&block, 8, IB20::Memo { memo: MEMO_MINT }.encode_log_data());
-    scenario.assert_log(&block, 10, IB20::Memo { memo: MEMO_BURN }.encode_log_data());
+    scenario.assert_log(
+        &block,
+        8,
+        IB20::Memo { caller: BerylTestEnv::alice(), memo: MEMO_MINT }.encode_log_data(),
+    );
+    scenario.assert_log(
+        &block,
+        10,
+        IB20::Memo { caller: BerylTestEnv::alice(), memo: MEMO_BURN }.encode_log_data(),
+    );
     scenario.assert_log(
         &block,
         11,
@@ -465,22 +500,49 @@ async fn b20_extended_mutations_update_state_and_emit_events() {
 
     scenario.assert_total_supply(initial + 20 + 30 - 2 - 3);
     scenario.assert_allowance(BerylTestEnv::alice(), BerylTestEnv::bob(), 45);
+
+    let zero_mint =
+        scenario.call_tx(IB20::mintCall { to: BerylTestEnv::alice(), amount: U256::ZERO });
+    let zero_burn = scenario.call_tx(IB20::burnCall { amount: U256::ZERO });
+    let block = scenario.build_block_with_transactions(vec![zero_mint, zero_burn]).await;
+
+    for index in 0..2 {
+        assert!(
+            scenario.env.user_tx_succeeded(&block, index),
+            "zero-amount B-20 mutation {index} must succeed (zero-amount ops are valid per ERC-20)"
+        );
+    }
+    scenario.assert_total_supply(initial + 20 + 30 - 2 - 3);
+
     scenario
         .assert_staticcall_cases(vec![
             StaticcallCase::word(
                 "pausedFeatures after unpause",
                 IB20::pausedFeaturesCall {}.abi_encode(),
                 U256::from(32),
-            ),
+            )
+            .with_output(IB20::pausedFeaturesCall::abi_encode_returns(
+                &Vec::<IB20::PausableFeature>::new(),
+            )),
             StaticcallCase::word(
                 "supplyCap after update",
                 IB20::supplyCapCall {}.abi_encode(),
                 new_cap,
             ),
-            StaticcallCase::word(
-                "minimumRedeemable",
-                IB20::minimumRedeemableCall {}.abi_encode(),
-                U256::ZERO,
+            StaticcallCase::output(
+                "name after update",
+                IB20::nameCall {}.abi_encode(),
+                IB20::nameCall::abi_encode_returns(&"Action B20 Updated".to_string()),
+            ),
+            StaticcallCase::output(
+                "symbol after update",
+                IB20::symbolCall {}.abi_encode(),
+                IB20::symbolCall::abi_encode_returns(&"AB20U".to_string()),
+            ),
+            StaticcallCase::output(
+                "contractURI after update",
+                IB20::contractURICall {}.abi_encode(),
+                IB20::contractURICall::abi_encode_returns(&"ipfs://action".to_string()),
             ),
         ])
         .await;
@@ -493,9 +555,10 @@ async fn b20_permit_updates_allowance_and_nonce() {
     let mut scenario = B20TokenScenario::new().await;
     let value = U256::from(123);
     let deadline = U256::MAX;
+    let domain_sep =
+        domain_separator(scenario.env.chain_id(), scenario.token, BerylTestEnv::B20_NAME);
     let (v, r, s) = sign_permit(
-        scenario.env.chain_id(),
-        scenario.token,
+        domain_sep,
         BerylTestEnv::alice(),
         BerylTestEnv::bob(),
         value,
@@ -552,7 +615,7 @@ impl B20TokenScenario {
         scenario.build_block_with_transactions(Vec::new()).await;
 
         let activate_factory =
-            scenario.env.activate_feature_tx(BerylTestEnv::token_factory_feature());
+            scenario.env.activate_feature_tx(BerylTestEnv::b20_factory_feature());
         let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_token_feature());
         let block =
             scenario.build_block_with_transactions(vec![activate_factory, activate_b20]).await;
@@ -648,6 +711,18 @@ impl B20TokenScenario {
                     case.label
                 );
             }
+            assert_eq!(
+                self.env.probe_return_size(*probe),
+                U256::from(case.expected_output.len()),
+                "{} staticcall must return the expected byte length",
+                case.label
+            );
+            assert_eq!(
+                self.env.probe_return_hash(*probe),
+                keccak256(&case.expected_output),
+                "{} staticcall must return the expected ABI payload hash",
+                case.label
+            );
         }
     }
 
@@ -738,24 +813,39 @@ struct StaticcallCase {
     label: &'static str,
     input: Vec<u8>,
     expected_word: Option<U256>,
+    expected_output: Vec<u8>,
 }
 
 impl StaticcallCase {
-    const fn word(label: &'static str, input: Vec<u8>, expected_word: U256) -> Self {
-        Self { label, input, expected_word: Some(expected_word) }
+    fn word(label: &'static str, input: Vec<u8>, expected_word: U256) -> Self {
+        Self {
+            label,
+            input,
+            expected_word: Some(expected_word),
+            expected_output: expected_word.abi_encode(),
+        }
+    }
+
+    fn output(label: &'static str, input: Vec<u8>, expected_output: Vec<u8>) -> Self {
+        let expected_word = expected_output.get(..32).map(U256::from_be_slice);
+        Self { label, input, expected_word, expected_output }
+    }
+
+    fn with_output(mut self, expected_output: Vec<u8>) -> Self {
+        self.expected_word = expected_output.get(..32).map(U256::from_be_slice);
+        self.expected_output = expected_output;
+        self
     }
 }
 
 fn sign_permit(
-    chain_id: u64,
-    token: Address,
+    domain_sep: B256,
     owner: Address,
     spender: Address,
     value: U256,
     nonce: U256,
     deadline: U256,
 ) -> (u8, B256, B256) {
-    let domain_sep = domain_separator(chain_id, token);
     let permit_typehash = keccak256(PERMIT_TYPE);
     let struct_hash =
         keccak256((permit_typehash, owner, spender, value, nonce, deadline).abi_encode());
@@ -775,13 +865,33 @@ fn sign_permit(
     (v, r, s)
 }
 
-fn domain_separator(chain_id: u64, token: Address) -> B256 {
+fn domain_separator(chain_id: u64, token: Address, name: &str) -> B256 {
     let domain_typehash = keccak256(DOMAIN_TYPE);
-    keccak256((domain_typehash, U256::from(chain_id), token).abi_encode())
+    let name_hash = keccak256(name.as_bytes());
+    let version_hash = keccak256(DOMAIN_VERSION);
+    keccak256((domain_typehash, name_hash, version_hash, U256::from(chain_id), token).abi_encode())
 }
 
-fn domain_separator_word(chain_id: u64, token: Address) -> U256 {
-    U256::from_be_slice(domain_separator(chain_id, token).as_slice())
+fn domain_separator_word(chain_id: u64, token: Address, name: &str) -> U256 {
+    U256::from_be_slice(domain_separator(chain_id, token, name).as_slice())
+}
+
+const fn eip712_domain_fields_word() -> U256 {
+    let mut word = [0u8; 32];
+    word[0] = 0x0f; // bits 0+1+2+3: name + version + chainId + verifyingContract
+    U256::from_be_bytes(word)
+}
+
+fn eip712_domain_return(chain_id: u64, token: Address, name: &str) -> IB20::eip712DomainReturn {
+    IB20::eip712DomainReturn {
+        fields: FixedBytes::<1>::from([0x0f]),
+        name: name.to_string(),
+        version: "1".to_string(),
+        chainId: U256::from(chain_id),
+        verifyingContract: token,
+        salt: B256::ZERO,
+        extensions: Vec::new(),
+    }
 }
 
 struct B20StaticcallProbes {
@@ -851,11 +961,22 @@ impl B20StaticcallProbes {
     }
 
     fn assert_probe_return(scenario: &B20TokenScenario, probe: Address, expected: u64) {
+        let expected_output = U256::from(expected).abi_encode();
         assert!(scenario.env.probe_call_succeeded(probe), "B-20 staticcall probe must succeed");
         assert_eq!(
             scenario.env.probe_return_word(probe),
             U256::from(expected),
             "B-20 staticcall probe must return the expected word"
+        );
+        assert_eq!(
+            scenario.env.probe_return_size(probe),
+            U256::from(expected_output.len()),
+            "B-20 staticcall probe must return one ABI word"
+        );
+        assert_eq!(
+            scenario.env.probe_return_hash(probe),
+            keccak256(&expected_output),
+            "B-20 staticcall probe must return the expected ABI payload hash"
         );
     }
 }

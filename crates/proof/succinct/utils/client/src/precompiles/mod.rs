@@ -3,8 +3,11 @@
 use alloc::{boxed::Box, string::String};
 
 use alloy_evm::precompiles::PrecompilesMap;
+#[cfg(target_os = "zkvm")]
+use alloy_evm::precompiles::{DynPrecompile, Precompile};
 use alloy_primitives::Address;
 use base_common_evm::{BasePrecompiles, BaseSpecId};
+use base_common_precompiles::PrecompileCallObserver;
 #[cfg(any(test, target_os = "zkvm"))]
 use revm::precompile::PrecompileId;
 use revm::{
@@ -76,6 +79,24 @@ const fn get_precompile_tracker_name(id: &PrecompileId) -> Option<&'static str> 
     }
 }
 
+/// SP1 cycle-tracker observer for Base-native precompile operations.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Sp1CycleObserver;
+
+impl PrecompileCallObserver for Sp1CycleObserver {
+    fn start(&self, label: &'static str) {
+        let _ = label;
+        #[cfg(target_os = "zkvm")]
+        println!("cycle-tracker-report-start: {label}");
+    }
+
+    fn end(&self, label: &'static str) {
+        let _ = label;
+        #[cfg(target_os = "zkvm")]
+        println!("cycle-tracker-report-end: {label}");
+    }
+}
+
 /// The ZKVM-cycle-tracking precompiles.
 #[derive(Debug)]
 pub struct BaseZkvmPrecompiles {
@@ -122,16 +143,14 @@ impl BaseZkvmPrecompiles {
     ) -> PrecompilesMap {
         let mut precompiles = BasePrecompiles::new_with_spec(spec)
             .with_activation_admin_address(activation_admin_address)
-            .install();
+            .install_with_observer(Sp1CycleObserver);
         Self::install_cycle_trackers(&mut precompiles);
         precompiles
     }
 
     #[cfg(target_os = "zkvm")]
     fn install_cycle_trackers(precompiles: &mut PrecompilesMap) {
-        use alloy_evm::precompiles::{DynPrecompile, Precompile};
-
-        precompiles.map_pure_precompiles(|_, precompile| {
+        precompiles.map_cacheable_precompiles(|_, precompile| {
             let id = precompile.precompile_id().clone();
             if let Some(tracker_name) = get_precompile_tracker_name(&id) {
                 DynPrecompile::new(id, move |input| {
@@ -195,14 +214,13 @@ mod tests {
     use alloy_primitives::{B256, Bytes, U256};
     use base_common_evm::{BaseContext, BaseUpgrade, DefaultBase as _};
     use base_common_precompiles::{
-        ActivationRegistryStorage, PolicyRegistryStorage, TokenFactoryStorage, TokenVariant,
+        ActivationRegistryStorage, B20FactoryStorage, B20Variant, PolicyRegistryStorage,
     };
     use revm::{
         Context,
         database::EmptyDB,
         handler::PrecompileProvider,
         interpreter::{CallInput, CallScheme, CallValue, InstructionResult},
-        precompile::PrecompileError,
     };
     use revm_precompile::secp256r1;
 
@@ -223,7 +241,8 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             return_memory_offset: 0..0,
-            known_bytecode: None,
+            known_bytecode: Default::default(),
+            reservoir: 0,
         }
     }
 
@@ -308,7 +327,8 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             return_memory_offset: 0..0,
-            known_bytecode: None,
+            known_bytecode: Default::default(),
+            reservoir: 0,
         };
 
         let result = precompiles.run(&mut ctx, &call_inputs).unwrap();
@@ -422,10 +442,10 @@ mod tests {
     #[test]
     fn test_zkvm_precompiles_match_beryl_dynamic_installation() {
         let (token_address, _) =
-            TokenVariant::B20.compute_address(Address::repeat_byte(0x11), B256::repeat_byte(0x22));
+            B20Variant::B20.compute_address(Address::repeat_byte(0x11), B256::repeat_byte(0x22));
 
         let installed_addresses = [
-            TokenFactoryStorage::ADDRESS,
+            B20FactoryStorage::ADDRESS,
             PolicyRegistryStorage::ADDRESS,
             ActivationRegistryStorage::ADDRESS,
             token_address,
@@ -493,13 +513,14 @@ mod tests {
 
         // Legacy P256VERIFY costs 3,450 gas. With 5,000 gas it should succeed.
         assert!(
-            jovian_p256.execute(&[], 5_000).is_ok(),
+            jovian_p256.execute(&[], 5_000, 0).is_ok(),
             "JOVIAN P256VERIFY must succeed with 5,000 gas (legacy pricing, 3,450 base fee)",
         );
 
         // Osaka P256VERIFY costs 6,900 gas. With 5,000 gas it must fail with OOG.
+        let azul_result = azul_p256.execute(&[], 5_000, 0);
         assert!(
-            matches!(azul_p256.execute(&[], 5_000), Err(PrecompileError::OutOfGas)),
+            matches!(&azul_result, Ok(output) if output.halt_reason().is_some()),
             "AZUL P256VERIFY must fail with 5,000 gas (Osaka pricing, 6,900 base fee)",
         );
     }

@@ -9,8 +9,7 @@ use core::fmt;
 use alloy_primitives::Address;
 use base_precompile_storage::{Result, StorageCtx};
 
-use super::storage::PolicyRegistryStorage;
-use crate::{IPolicyRegistry::PolicyType, Policy, PolicyRegistry};
+use crate::{IPolicyRegistry::PolicyType, Policy, PolicyRegistry, PolicyRegistryStorage};
 
 /// Wraps [`PolicyRegistryStorage`] and implements [`Policy`] and [`PolicyRegistry`],
 /// separating authorization decisions from raw storage reads.
@@ -85,10 +84,6 @@ impl PolicyRegistry for PolicyHandle<'_> {
         self.inner.update_blocklist(policy_id, blocked, accounts)
     }
 
-    fn get_policy_type(&self, policy_id: u64) -> Result<PolicyType> {
-        self.inner.get_policy_type(policy_id)
-    }
-
     fn get_policy_admin(&self, policy_id: u64) -> Result<Address> {
         self.inner.get_policy_admin(policy_id)
     }
@@ -103,8 +98,7 @@ mod tests {
     use alloy_primitives::{Address, address};
     use base_precompile_storage::{HashMapStorageProvider, StorageCtx};
 
-    use super::*;
-    use crate::{IPolicyRegistry, Policy, PolicyRegistry};
+    use crate::{IPolicyRegistry, Policy, PolicyHandle, PolicyRegistry, PolicyRegistryStorage};
 
     const ADMIN: Address = address!("0x1000000000000000000000000000000000000001");
     const ALICE: Address = address!("0xA000000000000000000000000000000000000001");
@@ -113,6 +107,7 @@ mod tests {
     fn storage() -> HashMapStorageProvider {
         let mut s = HashMapStorageProvider::new(1);
         s.set_caller(ADMIN);
+        StorageCtx::enter(&mut s, |ctx| PolicyRegistryStorage::new(ctx).write_builtins()).unwrap();
         s
     }
 
@@ -173,22 +168,6 @@ mod tests {
 
         StorageCtx::enter(&mut s, |ctx| {
             assert_eq!(PolicyHandle::new(ctx).get_policy_admin(id).unwrap(), NEW_ADMIN);
-        });
-    }
-
-    #[test]
-    fn policy_registry_trait_get_policy_type() {
-        let mut s = storage();
-        StorageCtx::enter(&mut s, |ctx| {
-            let handle = PolicyHandle::new(ctx);
-            assert_eq!(
-                handle.get_policy_type(PolicyRegistryStorage::ALWAYS_ALLOW_ID).unwrap(),
-                IPolicyRegistry::PolicyType::ALWAYS_ALLOW
-            );
-            assert_eq!(
-                handle.get_policy_type(PolicyRegistryStorage::ALWAYS_BLOCK_ID).unwrap(),
-                IPolicyRegistry::PolicyType::ALWAYS_BLOCK
-            );
         });
     }
 }

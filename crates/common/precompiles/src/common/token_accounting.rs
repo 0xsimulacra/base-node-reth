@@ -53,10 +53,6 @@ pub trait TokenAccounting {
     fn set_symbol(&mut self, symbol: String) -> Result<()>;
     /// Returns the number of decimal places.
     fn decimals(&self) -> Result<u8>;
-    /// Returns the stablecoin currency identifier, or an empty string for non-stablecoin variants.
-    fn currency(&self) -> Result<String>;
-    /// Returns the security identifier value for `identifier_type`, or an empty string if unset.
-    fn security_identifier(&self, identifier_type: &str) -> Result<String>;
 
     // --- Pause ---
 
@@ -71,13 +67,6 @@ pub trait TokenAccounting {
     fn nonce(&self, owner: Address) -> Result<U256>;
     /// Increments the EIP-2612 permit nonce for `owner` by one.
     fn increment_nonce(&mut self, owner: Address) -> Result<()>;
-
-    // --- Redeem ---
-
-    /// Returns the minimum amount that may be redeemed in a single call.
-    fn minimum_redeemable(&self) -> Result<U256>;
-    /// Overwrites the minimum redeemable amount.
-    fn set_minimum_redeemable(&mut self, minimum: U256) -> Result<()>;
 
     // --- Contract URI ---
 
@@ -103,10 +92,10 @@ pub trait TokenAccounting {
 
     // --- Policies ---
 
-    /// Returns the policy ID assigned to `policy_type`.
-    fn policy_id(&self, policy_type: B256) -> Result<u64>;
-    /// Overwrites the policy ID assigned to `policy_type`.
-    fn set_policy_id(&mut self, policy_type: B256, policy_id: u64) -> Result<()>;
+    /// Returns the policy ID assigned to `policy_scope`.
+    fn policy_id(&self, policy_scope: B256) -> Result<u64>;
+    /// Overwrites the policy ID assigned to `policy_scope`.
+    fn set_policy_id(&mut self, policy_scope: B256, policy_id: u64) -> Result<()>;
 
     // --- Event emission ---
 

@@ -20,7 +20,6 @@
 use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256, Bytes, keccak256};
-use alloy_signer_local::PrivateKeySigner;
 use base_proof_tee_nitro_verifier::{VerifierInput, VerifierJournal};
 // `boundless-market` re-exports `alloy` (`pub use alloy`) but does not
 // re-export `DynProvider` directly — access it via the SDK's alloy so
@@ -28,11 +27,14 @@ use base_proof_tee_nitro_verifier::{VerifierInput, VerifierJournal};
 use boundless_market::alloy::providers::DynProvider;
 use boundless_market::{
     Client, NotProvided,
+    alloy::signers::local::PrivateKeySigner,
     contracts::{Predicate, RequestId, RequestStatus},
-    request_builder::{RequestParams, RequirementParams, StandardRequestBuilder},
+    price_oracle::Amount,
+    request_builder::{OfferParams, RequestParams, RequirementParams, StandardRequestBuilder},
 };
 use risc0_zkvm::sha::Digest;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -83,6 +85,21 @@ pub struct BoundlessProver {
     /// Should be set slightly below the on-chain `MAX_AGE` to account
     /// for clock skew and processing time.
     pub max_attestation_age: Duration,
+    /// Optional minimum Boundless offer price for each submitted proof request.
+    pub offer_min_price: Option<Amount>,
+    /// Optional maximum Boundless offer price for each submitted proof request.
+    pub offer_max_price: Option<Amount>,
+    /// Optional duration in seconds for Boundless price to ramp from min to max.
+    pub offer_ramp_up_period_secs: Option<u32>,
+    /// Optional maximum time, in seconds, that a prover that locks a
+    /// request has to deliver the proof before forfeiting its stake bond
+    /// and the request opening up to permissionless secondary
+    /// fulfillment. Also the deadline for any prover to lock the request
+    /// in the first place — locking and delivery share a single
+    /// deadline at `rampUpStart + lockTimeout`. When unset, the
+    /// Boundless SDK derives a recommended value from the program's
+    /// cycle count.
+    pub offer_lock_timeout_secs: Option<u32>,
     /// Serialises the `submit_onchain` call so that concurrent proof
     /// requests do not race on the Boundless wallet nonce. The lock is
     /// released immediately after submission, allowing the long-running
@@ -110,6 +127,10 @@ impl fmt::Debug for BoundlessProver {
             .field("trusted_certs_prefix_len", &self.trusted_certs_prefix_len)
             .field("max_recovery_attempts", &self.max_recovery_attempts)
             .field("max_attestation_age", &self.max_attestation_age)
+            .field("offer_min_price", &self.offer_min_price)
+            .field("offer_max_price", &self.offer_max_price)
+            .field("offer_ramp_up_period_secs", &self.offer_ramp_up_period_secs)
+            .field("offer_lock_timeout_secs", &self.offer_lock_timeout_secs)
             .finish()
     }
 }
@@ -151,6 +172,33 @@ impl BoundlessProver {
         }
         let debug = format!("{e:?}");
         debug.to_ascii_lowercase().contains(NEEDLE)
+    }
+
+    /// Applies optional explicit Boundless offer pricing to request params.
+    fn apply_offer_config(&self, params: RequestParams) -> RequestParams {
+        if self.offer_min_price.is_none()
+            && self.offer_max_price.is_none()
+            && self.offer_ramp_up_period_secs.is_none()
+            && self.offer_lock_timeout_secs.is_none()
+        {
+            return params;
+        }
+
+        let mut offer = OfferParams::builder();
+        if let Some(min_price) = &self.offer_min_price {
+            offer.min_price(min_price.clone());
+        }
+        if let Some(max_price) = &self.offer_max_price {
+            offer.max_price(max_price.clone());
+        }
+        if let Some(ramp_up_period) = self.offer_ramp_up_period_secs {
+            offer.ramp_up_period(ramp_up_period);
+        }
+        if let Some(lock_timeout) = self.offer_lock_timeout_secs {
+            offer.lock_timeout(lock_timeout);
+        }
+
+        params.with_offer(offer)
     }
 
     /// Fetches and ABI-encodes the set inclusion receipt for a fulfilled
@@ -327,6 +375,7 @@ impl BoundlessProver {
             .with_requirements(
                 RequirementParams::builder().predicate(Predicate::prefix_match(image_id, [])),
             );
+        let params = self.apply_offer_config(params);
 
         Ok((client, params))
     }
@@ -421,7 +470,28 @@ impl BoundlessProver {
 
 #[async_trait::async_trait]
 impl AttestationProofProvider for BoundlessProver {
-    async fn generate_proof(&self, attestation_bytes: &[u8]) -> Result<AttestationProof> {
+    /// # Cancellation
+    ///
+    /// Cooperatively honors `cancel` once, at the top of the method,
+    /// before building the client/params. The build + submit +
+    /// wait-for-fulfillment phases are not interrupted once entered;
+    /// callers that need finer-grained cancellation should `select!`
+    /// against the cancel token externally. Dropping the future
+    /// mid-flight is safe because any submitted request remains
+    /// discoverable on the next call via the deterministic request-id
+    /// derivation (see the module docs on proof recovery).
+    ///
+    /// The per-probe cancel checks the doc previously referenced live
+    /// in [`Self::generate_proof_for_signer`], which has its own
+    /// recovery loop; this method has no probes to break between.
+    async fn generate_proof(
+        &self,
+        attestation_bytes: &[u8],
+        cancel: &CancellationToken,
+    ) -> Result<AttestationProof> {
+        if cancel.is_cancelled() {
+            return Err(ProverError::Boundless("proof generation cancelled before start".into()));
+        }
         let (client, params) = self.build_client_and_params(attestation_bytes).await?;
         self.submit_and_wait(&client, params).await
     }
@@ -452,7 +522,11 @@ impl AttestationProofProvider for BoundlessProver {
         &self,
         attestation_bytes: &[u8],
         signer_address: Address,
+        cancel: &CancellationToken,
     ) -> Result<AttestationProof> {
+        if cancel.is_cancelled() {
+            return Err(ProverError::Boundless("proof generation cancelled before start".into()));
+        }
         let (client, params) = self.build_client_and_params(attestation_bytes).await?;
 
         let recovery_is_blocked = self
@@ -471,6 +545,14 @@ impl AttestationProofProvider for BoundlessProver {
         // Probe deterministic request-ID slots for recovery.
         let mut first_unknown_attempt: Option<u32> = None;
         for attempt in 0..self.max_recovery_attempts {
+            // Check cancellation between probe slots. Already-locked
+            // requests stay on-chain and remain recoverable on the next
+            // call via the same deterministic index.
+            if cancel.is_cancelled() {
+                return Err(ProverError::Boundless(
+                    "proof generation cancelled mid-recovery probe".into(),
+                ));
+            }
             let index = Self::derive_request_index(signer_address, attempt);
             // RequestId is keyed on the Boundless wallet (fee-payer,
             // `self.signer`), not the enclave signer (`signer_address`).
@@ -704,6 +786,7 @@ mod tests {
     use std::str::FromStr;
 
     use alloy_primitives::Address;
+    use boundless_market::price_oracle::{Amount, Asset};
     use rstest::{fixture, rstest};
 
     use super::*;
@@ -718,8 +801,16 @@ mod tests {
     const TEST_TIMEOUT: Duration = Duration::from_secs(300);
     const DEFAULT_TRUSTED_PREFIX: u8 = 1;
     const TEST_MAX_RECOVERY_ATTEMPTS: u32 = 5;
+    const TEST_MIN_PRICE_ETH: &str = "0.01";
+    const TEST_MAX_PRICE_ETH: &str = "0.03";
+    const TEST_RAMP_UP_PERIOD_SECS: u32 = 30;
+    const TEST_LOCK_TIMEOUT_SECS: u32 = 600;
 
     const TEST_MAX_ATTESTATION_AGE: Duration = Duration::from_secs(3300);
+
+    fn eth_amount(value: &str) -> Amount {
+        Amount::parse(value, Some(Asset::ETH)).expect("valid ETH amount")
+    }
 
     #[fixture]
     fn prover() -> BoundlessProver {
@@ -733,6 +824,10 @@ mod tests {
             trusted_certs_prefix_len: DEFAULT_TRUSTED_PREFIX,
             max_recovery_attempts: TEST_MAX_RECOVERY_ATTEMPTS,
             max_attestation_age: TEST_MAX_ATTESTATION_AGE,
+            offer_min_price: None,
+            offer_max_price: None,
+            offer_ramp_up_period_secs: None,
+            offer_lock_timeout_secs: None,
             submit_lock: Arc::new(Mutex::new(())),
             recovery_blocked: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
@@ -761,6 +856,52 @@ mod tests {
         assert_eq!(prover.timeout, TEST_TIMEOUT);
         assert_eq!(prover.trusted_certs_prefix_len, DEFAULT_TRUSTED_PREFIX);
         assert_eq!(prover.max_recovery_attempts, TEST_MAX_RECOVERY_ATTEMPTS);
+        assert!(prover.offer_min_price.is_none());
+        assert!(prover.offer_max_price.is_none());
+        assert!(prover.offer_ramp_up_period_secs.is_none());
+        assert!(prover.offer_lock_timeout_secs.is_none());
+    }
+
+    #[rstest]
+    fn apply_offer_config_preserves_default_when_unset(prover: BoundlessProver) {
+        let params = prover.apply_offer_config(RequestParams::new());
+
+        assert!(params.offer.min_price.is_none());
+        assert!(params.offer.max_price.is_none());
+        assert!(params.offer.ramp_up_period.is_none());
+        assert!(params.offer.lock_timeout.is_none());
+    }
+
+    #[rstest]
+    fn apply_offer_config_sets_explicit_prices(mut prover: BoundlessProver) {
+        let min_price = eth_amount(TEST_MIN_PRICE_ETH);
+        let max_price = eth_amount(TEST_MAX_PRICE_ETH);
+        prover.offer_min_price = Some(min_price.clone());
+        prover.offer_max_price = Some(max_price.clone());
+        prover.offer_ramp_up_period_secs = Some(TEST_RAMP_UP_PERIOD_SECS);
+        prover.offer_lock_timeout_secs = Some(TEST_LOCK_TIMEOUT_SECS);
+
+        let params = prover.apply_offer_config(RequestParams::new());
+
+        assert_eq!(params.offer.min_price, Some(min_price));
+        assert_eq!(params.offer.max_price, Some(max_price));
+        assert_eq!(params.offer.ramp_up_period, Some(TEST_RAMP_UP_PERIOD_SECS));
+        assert_eq!(params.offer.lock_timeout, Some(TEST_LOCK_TIMEOUT_SECS));
+    }
+
+    /// `lock_timeout` can be set independently of price/ramp fields,
+    /// in which case `apply_offer_config` must still emit an offer
+    /// override (not return params unchanged).
+    #[rstest]
+    fn apply_offer_config_sets_lock_timeout_alone(mut prover: BoundlessProver) {
+        prover.offer_lock_timeout_secs = Some(TEST_LOCK_TIMEOUT_SECS);
+
+        let params = prover.apply_offer_config(RequestParams::new());
+
+        assert_eq!(params.offer.lock_timeout, Some(TEST_LOCK_TIMEOUT_SECS));
+        assert!(params.offer.min_price.is_none());
+        assert!(params.offer.max_price.is_none());
+        assert!(params.offer.ramp_up_period.is_none());
     }
 
     // ── Clone ───────────────────────────────────────────────────────────

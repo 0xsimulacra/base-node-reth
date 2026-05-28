@@ -2,34 +2,90 @@
 
 use alloc::string::String;
 
-use alloy_primitives::{Address, B256, LogData, U256};
-use base_precompile_macros::contract;
-use base_precompile_storage::{
-    BasePrecompileError, ContractStorage, Handler, Mapping, Result, StorageCtx,
-};
+use alloy_primitives::{Address, B256, U256};
+use base_precompile_macros::{Storable, TokenAccounting, contract};
+use base_precompile_storage::{Handler, Mapping, Result, StorageCtx};
 
-use crate::{B20PolicyType, IB20, TokenAccounting, TokenVariant};
+/// Creation-time parameters for a B-20 token.
+///
+/// Passed to [`B20TokenStorage::initialize`] to write all fields atomically.
+#[derive(Debug)]
+pub struct B20TokenInit {
+    /// Token name.
+    pub name: String,
+    /// Token symbol.
+    pub symbol: String,
+    /// Maximum total supply allowed.
+    pub supply_cap: U256,
+}
 
+/// Core B-20 storage rooted at the `base.b20` ERC-7201 namespace.
+#[derive(Debug, Clone, Storable)]
+#[namespace("base.b20")]
+pub struct B20CoreStorage {
+    /// Mutable token name.
+    #[accessor]
+    #[mutator]
+    pub name: String, // offset 0
+    /// Mutable token symbol.
+    #[accessor]
+    #[mutator]
+    pub symbol: String, // offset 1
+    /// ERC-7572 contract metadata URI.
+    #[accessor]
+    #[mutator]
+    pub contract_uri: String, // offset 2
+    /// Total token supply.
+    #[accessor]
+    #[mutator]
+    pub total_supply: U256, // offset 3
+    /// Token balances by account.
+    #[accessor(name = balance_of, keys(account))]
+    #[mutator(name = set_balance, keys(account), value = balance)]
+    pub balances: Mapping<Address, U256>, // offset 4
+    /// Spending allowances by owner and spender.
+    #[accessor(name = allowance, keys(owner, spender))]
+    #[mutator(name = set_allowance, keys(owner, spender), value = amount)]
+    pub allowances: Mapping<Address, Mapping<Address, U256>>, // offset 5
+    /// Role membership flags by role and account.
+    #[accessor(name = has_role, keys(role, account))]
+    #[mutator(name = set_role, keys(role, account), value = enabled)]
+    pub roles: Mapping<B256, Mapping<Address, bool>>, // offset 6
+    /// Admin role configured for each role.
+    #[accessor(name = role_admin, keys(role))]
+    #[mutator(name = set_role_admin, keys(role), value = admin_role)]
+    pub role_admins: Mapping<B256, B256>, // offset 7
+    /// Default-admin holder count.
+    #[accessor]
+    #[mutator]
+    pub admin_count: U256, // offset 8
+    /// Packed transfer-side policy IDs.
+    #[accessor]
+    #[mutator]
+    pub transfer_policy_ids: U256, // offset 9: sender, receiver, executor, reserved
+    /// Packed mint-side policy IDs.
+    #[accessor]
+    #[mutator]
+    pub mint_policy_ids: U256, // offset 10: receiver, reserved, reserved, reserved
+    /// Paused feature bitmask.
+    #[accessor]
+    #[mutator]
+    pub paused: U256, // offset 11
+    /// Maximum total supply.
+    #[accessor]
+    #[mutator]
+    pub supply_cap: U256, // offset 12
+    /// EIP-2612 permit nonces by owner.
+    #[accessor(name = nonce, keys(owner))]
+    #[mutator(name = set_nonce, keys(owner), value = nonce)]
+    pub nonces: Mapping<Address, U256>, // offset 13
+}
+
+/// EVM-backed storage for the default B-20 variant.
 #[contract]
+#[derive(TokenAccounting)]
 pub struct B20TokenStorage {
-    pub total_supply: U256,                                   // slot 0
-    pub supply_cap: U256,                                     // slot 1
-    pub balances: Mapping<Address, U256>,                     // slot 2
-    pub allowances: Mapping<Address, Mapping<Address, U256>>, // slot 3
-    pub paused: U256,                                         // slot 4
-    pub nonces: Mapping<Address, U256>,                       // slot 5
-    pub name: String,                                         // slot 6
-    pub symbol: String,                                       // slot 7
-    pub minimum_redeemable: U256,                             // slot 8
-    pub contract_uri: String,                                 // slot 9
-    // slot 10 previously held pre-production capabilities; Beryl starts with fresh B-20 storage.
-    pub roles: Mapping<B256, Mapping<Address, bool>>, // slot 10
-    pub role_member_counts: Mapping<B256, U256>,      // slot 11
-    pub role_admins: Mapping<B256, B256>,             // slot 12
-    pub transfer_policy_ids: U256, // slot 13: sender, receiver, executor, reserved
-    pub mint_policy_ids: U256,     // slot 14: receiver, reserved, reserved, reserved
-    pub stablecoin_currency: String, // slot 15
-    pub security_isin: String,     // slot 16
+    pub b20: B20CoreStorage,
 }
 
 impl<'a> B20TokenStorage<'a> {
@@ -39,221 +95,93 @@ impl<'a> B20TokenStorage<'a> {
     pub fn from_address(addr: Address, storage: StorageCtx<'a>) -> Self {
         Self::__new(addr, storage)
     }
-}
 
-impl TokenAccounting for B20TokenStorage<'_> {
-    fn token_address(&self) -> Address {
-        ContractStorage::address(self)
-    }
-
-    fn is_initialized(&self) -> Result<bool> {
-        ContractStorage::is_initialized(self)
-    }
-
-    fn balance_of(&self, account: Address) -> Result<U256> {
-        self.balances.at(&account).read()
-    }
-
-    fn set_balance(&mut self, account: Address, balance: U256) -> Result<()> {
-        self.balances.at_mut(&account).write(balance)
-    }
-
-    fn allowance(&self, owner: Address, spender: Address) -> Result<U256> {
-        self.allowances.at(&owner).at(&spender).read()
-    }
-
-    fn set_allowance(&mut self, owner: Address, spender: Address, amount: U256) -> Result<()> {
-        self.allowances.at_mut(&owner).at_mut(&spender).write(amount)
-    }
-
-    fn total_supply(&self) -> Result<U256> {
-        self.total_supply.read()
-    }
-
-    fn set_total_supply(&mut self, supply: U256) -> Result<()> {
-        self.total_supply.write(supply)
-    }
-
-    fn supply_cap(&self) -> Result<U256> {
-        self.supply_cap.read()
-    }
-
-    fn set_supply_cap(&mut self, cap: U256) -> Result<()> {
-        self.supply_cap.write(cap)
-    }
-
-    fn name(&self) -> Result<String> {
-        self.name.read()
-    }
-
-    fn set_name(&mut self, name: String) -> Result<()> {
-        self.name.write(name)
-    }
-
-    fn symbol(&self) -> Result<String> {
-        self.symbol.read()
-    }
-
-    fn set_symbol(&mut self, symbol: String) -> Result<()> {
-        self.symbol.write(symbol)
-    }
-
-    fn decimals(&self) -> Result<u8> {
-        Ok(TokenVariant::from_address(self.address).map_or(0, TokenVariant::decimals))
-    }
-
-    fn currency(&self) -> Result<String> {
-        self.stablecoin_currency.read()
-    }
-
-    fn security_identifier(&self, identifier_type: &str) -> Result<String> {
-        if identifier_type == "ISIN" { self.security_isin.read() } else { Ok(String::new()) }
-    }
-
-    fn paused(&self) -> Result<U256> {
-        self.paused.read()
-    }
-
-    fn set_paused(&mut self, vectors: U256) -> Result<()> {
-        self.paused.write(vectors)
-    }
-
-    fn nonce(&self, owner: Address) -> Result<U256> {
-        self.nonces.at(&owner).read()
-    }
-
-    fn increment_nonce(&mut self, owner: Address) -> Result<()> {
-        let current = self.nonces.at(&owner).read()?;
-        let next =
-            current.checked_add(U256::ONE).ok_or_else(BasePrecompileError::under_overflow)?;
-        self.nonces.at_mut(&owner).write(next)
-    }
-
-    fn minimum_redeemable(&self) -> Result<U256> {
-        self.minimum_redeemable.read()
-    }
-
-    fn set_minimum_redeemable(&mut self, minimum: U256) -> Result<()> {
-        self.minimum_redeemable.write(minimum)
-    }
-
-    fn contract_uri(&self) -> Result<String> {
-        self.contract_uri.read()
-    }
-
-    fn set_contract_uri(&mut self, uri: String) -> Result<()> {
-        self.contract_uri.write(uri)
-    }
-
-    fn has_role(&self, role: B256, account: Address) -> Result<bool> {
-        self.roles.at(&role).at(&account).read()
-    }
-
-    fn set_role(&mut self, role: B256, account: Address, enabled: bool) -> Result<()> {
-        self.roles.at_mut(&role).at_mut(&account).write(enabled)
-    }
-
-    fn role_member_count(&self, role: B256) -> Result<U256> {
-        self.role_member_counts.at(&role).read()
-    }
-
-    fn set_role_member_count(&mut self, role: B256, count: U256) -> Result<()> {
-        self.role_member_counts.at_mut(&role).write(count)
-    }
-
-    fn role_admin(&self, role: B256) -> Result<B256> {
-        self.role_admins.at(&role).read()
-    }
-
-    fn set_role_admin(&mut self, role: B256, admin_role: B256) -> Result<()> {
-        self.role_admins.at_mut(&role).write(admin_role)
-    }
-
-    fn policy_id(&self, policy_type: B256) -> Result<u64> {
-        let policy_type = Self::require_policy_type(policy_type)?;
-        match policy_type {
-            B20PolicyType::TransferSender => Ok(Self::read_policy_lane(
-                self.transfer_policy_ids.read()?,
-                Self::TRANSFER_SENDER_POLICY_LANE,
-            )),
-            B20PolicyType::TransferReceiver => Ok(Self::read_policy_lane(
-                self.transfer_policy_ids.read()?,
-                Self::TRANSFER_RECEIVER_POLICY_LANE,
-            )),
-            B20PolicyType::TransferExecutor => Ok(Self::read_policy_lane(
-                self.transfer_policy_ids.read()?,
-                Self::TRANSFER_EXECUTOR_POLICY_LANE,
-            )),
-            B20PolicyType::MintReceiver => Ok(Self::read_policy_lane(
-                self.mint_policy_ids.read()?,
-                Self::MINT_RECEIVER_POLICY_LANE,
-            )),
-        }
-    }
-
-    fn set_policy_id(&mut self, policy_type: B256, policy_id: u64) -> Result<()> {
-        let policy_type = Self::require_policy_type(policy_type)?;
-        match policy_type {
-            B20PolicyType::TransferSender => {
-                let packed = Self::write_policy_lane(
-                    self.transfer_policy_ids.read()?,
-                    Self::TRANSFER_SENDER_POLICY_LANE,
-                    policy_id,
-                );
-                self.transfer_policy_ids.write(packed)
-            }
-            B20PolicyType::TransferReceiver => {
-                let packed = Self::write_policy_lane(
-                    self.transfer_policy_ids.read()?,
-                    Self::TRANSFER_RECEIVER_POLICY_LANE,
-                    policy_id,
-                );
-                self.transfer_policy_ids.write(packed)
-            }
-            B20PolicyType::TransferExecutor => {
-                let packed = Self::write_policy_lane(
-                    self.transfer_policy_ids.read()?,
-                    Self::TRANSFER_EXECUTOR_POLICY_LANE,
-                    policy_id,
-                );
-                self.transfer_policy_ids.write(packed)
-            }
-            B20PolicyType::MintReceiver => {
-                let packed = Self::write_policy_lane(
-                    self.mint_policy_ids.read()?,
-                    Self::MINT_RECEIVER_POLICY_LANE,
-                    policy_id,
-                );
-                self.mint_policy_ids.write(packed)
-            }
-        }
-    }
-
-    fn emit_event(&mut self, log: LogData) -> Result<()> {
-        self.emit_event(log)
+    /// Writes all creation-time fields atomically.
+    pub fn initialize(&mut self, init: B20TokenInit) -> Result<()> {
+        self.b20.name.write(init.name)?;
+        self.b20.symbol.write(init.symbol)?;
+        self.b20.supply_cap.write(init.supply_cap)?;
+        Ok(())
     }
 }
 
-impl B20TokenStorage<'_> {
-    const TRANSFER_SENDER_POLICY_LANE: usize = 0;
-    const TRANSFER_RECEIVER_POLICY_LANE: usize = 1;
-    const TRANSFER_EXECUTOR_POLICY_LANE: usize = 2;
-    const MINT_RECEIVER_POLICY_LANE: usize = 0;
-    const POLICY_LANE_BITS: usize = 64;
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Address, U256, address, uint};
+    use base_precompile_storage::{Handler, StorableType, StorageCtx, StorageKey, setup_storage};
 
-    fn require_policy_type(policy_type: B256) -> Result<B20PolicyType> {
-        B20PolicyType::from_id(policy_type).ok_or_else(|| {
-            BasePrecompileError::revert(IB20::UnsupportedPolicyType { policyType: policy_type })
-        })
+    use crate::{
+        B20CoreStorage, B20TokenRole, B20TokenStorage, TokenAccounting,
+        b20::storage::{__packing_b20_core_storage, slots},
+    };
+
+    const TOKEN: Address = address!("000000000000000000000000000000000000b020");
+    const B20_ROOT: U256 =
+        uint!(0xc78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed48434000_U256);
+
+    #[test]
+    fn b20_namespaces_match_base_std_roots() {
+        assert_eq!(<B20CoreStorage as StorableType>::STORAGE_NAMESPACE_ID, "base.b20");
+        assert_eq!(<B20CoreStorage as StorableType>::STORAGE_NAMESPACE_ROOT, B20_ROOT);
+
+        assert_eq!(slots::B20, B20_ROOT);
     }
 
-    fn read_policy_lane(packed: U256, lane: usize) -> u64 {
-        ((packed >> (lane * Self::POLICY_LANE_BITS)) & U256::from(u64::MAX)).to::<u64>()
+    #[test]
+    fn b20_core_offsets_match_mock_b20_storage() {
+        assert_eq!(__packing_b20_core_storage::NAME_LOC.offset_slots, 0);
+        assert_eq!(__packing_b20_core_storage::SYMBOL_LOC.offset_slots, 1);
+        assert_eq!(__packing_b20_core_storage::CONTRACT_URI_LOC.offset_slots, 2);
+        assert_eq!(__packing_b20_core_storage::TOTAL_SUPPLY_LOC.offset_slots, 3);
+        assert_eq!(__packing_b20_core_storage::BALANCES_LOC.offset_slots, 4);
+        assert_eq!(__packing_b20_core_storage::ALLOWANCES_LOC.offset_slots, 5);
+        assert_eq!(__packing_b20_core_storage::ROLES_LOC.offset_slots, 6);
+        assert_eq!(__packing_b20_core_storage::ROLE_ADMINS_LOC.offset_slots, 7);
+        assert_eq!(__packing_b20_core_storage::ADMIN_COUNT_LOC.offset_slots, 8);
+        assert_eq!(__packing_b20_core_storage::TRANSFER_POLICY_IDS_LOC.offset_slots, 9);
+        assert_eq!(__packing_b20_core_storage::MINT_POLICY_IDS_LOC.offset_slots, 10);
+        assert_eq!(__packing_b20_core_storage::PAUSED_LOC.offset_slots, 11);
+        assert_eq!(__packing_b20_core_storage::SUPPLY_CAP_LOC.offset_slots, 12);
+        assert_eq!(__packing_b20_core_storage::NONCES_LOC.offset_slots, 13);
     }
 
-    fn write_policy_lane(packed: U256, lane: usize, policy_id: u64) -> U256 {
-        let shift = lane * Self::POLICY_LANE_BITS;
-        let mask = U256::from(u64::MAX) << shift;
-        (packed & !mask) | (U256::from(policy_id) << shift)
+    #[test]
+    fn b20_core_mapping_slots_are_rooted_at_namespace_offsets() {
+        let (mut storage, _) = setup_storage();
+        let holder = Address::repeat_byte(0xaa);
+        let spender = Address::repeat_byte(0xbb);
+        let role = B20TokenRole::Mint.id();
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            let mut token = B20TokenStorage::from_address(TOKEN, ctx);
+            token.b20.balances.at_mut(&holder).write(U256::from(100)).unwrap();
+            token.b20.allowances.at_mut(&holder).at_mut(&spender).write(U256::from(25)).unwrap();
+            token.b20.roles.at_mut(&role).at_mut(&holder).write(true).unwrap();
+            token.set_role_member_count(B20TokenRole::DefaultAdmin.id(), U256::ONE).unwrap();
+
+            let balances_slot =
+                B20_ROOT + U256::from(__packing_b20_core_storage::BALANCES_LOC.offset_slots);
+            let allowances_slot =
+                B20_ROOT + U256::from(__packing_b20_core_storage::ALLOWANCES_LOC.offset_slots);
+            let roles_slot =
+                B20_ROOT + U256::from(__packing_b20_core_storage::ROLES_LOC.offset_slots);
+            let admin_count_slot =
+                B20_ROOT + U256::from(__packing_b20_core_storage::ADMIN_COUNT_LOC.offset_slots);
+
+            assert_eq!(
+                ctx.sload(TOKEN, holder.mapping_slot(balances_slot)).unwrap(),
+                U256::from(100)
+            );
+            assert_eq!(
+                ctx.sload(TOKEN, spender.mapping_slot(holder.mapping_slot(allowances_slot)))
+                    .unwrap(),
+                U256::from(25)
+            );
+            assert_eq!(
+                ctx.sload(TOKEN, holder.mapping_slot(role.mapping_slot(roles_slot))).unwrap(),
+                U256::ONE
+            );
+            assert_eq!(ctx.sload(TOKEN, admin_count_slot).unwrap(), U256::ONE);
+        });
     }
 }

@@ -33,6 +33,24 @@ impl BaseEvmFactory {
     pub const fn activation_admin_address(&self) -> Option<Address> {
         self.activation_admin_address
     }
+
+    /// Returns this factory with the activation registry admin address set.
+    #[must_use]
+    pub const fn with_activation_admin_address(
+        mut self,
+        activation_admin_address: Option<Address>,
+    ) -> Self {
+        self.set_activation_admin_address(activation_admin_address);
+        self
+    }
+
+    /// Sets the activation registry admin address.
+    pub const fn set_activation_admin_address(
+        &mut self,
+        activation_admin_address: Option<Address>,
+    ) {
+        self.activation_admin_address = activation_admin_address;
+    }
 }
 
 impl Default for BaseEvmFactory {

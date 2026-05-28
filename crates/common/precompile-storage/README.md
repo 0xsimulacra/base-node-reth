@@ -34,6 +34,22 @@ Multiple fields with the same namespace use normal Solidity offsets from that ro
 the surrounding contract layout. `#[slot]` and `#[base_slot]` overrides cannot be combined with
 `#[namespace]` on the same field.
 
+The namespace can also be declared once on a reusable `Storable` layout type. A `#[contract]`
+field with that type is automatically mounted at the type's namespace root:
+
+```rust,ignore
+#[derive(Debug, Clone, Storable)]
+#[namespace("b20.security")]
+pub struct B20SecurityStorage {
+    pub shares_to_tokens_ratio: U256,
+}
+
+#[contract]
+pub struct B20Security {
+    pub security: B20SecurityStorage,
+}
+```
+
 ### Mapping slot derivation
 
 ```text
@@ -42,6 +58,8 @@ slot(key, base) = keccak256(lpad32(key) ‖ to_be32(base))
 
 This matches Solidity's `keccak256(abi.encode(key, slot))` for:
 - Unsigned integers, `Address`, `FixedBytes<32>` — identical encoding
+- `String` — uses `keccak256(bytes(key) ‖ to_be32(base))`, matching Solidity's string-keyed
+  mapping derivation
 - Signed integers — diverges (we zero-left-pad the two's complement bits; Solidity sign-extends)
 - `FixedBytes<N>` for N < 32 — diverges (we left-pad; Solidity right-pads)
 

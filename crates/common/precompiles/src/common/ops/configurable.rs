@@ -4,8 +4,7 @@ use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolEvent;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use super::guards::B20Guards;
-use crate::{B20TokenRole, IB20, Token, TokenAccounting};
+use crate::{B20Guards, B20TokenRole, IB20, Token, TokenAccounting};
 
 /// Mutable configuration operations: supply cap, metadata, and contract URI updates.
 ///
@@ -13,7 +12,12 @@ use crate::{B20TokenRole, IB20, Token, TokenAccounting};
 /// Implement with an empty body to opt in.
 pub trait Configurable: Token {
     /// Updates the supply cap. Requires `DEFAULT_ADMIN_ROLE`. Emits `SupplyCapUpdated`.
-    fn set_supply_cap(&mut self, caller: Address, new_cap: U256, privileged: bool) -> Result<()> {
+    fn update_supply_cap(
+        &mut self,
+        caller: Address,
+        new_cap: U256,
+        privileged: bool,
+    ) -> Result<()> {
         if !privileged {
             B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::DefaultAdmin)?;
         }
@@ -32,18 +36,19 @@ pub trait Configurable: Token {
         )
     }
 
-    /// Updates the token name. Emits `NameUpdated`.
-    fn set_name(&mut self, caller: Address, name: String, privileged: bool) -> Result<()> {
+    /// Updates the token name. Emits `NameUpdated` and `EIP712DomainChanged` (ERC-5267).
+    fn update_name(&mut self, caller: Address, name: String, privileged: bool) -> Result<()> {
         if !privileged {
             B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::Metadata)?;
         }
         self.accounting_mut().set_name(name.clone())?;
         self.accounting_mut()
-            .emit_event(IB20::NameUpdated { updater: caller, newName: name }.encode_log_data())
+            .emit_event(IB20::NameUpdated { updater: caller, newName: name }.encode_log_data())?;
+        self.accounting_mut().emit_event(IB20::EIP712DomainChanged {}.encode_log_data())
     }
 
     /// Updates the token symbol. Emits `SymbolUpdated`.
-    fn set_symbol(&mut self, caller: Address, symbol: String, privileged: bool) -> Result<()> {
+    fn update_symbol(&mut self, caller: Address, symbol: String, privileged: bool) -> Result<()> {
         if !privileged {
             B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::Metadata)?;
         }
@@ -54,9 +59,14 @@ pub trait Configurable: Token {
     }
 
     /// Updates the contract URI. Emits `ContractURIUpdated`.
-    fn set_contract_uri(&mut self, caller: Address, uri: String, privileged: bool) -> Result<()> {
+    fn update_contract_uri(
+        &mut self,
+        caller: Address,
+        uri: String,
+        privileged: bool,
+    ) -> Result<()> {
         if !privileged {
-            B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::DefaultAdmin)?;
+            B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::Metadata)?;
         }
         self.accounting_mut().set_contract_uri(uri)?;
         self.accounting_mut().emit_event(IB20::ContractURIUpdated {}.encode_log_data())
@@ -68,13 +78,9 @@ mod tests {
     use alloy_primitives::{Address, U256};
     use base_precompile_storage::BasePrecompileError;
 
-    use super::Configurable;
     use crate::{
-        B20TokenRole, IB20,
-        common::{
-            Token, TokenAccounting,
-            test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestToken},
-        },
+        B20TokenRole, Configurable, IB20, InMemoryPolicy, InMemoryTokenAccounting, TestToken,
+        Token, TokenAccounting,
     };
 
     const CALLER: Address = Address::repeat_byte(0xaa);
@@ -94,22 +100,22 @@ mod tests {
     }
 
     #[test]
-    fn set_supply_cap_updates_cap_and_emits_event() {
+    fn update_supply_cap_updates_cap_and_emits_event() {
         let mut token = make_token();
 
-        token.set_supply_cap(CALLER, U256::from(500u64), true).unwrap();
+        token.update_supply_cap(CALLER, U256::from(500u64), true).unwrap();
 
         assert_eq!(token.accounting().supply_cap().unwrap(), U256::from(500u64));
         assert_eq!(token.accounting().events.len(), 1);
     }
 
     #[test]
-    fn set_supply_cap_below_current_supply_reverts() {
+    fn update_supply_cap_below_current_supply_reverts() {
         let mut token = make_token();
         token.accounting_mut().total_supply = U256::from(100u64);
 
         assert_eq!(
-            token.set_supply_cap(CALLER, U256::from(99u64), true).unwrap_err(),
+            token.update_supply_cap(CALLER, U256::from(99u64), true).unwrap_err(),
             BasePrecompileError::revert(IB20::InvalidSupplyCap {
                 currentSupply: U256::from(100u64),
                 proposedCap: U256::from(99u64),
@@ -118,30 +124,30 @@ mod tests {
     }
 
     #[test]
-    fn set_name_round_trips_and_emits_event() {
+    fn update_name_round_trips_and_emits_event() {
         let mut token = make_token();
 
-        token.set_name(CALLER, "MyToken".into(), true).unwrap();
+        token.update_name(CALLER, "MyToken".into(), true).unwrap();
 
         assert_eq!(token.accounting().name().unwrap(), "MyToken");
-        assert_eq!(token.accounting().events.len(), 1);
+        assert_eq!(token.accounting().events.len(), 2);
     }
 
     #[test]
-    fn set_symbol_round_trips_and_emits_event() {
+    fn update_symbol_round_trips_and_emits_event() {
         let mut token = make_token();
 
-        token.set_symbol(CALLER, "MTK".into(), true).unwrap();
+        token.update_symbol(CALLER, "MTK".into(), true).unwrap();
 
         assert_eq!(token.accounting().symbol().unwrap(), "MTK");
         assert_eq!(token.accounting().events.len(), 1);
     }
 
     #[test]
-    fn set_contract_uri_round_trips_and_emits_event() {
+    fn update_contract_uri_round_trips_and_emits_event() {
         let mut token = make_token();
 
-        token.set_contract_uri(CALLER, "ipfs://abc".into(), true).unwrap();
+        token.update_contract_uri(CALLER, "ipfs://abc".into(), true).unwrap();
 
         assert_eq!(token.accounting().contract_uri().unwrap(), "ipfs://abc");
         assert_eq!(token.accounting().events.len(), 1);
@@ -152,7 +158,7 @@ mod tests {
         let mut token = make_token();
 
         assert_eq!(
-            token.set_name(CALLER, "MyToken".into(), false).unwrap_err(),
+            token.update_name(CALLER, "MyToken".into(), false).unwrap_err(),
             BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
                 account: CALLER,
                 neededRole: B20TokenRole::Metadata.id(),
@@ -165,15 +171,58 @@ mod tests {
         let mut token = token_with_default_admin(CALLER);
         token.accounting_mut().roles.insert((B20TokenRole::Metadata.id(), CALLER), true);
 
-        token.set_supply_cap(CALLER, U256::from(500u64), false).unwrap();
-        token.set_name(CALLER, "MyToken".into(), false).unwrap();
-        token.set_symbol(CALLER, "MTK".into(), false).unwrap();
-        token.set_contract_uri(CALLER, "ipfs://abc".into(), false).unwrap();
+        token.update_supply_cap(CALLER, U256::from(500u64), false).unwrap();
+        token.update_name(CALLER, "MyToken".into(), false).unwrap();
+        token.update_symbol(CALLER, "MTK".into(), false).unwrap();
+        token.update_contract_uri(CALLER, "ipfs://abc".into(), false).unwrap();
 
         assert_eq!(token.accounting().supply_cap().unwrap(), U256::from(500u64));
         assert_eq!(token.accounting().name().unwrap(), "MyToken");
         assert_eq!(token.accounting().symbol().unwrap(), "MTK");
         assert_eq!(token.accounting().contract_uri().unwrap(), "ipfs://abc");
-        assert_eq!(token.accounting().events.len(), 4);
+        assert_eq!(token.accounting().events.len(), 5);
+    }
+
+    fn token_with_metadata_role(account: Address) -> TestToken {
+        let mut accounting = InMemoryTokenAccounting::new(TOKEN_ADDR);
+        accounting.roles.insert((B20TokenRole::Metadata.id(), account), true);
+        TestToken::with_storage_and_policy(accounting, InMemoryPolicy::new())
+    }
+
+    #[test]
+    fn update_contract_uri_without_metadata_role_reverts() {
+        let mut token = make_token();
+
+        assert_eq!(
+            token.update_contract_uri(CALLER, "ipfs://abc".into(), false).unwrap_err(),
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: CALLER,
+                neededRole: B20TokenRole::Metadata.id(),
+            })
+        );
+    }
+
+    #[test]
+    fn update_contract_uri_with_only_default_admin_reverts() {
+        // DEFAULT_ADMIN_ROLE alone is not sufficient; METADATA_ROLE is required.
+        let mut token = token_with_default_admin(CALLER);
+
+        assert_eq!(
+            token.update_contract_uri(CALLER, "ipfs://abc".into(), false).unwrap_err(),
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: CALLER,
+                neededRole: B20TokenRole::Metadata.id(),
+            })
+        );
+    }
+
+    #[test]
+    fn update_contract_uri_with_metadata_role_succeeds() {
+        let mut token = token_with_metadata_role(CALLER);
+
+        token.update_contract_uri(CALLER, "ipfs://xyz".into(), false).unwrap();
+
+        assert_eq!(token.accounting().contract_uri().unwrap(), "ipfs://xyz");
+        assert_eq!(token.accounting().events.len(), 1);
     }
 }

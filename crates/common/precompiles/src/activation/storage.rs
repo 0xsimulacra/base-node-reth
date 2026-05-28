@@ -11,30 +11,62 @@ use crate::IActivationRegistry;
 
 /// Runtime activation registry for Base-native features.
 #[contract(addr = Self::ADDRESS)]
+#[namespace("base.activation_registry")]
 pub struct ActivationRegistryStorage {
     /// Runtime activation flags keyed by feature id.
     pub features: Mapping<B256, bool>,
 }
 
+/// Identifies a Base-native precompile feature in the activation registry.
+///
+/// Each variant maps to a stable `keccak256` hash of the feature's canonical name and is used as
+/// the key when querying or mutating activation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationFeature {
+    /// `keccak256("base.b20_token")`
+    B20Token,
+    /// `keccak256("base.b20_factory")`
+    B20Factory,
+    /// `keccak256("base.policy_registry")`
+    PolicyRegistry,
+    /// `keccak256("base.b20_stablecoin")`
+    B20Stablecoin,
+    /// `keccak256("base.b20_security")`
+    B20Security,
+}
+
+impl ActivationFeature {
+    /// Returns the `keccak256` hash that identifies this feature in storage.
+    pub const fn id(self) -> B256 {
+        match self {
+            Self::B20Token => {
+                b256!("0x47a1afe8d3d691b87e090ee972d223a11f4da971ff5416c04985bb2393aca752")
+            }
+            Self::B20Factory => {
+                b256!("0x78751e29c8bcc0d609ab18e9fbc4158e73f7db25ae2ee095dad42e2578b1e800")
+            }
+            Self::PolicyRegistry => {
+                b256!("0xb582ebae03f16fee49a6763f78df482fb11ae73f103ed0d330bbe556aa90a43f")
+            }
+            Self::B20Stablecoin => {
+                b256!("0xecfa0def2c10020caaf65e6155aa69c84b24892aaef76eeac52e0e2b3a0b8601")
+            }
+            Self::B20Security => {
+                b256!("0x83d32fab502ae0e8bc4352a117767262cb5e47cc8d67a744008ed4ff03fcf5e6")
+            }
+        }
+    }
+}
+
+impl From<ActivationFeature> for B256 {
+    fn from(feature: ActivationFeature) -> Self {
+        feature.id()
+    }
+}
+
 impl ActivationRegistryStorage<'_> {
     /// Activation registry precompile address.
-    pub const ADDRESS: Address = address!("0x84530000000000000000000000000000000000ff");
-
-    /// B20 token precompile feature id (`keccak256("base.b20_token")`).
-    pub const B20_TOKEN: B256 =
-        b256!("0x47a1afe8d3d691b87e090ee972d223a11f4da971ff5416c04985bb2393aca752");
-
-    /// Token factory precompile feature id (`keccak256("base.token_factory")`).
-    pub const TOKEN_FACTORY: B256 =
-        b256!("0xceff857b4173841a3aef07ca52b183282fe74fe117e8f9dda0dcb3ddafd18a5b");
-
-    /// Policy registry precompile feature id (`keccak256("base.policy_registry")`).
-    pub const POLICY_REGISTRY: B256 =
-        b256!("0xb582ebae03f16fee49a6763f78df482fb11ae73f103ed0d330bbe556aa90a43f");
-
-    /// B20 security precompile feature id (`keccak256("base.b20_security")`).
-    pub const B20_SECURITY: B256 =
-        b256!("0x83d32fab502ae0e8bc4352a117767262cb5e47cc8d67a744008ed4ff03fcf5e6");
+    pub const ADDRESS: Address = address!("8453000000000000000000000000000000000001");
 
     /// Returns the activation admin.
     pub const fn admin(&self, activation_admin_address: Option<Address>) -> Address {
@@ -55,8 +87,11 @@ impl ActivationRegistryStorage<'_> {
     /// [`revm::precompile::PrecompileOutput::reverted`] to distinguish an activated feature from an
     /// ABI revert.
     pub fn assert_activated(&self, feature: B256) -> PrecompileResult {
-        self.ensure_activated(feature)
-            .into_precompile_result(self.storage.gas_used(), |()| Bytes::new())
+        self.ensure_activated(feature).into_precompile_result(
+            self.storage.gas_used(),
+            self.storage.state_gas_used(),
+            |()| Bytes::new(),
+        )
     }
 
     /// Returns `Ok(())` when the feature is activated.
@@ -115,7 +150,7 @@ impl ActivationRegistryStorage<'_> {
                 }));
             }
 
-            return Err(BasePrecompileError::revert(IActivationRegistry::AlreadyDeactivated {
+            return Err(BasePrecompileError::revert(IActivationRegistry::FeatureNotActivated {
                 feature,
             }));
         }
@@ -135,15 +170,22 @@ impl ActivationRegistryStorage<'_> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{B256, address, keccak256};
-    use base_precompile_storage::{HashMapStorageProvider, Result, StorageCtx};
+    use alloy_primitives::{Address, B256, U256, address, keccak256, uint};
+    use base_precompile_storage::{
+        BasePrecompileError, HashMapStorageProvider, Result, StorageCtx, StorageKey,
+    };
     use revm::precompile::PrecompileOutput;
     use rstest::rstest;
 
-    use super::*;
+    use crate::{
+        ActivationFeature, ActivationRegistryStorage, IActivationRegistry,
+        activation::storage::slots,
+    };
 
-    const FEATURE: B256 = ActivationRegistryStorage::B20_SECURITY;
+    const FEATURE: B256 = ActivationFeature::B20Security.id();
     const ADMIN: Address = address!("0xcb00000000000000000000000000000000000000");
+    const ACTIVATION_REGISTRY_ROOT: U256 =
+        uint!(0x43ee1bbe25e988521cccd8b2c8fbd38c8287ebff8e074e825a70dfd3885cce00_U256);
 
     #[derive(Debug, Clone, Copy)]
     enum Transition {
@@ -239,10 +281,41 @@ mod tests {
 
     #[test]
     fn feature_id_constants_match_canonical_names() {
-        assert_eq!(ActivationRegistryStorage::B20_TOKEN, keccak256("base.b20_token"));
-        assert_eq!(ActivationRegistryStorage::TOKEN_FACTORY, keccak256("base.token_factory"));
-        assert_eq!(ActivationRegistryStorage::POLICY_REGISTRY, keccak256("base.policy_registry"));
-        assert_eq!(ActivationRegistryStorage::B20_SECURITY, keccak256("base.b20_security"));
+        assert_eq!(ActivationFeature::B20Token.id(), keccak256("base.b20_token"));
+        assert_eq!(ActivationFeature::B20Factory.id(), keccak256("base.b20_factory"));
+        assert_eq!(ActivationFeature::PolicyRegistry.id(), keccak256("base.policy_registry"));
+        assert_eq!(ActivationFeature::B20Stablecoin.id(), keccak256("base.b20_stablecoin"));
+        assert_eq!(ActivationFeature::B20Security.id(), keccak256("base.b20_security"));
+    }
+
+    #[test]
+    fn activation_registry_namespace_matches_base_std_root() {
+        assert_eq!(slots::NAMESPACE_ID, "base.activation_registry");
+        assert_eq!(slots::NAMESPACE_ROOT, ACTIVATION_REGISTRY_ROOT);
+        assert_eq!(slots::FEATURES, ACTIVATION_REGISTRY_ROOT);
+    }
+
+    #[test]
+    fn activation_registry_writes_use_base_std_namespace_slots() {
+        let mut storage = HashMapStorageProvider::new(1);
+
+        activate_feature(&mut storage).unwrap();
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            assert_eq!(
+                ctx.sload(
+                    ActivationRegistryStorage::ADDRESS,
+                    FEATURE.mapping_slot(slots::FEATURES)
+                )
+                .unwrap(),
+                U256::ONE
+            );
+            assert_eq!(
+                ctx.sload(ActivationRegistryStorage::ADDRESS, FEATURE.mapping_slot(U256::ZERO))
+                    .unwrap(),
+                U256::ZERO
+            );
+        });
     }
 
     #[test]
@@ -306,10 +379,28 @@ mod tests {
         let mut storage = HashMapStorageProvider::new(1);
 
         set_active(&mut storage, initially_active);
+        let events_before = storage.get_events(ActivationRegistryStorage::ADDRESS).len();
+
         let result = apply_transition(&mut storage, transition);
 
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            match transition {
+                Transition::Activate => {
+                    BasePrecompileError::revert(IActivationRegistry::AlreadyActivated {
+                        feature: FEATURE,
+                    })
+                }
+                Transition::Deactivate => {
+                    BasePrecompileError::revert(IActivationRegistry::FeatureNotActivated {
+                        feature: FEATURE,
+                    })
+                }
+            }
+        );
         assert_activated(&mut storage, initially_active);
+        // A failed transition must not emit any events — guard against emit-then-revert bugs.
+        assert_eq!(storage.get_events(ActivationRegistryStorage::ADDRESS).len(), events_before);
     }
 
     #[rstest]
@@ -333,6 +424,16 @@ mod tests {
     }
 
     #[test]
+    fn assert_activated_reverts_when_feature_never_activated() {
+        let mut storage = HashMapStorageProvider::new(1);
+
+        let output = assert_activated_output(&mut storage);
+
+        assert!(output.is_revert());
+        assert_eq!(storage.get_events(ActivationRegistryStorage::ADDRESS).len(), 0);
+    }
+
+    #[test]
     fn assert_activated_reverts_after_deactivate() {
         let mut storage = HashMapStorageProvider::new(1);
 
@@ -341,7 +442,7 @@ mod tests {
         deactivate_feature(&mut storage).unwrap();
         let deactivated_output = assert_activated_output(&mut storage);
 
-        assert!(!activated_output.reverted);
-        assert!(deactivated_output.reverted);
+        assert!(!activated_output.is_revert());
+        assert!(deactivated_output.is_revert());
     }
 }

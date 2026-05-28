@@ -6,6 +6,13 @@ use base_precompile_storage::Result;
 use crate::IPolicyRegistry::PolicyType;
 
 /// Minimal read-only policy interface consulted by B-20 tokens on every transfer, mint, and redeem.
+///
+/// # `is_authorized` vs `policy_exists`
+///
+/// These two methods can diverge for never-created BLOCKLIST IDs: `policy_exists` returns `false`
+/// (the slot was never written) while `is_authorized` returns `true` (empty blocklist allows
+/// everyone). Do not gate `is_authorized` calls on a prior `policy_exists` check — call
+/// `is_authorized` directly; it handles all cases correctly on its own.
 pub trait Policy {
     /// Returns `true` if `account` is authorized under the given `policy_id`.
     fn is_authorized(&self, policy_id: u64, account: Address) -> Result<bool>;
@@ -48,10 +55,10 @@ pub trait PolicyRegistry: Policy {
         blocked: bool,
         accounts: alloc::vec::Vec<Address>,
     ) -> Result<()>;
-    /// Returns the `PolicyType` of `policy_id`.
-    fn get_policy_type(&self, policy_id: u64) -> Result<PolicyType>;
-    /// Returns the current admin of `policy_id`.
+    /// Returns the current admin of `policy_id`, or `address(0)` if the policy does not exist
+    /// or the policy ID is malformed. Never reverts.
     fn get_policy_admin(&self, policy_id: u64) -> Result<Address>;
-    /// Returns the staged pending admin for `policy_id`, or `address(0)` if none.
+    /// Returns the staged pending admin for `policy_id`, or `address(0)` if none, the policy
+    /// does not exist, or the policy ID is malformed. Never reverts.
     fn pending_policy_admin(&self, policy_id: u64) -> Result<Address>;
 }

@@ -2,16 +2,17 @@
 
 mod ops;
 pub use ops::{
-    B20Guards, B20TokenRole, Burnable, Configurable, Mintable, Pausable, Permittable, RoleManaged,
-    Transferable,
+    B20Guards, B20TokenRole, Burnable, Configurable, Eip712Domain, Mintable, Pausable, PermitArgs,
+    Permittable, RoleManaged, Transferable,
 };
 
 mod policy;
+pub use policy::{Policy, PolicyRegistry};
+
 #[cfg(any(test, feature = "test-utils"))]
 pub(super) mod test_utils;
-pub use policy::{Policy, PolicyRegistry};
 #[cfg(any(test, feature = "test-utils"))]
-pub use test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestToken};
+pub use test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestStablecoinToken, TestToken};
 
 mod token;
 pub use token::Token;

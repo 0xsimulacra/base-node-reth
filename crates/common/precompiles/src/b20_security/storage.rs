@@ -2,45 +2,74 @@
 
 use alloc::string::String;
 
-use alloy_primitives::{Address, B256, LogData, U256};
-use base_precompile_macros::contract;
-use base_precompile_storage::{
-    BasePrecompileError, ContractStorage, Handler, Mapping, Result, StorageCtx,
-};
+use alloy_primitives::{Address, B256, U256, b256};
+use base_precompile_macros::{SecurityAccounting, Storable, TokenAccounting, contract};
+use base_precompile_storage::{Handler, Mapping, Result, StorageCtx};
 
-use super::accounting::SecurityAccounting;
-use crate::{B20PolicyType, IB20, TokenAccounting, TokenVariant};
+use crate::{B20CoreStorage, PolicyRegistryStorage};
+
+/// Security-specific B-20 storage rooted at the `base.b20.security` ERC-7201 namespace.
+#[derive(Debug, Clone, Storable)]
+#[namespace("base.b20.security")]
+pub struct B20SecurityExtensionStorage {
+    /// Share-to-token conversion ratio scaled to WAD.
+    #[accessor]
+    #[mutator]
+    pub shares_to_tokens_ratio: U256, // offset 0
+    /// Announcement IDs that have already been consumed.
+    pub used_announcement_ids: Mapping<String, bool>, // offset 1
+    /// Security identifier values by identifier type.
+    pub identifiers: Mapping<String, String>, // offset 2
+}
+
+/// Redemption-specific B-20 storage rooted at the `base.b20.redeem` ERC-7201 namespace.
+#[derive(Debug, Clone, Storable)]
+#[namespace("base.b20.redeem")]
+pub struct B20RedeemStorage {
+    /// Minimum share amount required for a redeem operation.
+    #[accessor]
+    #[mutator]
+    pub minimum_redeemable: U256, // offset 0
+    /// Packed redeem-side policy IDs.
+    #[accessor]
+    #[mutator]
+    pub redeem_policy_ids: U256, // offset 1
+}
 
 /// EVM-backed storage for a security B-20 token.
-///
-/// Slots 0–16 mirror [`crate::B20TokenStorage`] exactly so that address layout
-/// and role/policy/pause storage is compatible. Slots 17–19 hold the
-/// security-specific fields: share ratio, identifier map, and announcement-id set.
 #[contract]
+#[derive(TokenAccounting, SecurityAccounting)]
 pub struct B20SecurityStorage {
-    pub total_supply: U256,                                   // slot 0
-    pub supply_cap: U256,                                     // slot 1
-    pub balances: Mapping<Address, U256>,                     // slot 2
-    pub allowances: Mapping<Address, Mapping<Address, U256>>, // slot 3
-    pub paused: U256,                                         // slot 4
-    pub nonces: Mapping<Address, U256>,                       // slot 5
-    pub name: String,                                         // slot 6
-    pub symbol: String,                                       // slot 7
-    pub minimum_redeemable: U256,                             // slot 8
-    pub contract_uri: String,                                 // slot 9
-    pub roles: Mapping<B256, Mapping<Address, bool>>,         // slot 10
-    pub role_member_counts: Mapping<B256, U256>,              // slot 11
-    pub role_admins: Mapping<B256, B256>,                     // slot 12
-    pub transfer_policy_ids: U256, // slot 13: sender, receiver, executor, reserved
-    pub mint_policy_ids: U256,     // slot 14: receiver, reserved, reserved, reserved
-    pub stablecoin_currency: String, // slot 15 (unused for security tokens)
-    pub security_isin: String,     // slot 16 (unused; identifiers stored in slot 18 mapping)
-    pub shares_to_tokens_ratio: U256, // slot 17
-    pub security_identifiers: Mapping<B256, String>, // slot 18  (key = keccak256(type))
-    pub announcement_ids_used: Mapping<B256, bool>, // slot 19  (key = keccak256(id))
+    pub b20: B20CoreStorage,
+    pub security: B20SecurityExtensionStorage,
+    pub redeem: B20RedeemStorage,
+}
+
+/// Creation-time parameters for a security B-20 token.
+///
+/// Passed to [`B20SecurityStorage::initialize`] to write all fields atomically.
+#[derive(Debug)]
+pub struct B20SecurityInit {
+    /// ERC-20 token name.
+    pub name: String,
+    /// ERC-20 token symbol.
+    pub symbol: String,
+    /// Maximum total supply.
+    pub supply_cap: U256,
+    /// Share-to-token conversion ratio at WAD precision.
+    pub shares_to_tokens_ratio: U256,
+    /// ISIN identifier stored under the `"ISIN"` key.
+    pub isin: String,
+    /// Minimum redeemable amount; `0` allows any non-zero redemption.
+    pub minimum_redeemable: U256,
 }
 
 impl<'a> B20SecurityStorage<'a> {
+    /// Policy scope identifier for the sender of a redeem operation:
+    /// `keccak256("REDEEM_SENDER_POLICY")`.
+    pub const REDEEM_SENDER_POLICY: B256 =
+        b256!("0ff53b08b65363a609bb561211128f4044adc0e351f0b92b6aa23f8d85462f59");
+
     /// Creates a `B20SecurityStorage` instance targeting `addr`.
     pub fn from_address(addr: Address, storage: StorageCtx<'a>) -> Self {
         Self::__new(addr, storage)
@@ -48,275 +77,228 @@ impl<'a> B20SecurityStorage<'a> {
 
     /// Writes all creation-time fields atomically.
     ///
-    /// `initial_isin` may be empty; when non-empty it is stored under the
-    /// `keccak256("ISIN")` key in the `security_identifiers` mapping.
-    pub fn initialize(
-        &mut self,
-        name: String,
-        symbol: String,
-        supply_cap: U256,
-        initial_shares_to_tokens_ratio: U256,
-        initial_isin: String,
-        minimum_redeemable: U256,
-    ) -> Result<()> {
-        self.name.write(name)?;
-        self.symbol.write(symbol)?;
-        self.supply_cap.write(supply_cap)?;
-        self.shares_to_tokens_ratio.write(initial_shares_to_tokens_ratio)?;
-        self.minimum_redeemable.write(minimum_redeemable)?;
-        if !initial_isin.is_empty() {
-            let key = alloy_primitives::keccak256(b"ISIN");
-            self.security_identifiers.at_mut(&key).write(initial_isin)?;
+    /// `isin` may be empty; when non-empty it is stored under the `"ISIN"` key
+    /// in the security identifiers mapping.
+    ///
+    /// `REDEEM_SENDER_POLICY` is initialised to `ALWAYS_BLOCK_ID` so redemption
+    /// is closed by default; issuers must explicitly open it after creation.
+    pub fn initialize(&mut self, init: B20SecurityInit) -> Result<()> {
+        self.b20.name.write(init.name)?;
+        self.b20.symbol.write(init.symbol)?;
+        self.b20.supply_cap.write(init.supply_cap)?;
+        self.security.shares_to_tokens_ratio.write(init.shares_to_tokens_ratio)?;
+        self.redeem.minimum_redeemable.write(init.minimum_redeemable)?;
+        if !init.isin.is_empty() {
+            self.security.identifiers.at_mut(&String::from("ISIN")).write(init.isin)?;
         }
+        self.write_redeem_policy_ids_default()?;
         Ok(())
     }
 }
 
-impl TokenAccounting for B20SecurityStorage<'_> {
-    fn token_address(&self) -> Address {
-        ContractStorage::address(self)
-    }
-
-    fn is_initialized(&self) -> Result<bool> {
-        ContractStorage::is_initialized(self)
-    }
-
-    fn balance_of(&self, account: Address) -> Result<U256> {
-        self.balances.at(&account).read()
-    }
-
-    fn set_balance(&mut self, account: Address, balance: U256) -> Result<()> {
-        self.balances.at_mut(&account).write(balance)
-    }
-
-    fn allowance(&self, owner: Address, spender: Address) -> Result<U256> {
-        self.allowances.at(&owner).at(&spender).read()
-    }
-
-    fn set_allowance(&mut self, owner: Address, spender: Address, amount: U256) -> Result<()> {
-        self.allowances.at_mut(&owner).at_mut(&spender).write(amount)
-    }
-
-    fn total_supply(&self) -> Result<U256> {
-        self.total_supply.read()
-    }
-
-    fn set_total_supply(&mut self, supply: U256) -> Result<()> {
-        self.total_supply.write(supply)
-    }
-
-    fn supply_cap(&self) -> Result<U256> {
-        self.supply_cap.read()
-    }
-
-    fn set_supply_cap(&mut self, cap: U256) -> Result<()> {
-        self.supply_cap.write(cap)
-    }
-
-    fn name(&self) -> Result<String> {
-        self.name.read()
-    }
-
-    fn set_name(&mut self, name: String) -> Result<()> {
-        self.name.write(name)
-    }
-
-    fn symbol(&self) -> Result<String> {
-        self.symbol.read()
-    }
-
-    fn set_symbol(&mut self, symbol: String) -> Result<()> {
-        self.symbol.write(symbol)
-    }
-
-    fn decimals(&self) -> Result<u8> {
-        Ok(TokenVariant::from_address(self.address).map_or(0, TokenVariant::decimals))
-    }
-
-    fn currency(&self) -> Result<String> {
-        self.stablecoin_currency.read()
-    }
-
-    fn security_identifier(&self, identifier_type: &str) -> Result<String> {
-        let key = alloy_primitives::keccak256(identifier_type.as_bytes());
-        self.security_identifiers.at(&key).read()
-    }
-
-    fn paused(&self) -> Result<U256> {
-        self.paused.read()
-    }
-
-    fn set_paused(&mut self, vectors: U256) -> Result<()> {
-        self.paused.write(vectors)
-    }
-
-    fn nonce(&self, owner: Address) -> Result<U256> {
-        self.nonces.at(&owner).read()
-    }
-
-    fn increment_nonce(&mut self, owner: Address) -> Result<()> {
-        let current = self.nonces.at(&owner).read()?;
-        let next =
-            current.checked_add(U256::ONE).ok_or_else(BasePrecompileError::under_overflow)?;
-        self.nonces.at_mut(&owner).write(next)
-    }
-
-    fn minimum_redeemable(&self) -> Result<U256> {
-        self.minimum_redeemable.read()
-    }
-
-    fn set_minimum_redeemable(&mut self, minimum: U256) -> Result<()> {
-        self.minimum_redeemable.write(minimum)
-    }
-
-    fn contract_uri(&self) -> Result<String> {
-        self.contract_uri.read()
-    }
-
-    fn set_contract_uri(&mut self, uri: String) -> Result<()> {
-        self.contract_uri.write(uri)
-    }
-
-    fn has_role(&self, role: B256, account: Address) -> Result<bool> {
-        self.roles.at(&role).at(&account).read()
-    }
-
-    fn set_role(&mut self, role: B256, account: Address, enabled: bool) -> Result<()> {
-        self.roles.at_mut(&role).at_mut(&account).write(enabled)
-    }
-
-    fn role_member_count(&self, role: B256) -> Result<U256> {
-        self.role_member_counts.at(&role).read()
-    }
-
-    fn set_role_member_count(&mut self, role: B256, count: U256) -> Result<()> {
-        self.role_member_counts.at_mut(&role).write(count)
-    }
-
-    fn role_admin(&self, role: B256) -> Result<B256> {
-        self.role_admins.at(&role).read()
-    }
-
-    fn set_role_admin(&mut self, role: B256, admin_role: B256) -> Result<()> {
-        self.role_admins.at_mut(&role).write(admin_role)
-    }
-
-    fn policy_id(&self, policy_type: B256) -> Result<u64> {
-        let policy_type = Self::require_policy_type(policy_type)?;
-        match policy_type {
-            B20PolicyType::TransferSender => Ok(Self::read_policy_lane(
-                self.transfer_policy_ids.read()?,
-                Self::TRANSFER_SENDER_POLICY_LANE,
-            )),
-            B20PolicyType::TransferReceiver => Ok(Self::read_policy_lane(
-                self.transfer_policy_ids.read()?,
-                Self::TRANSFER_RECEIVER_POLICY_LANE,
-            )),
-            B20PolicyType::TransferExecutor => Ok(Self::read_policy_lane(
-                self.transfer_policy_ids.read()?,
-                Self::TRANSFER_EXECUTOR_POLICY_LANE,
-            )),
-            B20PolicyType::MintReceiver => Ok(Self::read_policy_lane(
-                self.mint_policy_ids.read()?,
-                Self::MINT_RECEIVER_POLICY_LANE,
-            )),
-        }
-    }
-
-    fn set_policy_id(&mut self, policy_type: B256, policy_id: u64) -> Result<()> {
-        let policy_type = Self::require_policy_type(policy_type)?;
-        match policy_type {
-            B20PolicyType::TransferSender => {
-                let packed = Self::write_policy_lane(
-                    self.transfer_policy_ids.read()?,
-                    Self::TRANSFER_SENDER_POLICY_LANE,
-                    policy_id,
-                );
-                self.transfer_policy_ids.write(packed)
-            }
-            B20PolicyType::TransferReceiver => {
-                let packed = Self::write_policy_lane(
-                    self.transfer_policy_ids.read()?,
-                    Self::TRANSFER_RECEIVER_POLICY_LANE,
-                    policy_id,
-                );
-                self.transfer_policy_ids.write(packed)
-            }
-            B20PolicyType::TransferExecutor => {
-                let packed = Self::write_policy_lane(
-                    self.transfer_policy_ids.read()?,
-                    Self::TRANSFER_EXECUTOR_POLICY_LANE,
-                    policy_id,
-                );
-                self.transfer_policy_ids.write(packed)
-            }
-            B20PolicyType::MintReceiver => {
-                let packed = Self::write_policy_lane(
-                    self.mint_policy_ids.read()?,
-                    Self::MINT_RECEIVER_POLICY_LANE,
-                    policy_id,
-                );
-                self.mint_policy_ids.write(packed)
-            }
-        }
-    }
-
-    fn emit_event(&mut self, log: LogData) -> Result<()> {
-        self.emit_event(log)
-    }
-}
-
 impl B20SecurityStorage<'_> {
-    const TRANSFER_SENDER_POLICY_LANE: usize = 0;
-    const TRANSFER_RECEIVER_POLICY_LANE: usize = 1;
-    const TRANSFER_EXECUTOR_POLICY_LANE: usize = 2;
-    const MINT_RECEIVER_POLICY_LANE: usize = 0;
-    const POLICY_LANE_BITS: usize = 64;
+    /// WAD precision for share ratio arithmetic: 1e18.
+    pub const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 
-    fn require_policy_type(policy_type: B256) -> Result<B20PolicyType> {
-        B20PolicyType::from_id(policy_type).ok_or_else(|| {
-            BasePrecompileError::revert(IB20::UnsupportedPolicyType { policyType: policy_type })
-        })
-    }
-
-    fn read_policy_lane(packed: U256, lane: usize) -> u64 {
-        ((packed >> (lane * Self::POLICY_LANE_BITS)) & U256::from(u64::MAX)).to::<u64>()
-    }
-
-    fn write_policy_lane(packed: U256, lane: usize, policy_id: u64) -> U256 {
-        let shift = lane * Self::POLICY_LANE_BITS;
-        let mask = U256::from(u64::MAX) << shift;
-        (packed & !mask) | (U256::from(policy_id) << shift)
+    /// Writes the initial packed `redeem_policy_ids` word with `REDEEM_SENDER_POLICY`
+    /// set to `ALWAYS_BLOCK_ID`. Called once from [`initialize`].
+    fn write_redeem_policy_ids_default(&mut self) -> Result<()> {
+        let packed = Self::__write_policy_lane(
+            U256::ZERO,
+            Self::__REDEEM_SENDER_POLICY_LANE,
+            PolicyRegistryStorage::ALWAYS_BLOCK_ID,
+        );
+        self.redeem.set_redeem_policy_ids(packed)
     }
 }
 
-impl SecurityAccounting for B20SecurityStorage<'_> {
-    fn shares_to_tokens_ratio(&self) -> Result<U256> {
-        self.shares_to_tokens_ratio.read()
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Address, U256, address, uint};
+    use base_precompile_storage::{Handler, StorableType, StorageCtx, StorageKey, setup_storage};
+
+    use super::{
+        __packing_b20_redeem_storage, __packing_b20_security_extension_storage, B20RedeemStorage,
+        B20SecurityExtensionStorage, B20SecurityInit, B20SecurityStorage, slots,
+    };
+    use crate::{B20CoreStorage, PolicyRegistryStorage, SecurityAccounting, TokenAccounting};
+
+    const TOKEN: Address = address!("000000000000000000000000000000000000b021");
+    const B20_ROOT: U256 =
+        uint!(0xc78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed48434000_U256);
+    const SECURITY_ROOT: U256 =
+        uint!(0x4a21e1b7f963e21baf0daffe6bab858a1e5fecef1144f3aca3c0c4534c7ac600_U256);
+    const REDEEM_ROOT: U256 =
+        uint!(0xc95c24ab0255f9fb9fcdcd524f71c4fe0437265856b7e5e6d0801df0e6cf5100_U256);
+
+    #[test]
+    fn wad_constant_is_ten_to_the_eighteenth() {
+        assert_eq!(B20SecurityStorage::WAD, U256::from(10u64).pow(U256::from(18u64)));
     }
 
-    fn set_shares_to_tokens_ratio(&mut self, ratio: U256) -> Result<()> {
-        self.shares_to_tokens_ratio.write(ratio)
+    #[test]
+    fn security_namespaces_match_base_std_roots() {
+        assert_eq!(<B20CoreStorage as StorableType>::STORAGE_NAMESPACE_ROOT, B20_ROOT);
+        assert_eq!(
+            <B20SecurityExtensionStorage as StorableType>::STORAGE_NAMESPACE_ID,
+            "base.b20.security"
+        );
+        assert_eq!(
+            <B20SecurityExtensionStorage as StorableType>::STORAGE_NAMESPACE_ROOT,
+            SECURITY_ROOT
+        );
+        assert_eq!(<B20RedeemStorage as StorableType>::STORAGE_NAMESPACE_ID, "base.b20.redeem");
+        assert_eq!(<B20RedeemStorage as StorableType>::STORAGE_NAMESPACE_ROOT, REDEEM_ROOT);
+
+        assert_eq!(slots::B20, B20_ROOT);
+        assert_eq!(slots::SECURITY, SECURITY_ROOT);
+        assert_eq!(slots::REDEEM, REDEEM_ROOT);
     }
 
-    fn set_security_identifier_value(
-        &mut self,
-        identifier_type: &str,
-        value: String,
-    ) -> Result<()> {
-        let key = alloy_primitives::keccak256(identifier_type.as_bytes());
-        if value.is_empty() {
-            self.security_identifiers.at_mut(&key).delete()
-        } else {
-            self.security_identifiers.at_mut(&key).write(value)
-        }
+    #[test]
+    fn security_extension_offsets_match_mock_storage() {
+        assert_eq!(
+            __packing_b20_security_extension_storage::SHARES_TO_TOKENS_RATIO_LOC.offset_slots,
+            0
+        );
+        assert_eq!(
+            __packing_b20_security_extension_storage::USED_ANNOUNCEMENT_IDS_LOC.offset_slots,
+            1
+        );
+        assert_eq!(__packing_b20_security_extension_storage::IDENTIFIERS_LOC.offset_slots, 2);
+        assert_eq!(__packing_b20_redeem_storage::MINIMUM_REDEEMABLE_LOC.offset_slots, 0);
+        assert_eq!(__packing_b20_redeem_storage::REDEEM_POLICY_IDS_LOC.offset_slots, 1);
     }
 
-    fn is_announcement_id_used(&self, id_hash: B256) -> Result<bool> {
-        self.announcement_ids_used.at(&id_hash).read()
+    #[test]
+    fn shares_to_tokens_ratio_defaults_unset_slot_to_wad() {
+        let (mut storage, _) = setup_storage();
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            let token = B20SecurityStorage::from_address(TOKEN, ctx);
+            let ratio_slot = SECURITY_ROOT
+                + U256::from(
+                    __packing_b20_security_extension_storage::SHARES_TO_TOKENS_RATIO_LOC
+                        .offset_slots,
+                );
+
+            assert_eq!(ctx.sload(TOKEN, ratio_slot).unwrap(), U256::ZERO);
+            assert_eq!(token.shares_to_tokens_ratio().unwrap(), B20SecurityStorage::WAD);
+        });
     }
 
-    fn mark_announcement_id_used(&mut self, id_hash: B256) -> Result<()> {
-        self.announcement_ids_used.at_mut(&id_hash).write(true)
+    #[test]
+    fn shares_to_tokens_ratio_preserves_configured_value() {
+        let (mut storage, _) = setup_storage();
+        let configured_ratio = B20SecurityStorage::WAD * U256::from(3u64);
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            let mut token = B20SecurityStorage::from_address(TOKEN, ctx);
+            token.set_shares_to_tokens_ratio(configured_ratio).unwrap();
+
+            let ratio_slot = SECURITY_ROOT
+                + U256::from(
+                    __packing_b20_security_extension_storage::SHARES_TO_TOKENS_RATIO_LOC
+                        .offset_slots,
+                );
+
+            assert_eq!(ctx.sload(TOKEN, ratio_slot).unwrap(), configured_ratio);
+            assert_eq!(token.shares_to_tokens_ratio().unwrap(), configured_ratio);
+        });
+    }
+
+    #[test]
+    fn security_string_mapping_slots_use_solidity_string_key_derivation() {
+        let (mut storage, _) = setup_storage();
+        let announcement_id = String::from("2026-Q1-split");
+        let identifier_type = String::from("ISIN");
+        let identifier_value = String::from("US0000000000");
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            let mut token = B20SecurityStorage::from_address(TOKEN, ctx);
+            token.security.used_announcement_ids.at_mut(&announcement_id).write(true).unwrap();
+            token
+                .security
+                .identifiers
+                .at_mut(&identifier_type)
+                .write(identifier_value.clone())
+                .unwrap();
+            token.redeem.minimum_redeemable.write(U256::from(10u64)).unwrap();
+
+            let announcement_slot = SECURITY_ROOT
+                + U256::from(
+                    __packing_b20_security_extension_storage::USED_ANNOUNCEMENT_IDS_LOC
+                        .offset_slots,
+                );
+            let identifiers_slot = SECURITY_ROOT
+                + U256::from(
+                    __packing_b20_security_extension_storage::IDENTIFIERS_LOC.offset_slots,
+                );
+            let minimum_slot = REDEEM_ROOT
+                + U256::from(__packing_b20_redeem_storage::MINIMUM_REDEEMABLE_LOC.offset_slots);
+
+            assert_eq!(
+                ctx.sload(TOKEN, announcement_id.mapping_slot(announcement_slot)).unwrap(),
+                U256::ONE
+            );
+            assert_eq!(
+                ctx.sload(TOKEN, identifier_type.mapping_slot(identifiers_slot)).unwrap(),
+                short_string_word(&identifier_value)
+            );
+            assert_eq!(ctx.sload(TOKEN, minimum_slot).unwrap(), U256::from(10u64));
+        });
+    }
+
+    #[test]
+    fn redeem_sender_policy_uses_redeem_storage_lane() {
+        let (mut storage, _) = setup_storage();
+        let policy_id = 42u64;
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            {
+                let mut token = B20SecurityStorage::from_address(TOKEN, ctx);
+                token.set_policy_id(B20SecurityStorage::REDEEM_SENDER_POLICY, policy_id).unwrap();
+                assert_eq!(
+                    token.policy_id(B20SecurityStorage::REDEEM_SENDER_POLICY).unwrap(),
+                    policy_id
+                );
+            }
+
+            let redeem_policy_slot = REDEEM_ROOT
+                + U256::from(__packing_b20_redeem_storage::REDEEM_POLICY_IDS_LOC.offset_slots);
+            assert_eq!(ctx.sload(TOKEN, redeem_policy_slot).unwrap(), U256::from(policy_id));
+        });
+    }
+
+    #[test]
+    fn initialize_sets_redeem_sender_policy_to_always_block() {
+        let (mut storage, _) = setup_storage();
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            let mut token = B20SecurityStorage::from_address(TOKEN, ctx);
+            token
+                .initialize(B20SecurityInit {
+                    name: String::from("Test"),
+                    symbol: String::from("TST"),
+                    supply_cap: U256::from(1_000_000u64),
+                    shares_to_tokens_ratio: B20SecurityStorage::WAD,
+                    isin: String::new(),
+                    minimum_redeemable: U256::ZERO,
+                })
+                .unwrap();
+
+            assert_eq!(
+                token.policy_id(B20SecurityStorage::REDEEM_SENDER_POLICY).unwrap(),
+                PolicyRegistryStorage::ALWAYS_BLOCK_ID,
+                "REDEEM_SENDER_POLICY must default to ALWAYS_BLOCK_ID at creation"
+            );
+        });
+    }
+
+    fn short_string_word(value: &str) -> U256 {
+        let mut word = [0u8; 32];
+        word[..value.len()].copy_from_slice(value.as_bytes());
+        word[31] = (value.len() * 2) as u8;
+        U256::from_be_bytes(word)
     }
 }

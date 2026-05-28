@@ -1,15 +1,16 @@
 //! Runtime helpers for wrapping native precompile dispatch.
 
+/// Wraps a stateful native precompile body in the Base storage-provider setup.
 macro_rules! base_precompile {
     ($id:expr, |$ctx:ident, $calldata:ident| $impl:expr $(,)?) => {{
         ::alloy_evm::precompiles::DynPrecompile::new_stateful(
             ::revm::precompile::PrecompileId::Custom($id.into()),
             move |input| {
                 if !input.is_direct_call() {
-                    return Ok(::revm::precompile::PrecompileOutput::new_reverted(
-                        0,
-                        ::alloy_primitives::Bytes::new(),
-                    ));
+                    return ::base_precompile_storage::BasePrecompileError::revert(
+                        ::base_precompile_storage::DelegateCallNotAllowed {},
+                    )
+                    .into_precompile_result(0, 0);
                 }
 
                 let $calldata: ::alloy_primitives::Bytes = input.data.to_vec().into();
@@ -27,10 +28,10 @@ macro_rules! base_precompile {
             ::revm::precompile::PrecompileId::Custom($id.into()),
             move |$input| {
                 if !$input.is_direct_call() {
-                    return Ok(::revm::precompile::PrecompileOutput::new_reverted(
-                        0,
-                        ::alloy_primitives::Bytes::new(),
-                    ));
+                    return ::base_precompile_storage::BasePrecompileError::revert(
+                        ::base_precompile_storage::DelegateCallNotAllowed {},
+                    )
+                    .into_precompile_result(0, 0);
                 }
 
                 let $calldata: ::alloy_primitives::Bytes = $input.data.to_vec().into();
@@ -45,6 +46,7 @@ macro_rules! base_precompile {
 
 pub(crate) use base_precompile;
 
+/// Deducts the per-word calldata gas charged by Base native precompile dispatch.
 macro_rules! deduct_calldata_cost {
     ($ctx:expr, $calldata:expr $(,)?) => {{
         const G_SHA3WORD: u64 = 6;
@@ -52,13 +54,14 @@ macro_rules! deduct_calldata_cost {
         let calldata_len = $calldata.len();
         let calldata_cost = calldata_len.div_ceil(32).saturating_mul(G_SHA3WORD as usize) as u64;
         if let Err(e) = $ctx.deduct_gas(calldata_cost) {
-            return e.into_precompile_result($ctx.gas_used());
+            return e.into_precompile_result($ctx.gas_used(), $ctx.state_gas_used());
         }
     }};
 }
 
 pub(crate) use deduct_calldata_cost;
 
+/// Decodes calldata into the requested ABI interface call or returns an unknown selector error.
 macro_rules! decode_precompile_call {
     ($calldata:expr, $call_ty:ty $(,)?) => {{
         let calldata = $calldata;

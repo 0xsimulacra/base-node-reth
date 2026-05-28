@@ -4,13 +4,7 @@ use alloy_primitives::{Address, B256, b256};
 use alloy_sol_types::SolEvent;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use super::token::B20Token;
-use crate::{B20Guards, B20TokenRole, IB20, Policy, Token, TokenAccounting};
-
-/// Built-in policy ID that authorizes every account.
-pub const POLICY_ALWAYS_ALLOW: u64 = 0;
-/// Built-in policy ID that authorizes no account.
-pub const POLICY_ALWAYS_BLOCK: u64 = 1;
+use crate::{B20Guards, B20Token, B20TokenRole, IB20, Policy, Token, TokenAccounting};
 
 const TRANSFER_SENDER_POLICY: B256 =
     b256!("b81736c875ab819dd97f59f2a6542cfb731ad52b4ae15a6f24df2fb02b0327f5");
@@ -82,33 +76,33 @@ impl<S: TokenAccounting, P: Policy> B20Token<S, P> {
         B20PolicyType::MintReceiver.id()
     }
 
-    /// Returns the configured policy ID for `policy_type`.
-    pub fn policy_id(&self, policy_type: B256) -> Result<u64> {
-        Self::ensure_supported_policy_type(policy_type)?;
-        self.accounting.policy_id(policy_type)
+    /// Returns the configured policy ID for `policy_scope`.
+    pub fn policy_id(&self, policy_scope: B256) -> Result<u64> {
+        Self::ensure_supported_policy_type(policy_scope)?;
+        self.accounting().policy_id(policy_scope)
     }
 
-    /// Updates the configured policy ID for `policy_type`.
+    /// Updates the configured policy ID for `policy_scope`.
     pub fn update_policy(
         &mut self,
         caller: Address,
-        policy_type: B256,
+        policy_scope: B256,
         new_policy_id: u64,
         privileged: bool,
     ) -> Result<()> {
         if !privileged {
             B20Guards::ensure_token_role(self, caller, B20TokenRole::DefaultAdmin)?;
         }
-        let old_policy_id = self.policy_id(policy_type)?;
-        if !self.policy.policy_exists(new_policy_id)? {
+        let old_policy_id = self.policy_id(policy_scope)?;
+        if !self.policy().policy_exists(new_policy_id)? {
             return Err(BasePrecompileError::revert(IB20::PolicyNotFound {
                 policyId: new_policy_id,
             }));
         }
-        self.accounting_mut().set_policy_id(policy_type, new_policy_id)?;
+        self.accounting_mut().set_policy_id(policy_scope, new_policy_id)?;
         self.accounting_mut().emit_event(
             IB20::PolicyUpdated {
-                policyType: policy_type,
+                policyScope: policy_scope,
                 oldPolicyId: old_policy_id,
                 newPolicyId: new_policy_id,
             }
@@ -116,18 +110,13 @@ impl<S: TokenAccounting, P: Policy> B20Token<S, P> {
         )
     }
 
-    /// Returns whether `policy_id` is one of the built-in global policies.
-    pub const fn is_builtin_policy(policy_id: u64) -> bool {
-        policy_id == POLICY_ALWAYS_ALLOW || policy_id == POLICY_ALWAYS_BLOCK
-    }
-
-    /// Ensures `policy_type` names a B-20 policy slot.
-    pub fn ensure_supported_policy_type(policy_type: B256) -> Result<()> {
-        if B20PolicyType::from_id(policy_type).is_some() {
+    /// Ensures `policy_scope` names a B-20 policy slot.
+    pub fn ensure_supported_policy_type(policy_scope: B256) -> Result<()> {
+        if B20PolicyType::from_id(policy_scope).is_some() {
             Ok(())
         } else {
             Err(BasePrecompileError::revert(IB20::UnsupportedPolicyType {
-                policyType: policy_type,
+                policyScope: policy_scope,
             }))
         }
     }
@@ -136,9 +125,12 @@ impl<S: TokenAccounting, P: Policy> B20Token<S, P> {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, B256};
+    use base_precompile_storage::BasePrecompileError;
 
-    use super::*;
-    use crate::{B20TokenRole, InMemoryPolicy, InMemoryTokenAccounting, Token, TokenAccounting};
+    use crate::{
+        B20PolicyType, B20Token, B20TokenRole, IB20, InMemoryPolicy, InMemoryTokenAccounting,
+        Token, TokenAccounting,
+    };
 
     const ADMIN: Address = Address::repeat_byte(0xaa);
     const TOKEN_ADDR: Address = Address::repeat_byte(0x20);
@@ -153,11 +145,11 @@ mod tests {
     #[test]
     fn policy_id_reverts_for_unsupported_policy_type() {
         let token = token();
-        let policy_type = B256::repeat_byte(0x99);
+        let policy_scope = B256::repeat_byte(0x99);
 
         assert_eq!(
-            token.policy_id(policy_type).unwrap_err(),
-            BasePrecompileError::revert(IB20::UnsupportedPolicyType { policyType: policy_type })
+            token.policy_id(policy_scope).unwrap_err(),
+            BasePrecompileError::revert(IB20::UnsupportedPolicyType { policyScope: policy_scope })
         );
     }
 
@@ -176,7 +168,7 @@ mod tests {
     #[test]
     fn update_policy_accepts_existing_policy_id() {
         let mut token = token();
-        token.policy.create_existing_policy(CUSTOM_POLICY_ID);
+        token.policy_mut().create_existing_policy(CUSTOM_POLICY_ID);
 
         token
             .update_policy(ADMIN, B20PolicyType::TransferSender.id(), CUSTOM_POLICY_ID, false)

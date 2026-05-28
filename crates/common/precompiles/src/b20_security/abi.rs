@@ -40,7 +40,7 @@ sol! {
         event Redeemed(address indexed from, uint256 amt, uint256 sharesToTokensRatio);
 
         /// Emitted by `updateMinimumRedeemable`.
-        event MinimumRedeemableUpdated(uint256 newMinimumRedeemable);
+        event MinimumRedeemableUpdated(address indexed caller, uint256 newMinimumRedeemable);
 
         /// Emitted by `updateShareRatio`.
         event ShareRatioUpdated(uint256 sharesToTokensRatio);
@@ -65,8 +65,8 @@ sol! {
         /// Fixed-point precision for `sharesToTokensRatio`: `1e18` (one WAD).
         function WAD_PRECISION() external view returns (uint256);
 
-        /// `keccak256("REDEEMER_SENDER_POLICY")` — consulted on `redeem`/`redeemWithMemo`.
-        function REDEEMER_SENDER_POLICY() external view returns (bytes32);
+        /// `keccak256("REDEEM_SENDER_POLICY")` — consulted on `redeem`/`redeemWithMemo`.
+        function REDEEM_SENDER_POLICY() external view returns (bytes32);
 
         // ── Announcements ────────────────────────────────────────────────────
 
@@ -114,6 +114,9 @@ sol! {
         /// Sets the minimum-redeemable threshold in shares. Requires `DEFAULT_ADMIN_ROLE`.
         function updateMinimumRedeemable(uint256 newMinimumRedeemable) external;
 
+        /// Returns the minimum-redeemable threshold in shares.
+        function minimumRedeemable() external view returns (uint256);
+
         // ── Security identifiers ─────────────────────────────────────────────
 
         /// Returns the value of the named identifier (e.g. ISIN, CUSIP). Empty string if not set.
@@ -124,5 +127,74 @@ sol! {
             string calldata identifierType,
             string calldata value
         ) external;
+    }
+}
+
+impl IB20Security::IB20SecurityCalls {
+    /// Returns the stable label for this decoded security B-20 call.
+    pub const fn as_label(&self) -> &'static str {
+        match self {
+            Self::SECURITY_OPERATOR_ROLE(_) => "precompile-b20-security-SECURITY_OPERATOR_ROLE",
+            Self::BURN_FROM_ROLE(_) => "precompile-b20-security-BURN_FROM_ROLE",
+            Self::WAD_PRECISION(_) => "precompile-b20-security-WAD_PRECISION",
+            Self::REDEEM_SENDER_POLICY(_) => "precompile-b20-security-REDEEM_SENDER_POLICY",
+            Self::announce(_) => "precompile-b20-security-announce",
+            Self::isAnnouncementIdUsed(_) => "precompile-b20-security-isAnnouncementIdUsed",
+            Self::sharesToTokensRatio(_) => "precompile-b20-security-sharesToTokensRatio",
+            Self::toShares(_) => "precompile-b20-security-toShares",
+            Self::sharesOf(_) => "precompile-b20-security-sharesOf",
+            Self::updateShareRatio(_) => "precompile-b20-security-updateShareRatio",
+            Self::batchMint(_) => "precompile-b20-security-batchMint",
+            Self::batchBurn(_) => "precompile-b20-security-batchBurn",
+            Self::redeem(_) => "precompile-b20-security-redeem",
+            Self::redeemWithMemo(_) => "precompile-b20-security-redeemWithMemo",
+            Self::updateMinimumRedeemable(_) => "precompile-b20-security-updateMinimumRedeemable",
+            Self::minimumRedeemable(_) => "precompile-b20-security-minimumRedeemable",
+            Self::securityIdentifier(_) => "precompile-b20-security-securityIdentifier",
+            Self::updateSecurityIdentifier(_) => "precompile-b20-security-updateSecurityIdentifier",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{U256, b256, keccak256};
+    use alloy_sol_types::{SolCall, SolEvent};
+
+    use crate::IB20Security;
+
+    #[test]
+    fn redeem_sender_policy_selector_matches_solidity_interface() {
+        assert_eq!(IB20Security::REDEEM_SENDER_POLICYCall::SELECTOR, [0x1c, 0x6f, 0x9d, 0x42]);
+    }
+
+    #[test]
+    fn minimum_redeemable_updated_topic_matches_solidity_interface() {
+        assert_eq!(
+            IB20Security::MinimumRedeemableUpdated::SIGNATURE_HASH,
+            b256!("7fdd6ea6dad98bfcd2c5ec538e748a5e8ecc40d0fc824f55dfc7397fe78a183b")
+        );
+        assert_eq!(
+            IB20Security::MinimumRedeemableUpdated::SIGNATURE_HASH,
+            keccak256("MinimumRedeemableUpdated(address,uint256)")
+        );
+    }
+
+    #[test]
+    fn security_call_labels_are_stable() {
+        assert_eq!(
+            IB20Security::IB20SecurityCalls::minimumRedeemable(
+                IB20Security::minimumRedeemableCall {},
+            )
+            .as_label(),
+            "precompile-b20-security-minimumRedeemable"
+        );
+        assert_eq!(
+            IB20Security::IB20SecurityCalls::redeem(IB20Security::redeemCall {
+                amount: U256::ZERO,
+            })
+            .as_label(),
+            "precompile-b20-security-redeem"
+        );
     }
 }

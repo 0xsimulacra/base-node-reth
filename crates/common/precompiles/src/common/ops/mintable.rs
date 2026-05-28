@@ -2,8 +2,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use super::guards::B20Guards;
-use crate::{B20PolicyType, B20TokenRole, IB20, Token, TokenAccounting};
+use crate::{B20Guards, B20PolicyType, B20TokenRole, IB20, Token, TokenAccounting};
 
 /// Token minting operations.
 ///
@@ -12,14 +11,14 @@ use crate::{B20PolicyType, B20TokenRole, IB20, Token, TokenAccounting};
 pub trait Mintable: Token {
     /// Creates `amount` tokens at `to`. Enforces supply cap. Emits `Transfer(0x0, to, amount)`.
     fn mint(&mut self, caller: Address, to: Address, amount: U256, privileged: bool) -> Result<()> {
-        if !privileged {
-            B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::Mint)?;
-        }
-        B20Guards::ensure_not_paused::<Self>(self, IB20::PausableFeature::MINT)?;
-        B20Guards::ensure_policy_type::<Self>(self, B20PolicyType::MintReceiver, to)?;
         if to == Address::ZERO {
             return Err(BasePrecompileError::revert(IB20::InvalidReceiver { receiver: to }));
         }
+        if !privileged {
+            B20Guards::ensure_token_role::<Self>(self, caller, B20TokenRole::Mint)?;
+        }
+        B20Guards::ensure_policy_type::<Self>(self, B20PolicyType::MintReceiver, to)?;
+        B20Guards::ensure_not_paused::<Self>(self, IB20::PausableFeature::MINT)?;
         let supply = self.accounting().total_supply()?;
         let cap = self.accounting().supply_cap()?;
         let new_supply =
@@ -49,7 +48,7 @@ pub trait Mintable: Token {
         privileged: bool,
     ) -> Result<()> {
         self.mint(caller, to, amount, privileged)?;
-        self.accounting_mut().emit_event(IB20::Memo { memo }.encode_log_data())
+        self.accounting_mut().emit_event(IB20::Memo { caller, memo }.encode_log_data())
     }
 }
 
@@ -58,13 +57,10 @@ mod tests {
     use alloy_primitives::{Address, U256};
     use base_precompile_storage::BasePrecompileError;
 
-    use super::Mintable;
     use crate::{
-        B20PausableFeature, B20PolicyType, B20TokenRole, IB20, POLICY_ALWAYS_BLOCK,
-        common::{
-            Token, TokenAccounting,
-            test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestToken},
-        },
+        B20PausableFeature, B20PolicyType, B20TokenRole, IB20, InMemoryPolicy,
+        InMemoryTokenAccounting, Mintable, PolicyRegistryStorage, TestToken, Token,
+        TokenAccounting,
     };
 
     const CALLER: Address = Address::repeat_byte(0xcc);
@@ -179,14 +175,16 @@ mod tests {
     #[test]
     fn mint_reverts_when_receiver_policy_denies() {
         let mut accounting = InMemoryTokenAccounting::new(TOKEN_ADDR);
-        accounting.policy_ids.insert(B20PolicyType::MintReceiver.id(), POLICY_ALWAYS_BLOCK);
+        accounting
+            .policy_ids
+            .insert(B20PolicyType::MintReceiver.id(), PolicyRegistryStorage::ALWAYS_BLOCK_ID);
         let mut token = TestToken::with_storage_and_policy(accounting, InMemoryPolicy::new());
 
         assert_eq!(
             token.mint(CALLER, ALICE, U256::ONE, true).unwrap_err(),
             BasePrecompileError::revert(IB20::PolicyForbids {
-                policyType: B20PolicyType::MintReceiver.id(),
-                policyId: POLICY_ALWAYS_BLOCK,
+                policyScope: B20PolicyType::MintReceiver.id(),
+                policyId: PolicyRegistryStorage::ALWAYS_BLOCK_ID,
             })
         );
     }

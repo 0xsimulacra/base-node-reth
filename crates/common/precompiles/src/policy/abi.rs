@@ -1,30 +1,26 @@
 use alloy_sol_types::sol;
-use base_precompile_storage::{BasePrecompileError, Result};
 
 sol! {
     #[derive(Debug, PartialEq, Eq)]
     interface IPolicyRegistry {
         enum PolicyType {
-            /// Authorizes all accounts unconditionally.
-            ALWAYS_ALLOW,
-            /// Rejects all accounts unconditionally.
-            ALWAYS_BLOCK,
-            /// Authorizes only accounts explicitly added to the allowlist.
-            ALLOWLIST,
             /// Rejects only accounts explicitly added to the blocklist.
-            BLOCKLIST
+            /// An empty blocklist authorizes everyone.
+            BLOCKLIST,
+            /// Authorizes only accounts explicitly added to the allowlist.
+            /// An empty allowlist rejects everyone.
+            ALLOWLIST
         }
 
         error Unauthorized();
         error PolicyNotFound();
         error IncompatiblePolicyType();
-        error InvalidPolicyType();
         error ZeroAddress();
+        error BatchSizeTooLarge(uint256 maxBatchSize);
         error NoPendingAdmin();
-        error MalformedPolicyId(uint64 policyId);
 
         event PolicyCreated(uint64 indexed policyId, address indexed creator, PolicyType policyType);
-        event PolicyAdminStaged(uint64 indexed policyId, address indexed previousAdmin, address indexed newAdmin);
+        event PolicyAdminStaged(uint64 indexed policyId, address indexed currentAdmin, address indexed pendingAdmin);
         event PolicyAdminUpdated(uint64 indexed policyId, address indexed previousAdmin, address indexed newAdmin);
         event AllowlistUpdated(uint64 indexed policyId, address indexed updater, bool allowed, address[] accounts);
         event BlocklistUpdated(uint64 indexed policyId, address indexed updater, bool blocked, address[] accounts);
@@ -39,19 +35,36 @@ sol! {
         function updateBlocklist(uint64 policyId, bool blocked, address[] calldata accounts) external;
         function isAuthorized(uint64 policyId, address account) external view returns (bool);
         function policyExists(uint64 policyId) external view returns (bool);
-        function policyType(uint64 policyId) external view returns (PolicyType);
         function policyAdmin(uint64 policyId) external view returns (address);
         function pendingPolicyAdmin(uint64 policyId) external view returns (address);
     }
 }
 
 impl IPolicyRegistry::PolicyType {
-    /// Returns the raw `u8` discriminant for ALLOWLIST or BLOCKLIST.
-    /// Reverts with `InvalidPolicyType` for built-in sentinels (`ALWAYS_ALLOW`, `ALWAYS_BLOCK`).
-    pub fn as_discriminant(self) -> Result<u8> {
-        match self {
-            Self::ALLOWLIST | Self::BLOCKLIST => Ok(self as u8),
-            _ => Err(BasePrecompileError::revert(IPolicyRegistry::InvalidPolicyType {})),
+    /// Returns the raw `u8` discriminant for this policy type.
+    pub const fn as_discriminant(self) -> u8 {
+        self as u8
+    }
+
+    /// Returns whether this value is one of the supported policy types.
+    pub const fn is_valid(self) -> bool {
+        matches!(self, Self::BLOCKLIST | Self::ALLOWLIST)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_sol_types::SolEnum;
+
+    use super::IPolicyRegistry;
+
+    #[test]
+    fn all_policy_type_variants_are_valid() {
+        for discriminant in 0..IPolicyRegistry::PolicyType::COUNT {
+            let policy_type = IPolicyRegistry::PolicyType::try_from(discriminant as u8)
+                .expect("generated PolicyType discriminant should decode");
+
+            assert!(policy_type.is_valid());
         }
     }
 }

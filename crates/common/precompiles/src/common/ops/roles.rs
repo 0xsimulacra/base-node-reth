@@ -4,8 +4,7 @@ use alloy_primitives::{Address, B256, U256, b256};
 use alloy_sol_types::SolEvent;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use super::guards::B20Guards;
-use crate::{IB20, Token, TokenAccounting};
+use crate::{B20Guards, IB20, Token, TokenAccounting};
 
 const MINT_ROLE: B256 = b256!("154c00819833dac601ee5ddded6fda79d9d8b506b911b3dbd54cdb95fe6c3686");
 const BURN_ROLE: B256 = b256!("e97b137254058bd94f28d2f3eb79e2d34074ffb488d042e3bc958e0a57d2fa22");
@@ -32,7 +31,7 @@ pub enum B20TokenRole {
     Pause,
     /// Role required for `unpause`.
     Unpause,
-    /// Role required for `setName` and `setSymbol`.
+    /// Role required for `updateName` and `updateSymbol`.
     Metadata,
 }
 
@@ -86,7 +85,7 @@ pub trait RoleManaged: Token {
         B20TokenRole::Unpause.id()
     }
 
-    /// Role required for `setName` and `setSymbol`.
+    /// Role required for `updateName` and `updateSymbol`.
     fn metadata_role() -> B256 {
         B20TokenRole::Metadata.id()
     }
@@ -111,11 +110,13 @@ pub trait RoleManaged: Token {
         if self.accounting().has_role(role, account)? {
             return Ok(());
         }
-        let current = self.accounting().role_member_count(role)?;
-        let next =
-            current.checked_add(U256::ONE).ok_or_else(BasePrecompileError::under_overflow)?;
         self.accounting_mut().set_role(role, account, true)?;
-        self.accounting_mut().set_role_member_count(role, next)?;
+        if role == Self::default_admin_role() {
+            let current = self.accounting().role_member_count(role)?;
+            let next =
+                current.checked_add(U256::ONE).ok_or_else(BasePrecompileError::under_overflow)?;
+            self.accounting_mut().set_role_member_count(role, next)?;
+        }
         self.accounting_mut()
             .emit_event(IB20::RoleGranted { role, account, sender }.encode_log_data())
     }
@@ -130,11 +131,13 @@ pub trait RoleManaged: Token {
         if !self.accounting().has_role(role, account)? {
             return Ok(());
         }
-        let current = self.accounting().role_member_count(role)?;
-        let next =
-            current.checked_sub(U256::ONE).ok_or_else(BasePrecompileError::under_overflow)?;
         self.accounting_mut().set_role(role, account, false)?;
-        self.accounting_mut().set_role_member_count(role, next)?;
+        if role == Self::default_admin_role() {
+            let current = self.accounting().role_member_count(role)?;
+            let next =
+                current.checked_sub(U256::ONE).ok_or_else(BasePrecompileError::under_overflow)?;
+            self.accounting_mut().set_role_member_count(role, next)?;
+        }
         self.accounting_mut()
             .emit_event(IB20::RoleRevoked { role, account, sender }.encode_log_data())
     }
@@ -142,6 +145,18 @@ pub trait RoleManaged: Token {
     /// Ensures `caller` has `role`.
     fn ensure_role(&self, caller: Address, role: B256) -> Result<()> {
         B20Guards::ensure_role(self, caller, role)
+    }
+
+    /// Ensures role-admin mutations are still reachable.
+    fn ensure_role_admin_mutations_available(&self, caller: Address) -> Result<()> {
+        let admin_role = Self::default_admin_role();
+        if self.accounting().role_member_count(admin_role)? == U256::ZERO {
+            return Err(BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: caller,
+                neededRole: admin_role,
+            }));
+        }
+        Ok(())
     }
 
     /// Grants `role` to `account`, optionally bypassing authorization during factory init.
@@ -153,6 +168,7 @@ pub trait RoleManaged: Token {
         privileged: bool,
     ) -> Result<()> {
         if !privileged {
+            self.ensure_role_admin_mutations_available(caller)?;
             self.ensure_role(caller, self.role_admin(role)?)?;
         }
         self.grant_role_unchecked(role, account, caller)
@@ -167,6 +183,7 @@ pub trait RoleManaged: Token {
         privileged: bool,
     ) -> Result<()> {
         if !privileged {
+            self.ensure_role_admin_mutations_available(caller)?;
             self.ensure_role(caller, self.role_admin(role)?)?;
         }
         self.revoke_role_unchecked(role, account, caller)
@@ -217,6 +234,7 @@ pub trait RoleManaged: Token {
     ) -> Result<()> {
         let previous_admin_role = self.role_admin(role)?;
         if !privileged {
+            self.ensure_role_admin_mutations_available(caller)?;
             self.ensure_role(caller, previous_admin_role)?;
         }
         self.accounting_mut().set_role_admin(role, new_admin_role)?;
@@ -237,14 +255,14 @@ mod tests {
     use alloy_sol_types::SolEvent;
     use base_precompile_storage::BasePrecompileError;
 
-    use super::{B20TokenRole, RoleManaged};
     use crate::{
-        IB20, Token, TokenAccounting,
-        common::test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestToken},
+        B20TokenRole, IB20, InMemoryPolicy, InMemoryTokenAccounting, RoleManaged, TestToken, Token,
+        TokenAccounting,
     };
 
     const ADMIN: Address = Address::repeat_byte(0xaa);
     const ALICE: Address = Address::repeat_byte(0xbb);
+    const BOB: Address = Address::repeat_byte(0xcc);
     const TOKEN_ADDR: Address = Address::repeat_byte(0x11);
     const CUSTOM_ROLE: B256 = B256::repeat_byte(0x42);
 
@@ -269,10 +287,6 @@ mod tests {
         token.grant_role(ADMIN, B20TokenRole::Mint.id(), ALICE, false).unwrap();
 
         assert!(token.has_role(B20TokenRole::Mint.id(), ALICE).unwrap());
-        assert_eq!(
-            token.accounting().role_member_count(B20TokenRole::Mint.id()).unwrap(),
-            U256::ONE
-        );
         assert_eq!(
             token.accounting().events[0],
             IB20::RoleGranted { role: B20TokenRole::Mint.id(), account: ALICE, sender: ADMIN }
@@ -318,6 +332,81 @@ mod tests {
             token.accounting().events.last().unwrap(),
             &IB20::LastAdminRenounced { previousAdmin: ADMIN }.encode_log_data()
         );
+    }
+
+    #[test]
+    fn renounce_last_admin_prevents_custom_admin_resurrection() {
+        let mut token = token_with_default_admin();
+
+        token.set_role_admin(ADMIN, B20TokenRole::DefaultAdmin.id(), CUSTOM_ROLE, false).unwrap();
+        token.grant_role(ADMIN, CUSTOM_ROLE, ALICE, false).unwrap();
+        token.renounce_last_admin(ADMIN).unwrap();
+
+        assert_eq!(
+            token.grant_role(ALICE, B20TokenRole::DefaultAdmin.id(), ALICE, false).unwrap_err(),
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: ALICE,
+                neededRole: B20TokenRole::DefaultAdmin.id(),
+            })
+        );
+        assert!(!token.has_role(B20TokenRole::DefaultAdmin.id(), ALICE).unwrap());
+    }
+
+    #[test]
+    fn renounce_last_admin_disables_role_admin_mutations() {
+        let mut token = token_with_default_admin();
+
+        token.set_role_admin(ADMIN, B20TokenRole::Mint.id(), CUSTOM_ROLE, false).unwrap();
+        token.grant_role(ADMIN, CUSTOM_ROLE, ALICE, false).unwrap();
+        token.renounce_last_admin(ADMIN).unwrap();
+
+        assert_eq!(
+            token.grant_role(ALICE, B20TokenRole::Mint.id(), ALICE, false).unwrap_err(),
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: ALICE,
+                neededRole: B20TokenRole::DefaultAdmin.id(),
+            })
+        );
+        assert!(!token.has_role(B20TokenRole::Mint.id(), ALICE).unwrap());
+    }
+
+    #[test]
+    fn renounce_last_admin_disables_custom_admin_revoke() {
+        let mut token = token_with_default_admin();
+
+        token.set_role_admin(ADMIN, B20TokenRole::Mint.id(), CUSTOM_ROLE, false).unwrap();
+        token.grant_role(ADMIN, CUSTOM_ROLE, ALICE, false).unwrap();
+        token.grant_role(ALICE, B20TokenRole::Mint.id(), BOB, false).unwrap();
+        token.renounce_last_admin(ADMIN).unwrap();
+
+        assert_eq!(
+            token.revoke_role(ALICE, B20TokenRole::Mint.id(), BOB, false).unwrap_err(),
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: ALICE,
+                neededRole: B20TokenRole::DefaultAdmin.id(),
+            })
+        );
+        assert!(token.has_role(B20TokenRole::Mint.id(), BOB).unwrap());
+    }
+
+    #[test]
+    fn renounce_last_admin_disables_custom_admin_reassignment() {
+        let mut token = token_with_default_admin();
+
+        token.set_role_admin(ADMIN, B20TokenRole::Mint.id(), CUSTOM_ROLE, false).unwrap();
+        token.grant_role(ADMIN, CUSTOM_ROLE, ALICE, false).unwrap();
+        token.renounce_last_admin(ADMIN).unwrap();
+
+        assert_eq!(
+            token
+                .set_role_admin(ALICE, B20TokenRole::Mint.id(), B20TokenRole::Burn.id(), false)
+                .unwrap_err(),
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: ALICE,
+                neededRole: B20TokenRole::DefaultAdmin.id(),
+            })
+        );
+        assert_eq!(token.role_admin(B20TokenRole::Mint.id()).unwrap(), CUSTOM_ROLE);
     }
 
     #[test]

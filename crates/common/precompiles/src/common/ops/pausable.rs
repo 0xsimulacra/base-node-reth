@@ -4,8 +4,7 @@ use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolEvent;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use super::guards::B20Guards;
-use crate::{B20PausableFeature, B20TokenRole, IB20, Token, TokenAccounting};
+use crate::{B20Guards, B20PausableFeature, B20TokenRole, IB20, Token, TokenAccounting};
 
 /// Pause and unpause operations.
 ///
@@ -21,8 +20,6 @@ pub trait Pausable: Token {
     fn paused_features(&self) -> Result<Vec<IB20::PausableFeature>> {
         let paused = self.accounting().paused()?;
         let mut features = Vec::new();
-        // REDEEM is reserved for a future redeem operation. It can be toggled and surfaced through
-        // pausedFeatures, but no current B-20 operation checks it.
         for feature in [
             IB20::PausableFeature::TRANSFER,
             IB20::PausableFeature::MINT,
@@ -89,13 +86,9 @@ mod tests {
     use alloy_primitives::Address;
     use base_precompile_storage::BasePrecompileError;
 
-    use super::Pausable;
     use crate::{
-        B20PausableFeature, B20TokenRole, IB20,
-        common::{
-            Token,
-            test_utils::{InMemoryPolicy, InMemoryTokenAccounting, TestToken},
-        },
+        B20PausableFeature, B20TokenRole, IB20, InMemoryPolicy, InMemoryTokenAccounting, Pausable,
+        TestToken, Token,
     };
 
     const CALLER: Address = Address::repeat_byte(0xaa);

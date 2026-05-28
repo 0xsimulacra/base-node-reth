@@ -50,16 +50,21 @@ pub trait PrecompileStorageProvider {
 
     /// Deducts gas from the remaining gas and returns an error if insufficient.
     fn deduct_gas(&mut self, gas: u64) -> Result<()>;
+    /// Deducts state-creating gas (EIP-8037 reservoir model).
+    ///
+    /// Counts only state-creation operations: new account creation and code deposit.
+    /// State gas is tracked separately from regular gas and also deducted from the
+    /// regular gas counter when no reservoir is available.
+    fn deduct_state_gas(&mut self, gas: u64) -> Result<()>;
     /// Adds a gas refund to the refund counter.
     fn refund_gas(&mut self, gas: i64);
     /// Returns the gas limit for this precompile call.
     fn gas_limit(&self) -> u64;
     /// Returns the gas used so far.
     fn gas_used(&self) -> u64;
-    /// Returns the state-creating gas spent so far (EIP-8037 reservoir model).
+    /// Returns the state-creating gas spent so far (EIP-8037).
     ///
-    /// Counts only state-creation operations: zero→nonzero SSTORE and code deposit.
-    /// Returns zero unless an EIP-8037 reservoir was provided at construction time.
+    /// Counts only new account creation and code deposit operations.
     fn state_gas_used(&self) -> u64;
     /// Returns the gas refunded so far.
     fn gas_refunded(&self) -> i64;
@@ -74,6 +79,8 @@ pub trait PrecompileStorageProvider {
 
     /// Returns the address that called this precompile.
     fn caller(&self) -> Address;
+    /// Replaces the current caller address and returns the previous caller.
+    fn replace_caller(&mut self, caller: Address) -> Address;
 
     /// Creates a new journal checkpoint for atomic state management.
     fn checkpoint(&mut self) -> JournalCheckpoint;
@@ -188,6 +195,12 @@ impl LayoutCtx {
 pub trait StorableType {
     /// Storage layout descriptor.
     const LAYOUT: Layout;
+    /// Whether this type declares its own ERC-7201 storage namespace.
+    const HAS_STORAGE_NAMESPACE: bool = false;
+    /// ERC-7201 namespace identifier for this type.
+    const STORAGE_NAMESPACE_ID: &'static str = "";
+    /// ERC-7201 namespace root slot for this type.
+    const STORAGE_NAMESPACE_ROOT: U256 = U256::ZERO;
     /// Number of storage slots this type occupies.
     const SLOTS: usize = Self::LAYOUT.slots();
     /// Number of bytes this type occupies.
