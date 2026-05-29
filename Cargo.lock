@@ -5961,6 +5961,7 @@ dependencies = [
  "base-proof-succinct-proof-utils",
  "base-prover-service-db",
  "base-prover-service-outbox",
+ "base-prover-service-protocol",
  "bincode 2.0.1",
  "chrono",
  "governor",
@@ -6011,6 +6012,17 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "base-prover-service-protocol"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "chrono",
+ "jsonrpsee",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
