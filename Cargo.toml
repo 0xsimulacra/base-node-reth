@@ -25,6 +25,11 @@ members = [
   "crates/proof/preimage",
   "crates/proof/primitives",
   "crates/proof/host",
+  "crates/proof/prover-service",
+  "crates/proof/prover-service/client",
+  "crates/proof/prover-service/protocol",
+  "crates/proof/prover-service/db",
+  "crates/proof/prover-service/outbox",
   "crates/proof/tee/nitro-host",
   "crates/proof/tee/nitro-enclave",
   "crates/proof/tee/registrar",
@@ -231,15 +236,20 @@ base-zk-outbox = { path = "crates/proof/zk/outbox" }
 base-zk-service = { path = "crates/proof/zk/service" }
 base-challenger = { path = "crates/proof/challenge" }
 base-proof-contracts = { path = "crates/proof/contracts" }
+base-prover-service = { path = "crates/proof/prover-service" }
 base-proof-tee-registrar = { path = "crates/proof/tee/registrar" }
+base-prover-service-db = { path = "crates/proof/prover-service/db" }
 base-proof-tee-nitro-host = { path = "crates/proof/tee/nitro-host" }
 base-proof = { path = "crates/proof/proof", default-features = false }
 base-proof-mpt = { path = "crates/proof/mpt", default-features = false }
 base-proof-tee-nitro-enclave = { path = "crates/proof/tee/nitro-enclave" }
 base-proof-host = { path = "crates/proof/host", default-features = false }
+base-prover-service-client = { path = "crates/proof/prover-service/client" }
+base-prover-service-outbox = { path = "crates/proof/prover-service/outbox" }
 base-proof-tee-nitro-verifier = { path = "crates/proof/tee/nitro-verifier" }
 base-proof-client = { path = "crates/proof/client", default-features = false }
 base-proof-driver = { path = "crates/proof/driver", default-features = false }
+base-prover-service-protocol = { path = "crates/proof/prover-service/protocol" }
 base-proof-executor = { path = "crates/proof/executor", default-features = false }
 base-proof-preimage = { path = "crates/proof/preimage", default-features = false }
 base-proof-primitives = { path = "crates/proof/primitives", default-features = false }
@@ -410,6 +420,7 @@ async-trait = "0.1.83"
 prost = "0.14"
 tonic = "0.14"
 tonic-web = "0.14"
+prost-types = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-reflection = "0.14"
