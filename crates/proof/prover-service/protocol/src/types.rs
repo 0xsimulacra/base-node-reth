@@ -1,6 +1,7 @@
 //! JSON-RPC request and response types for the shared prover service protocol.
 
 use alloy_primitives::{Address, B256, Bytes};
+use base_proof_primitives::{ProofRequest as PrimitiveProofRequest, Proposal};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -50,37 +51,32 @@ pub enum ProofStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProofJobStatus {
-    /// Proof job is queued.
-    Queued,
-    /// Proof job is currently leased by a worker.
-    Leased,
-    /// Proof job lease expired before completion.
-    LeaseExpired,
+    /// Proof job is pending and not currently claimed by a worker.
+    Pending,
+    /// Proof job is currently claimed by a worker.
+    Claimed,
     /// Proof job completed successfully.
     Succeeded,
     /// Proof job failed.
     Failed,
 }
 
-/// Request to submit a proof.
+/// Request to prove a block range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitProofRequest {
+pub struct ProveBlockRangeRequest {
     /// Proof request payload.
     pub proof: ProofRequest,
 }
 
-/// Response returned after a proof request is accepted.
+/// Response returned after a prove-block-range request is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitProofResponse {
+pub struct ProveBlockRangeResponse {
     /// Server-assigned or client-supplied session identifier.
     pub session_id: String,
 }
 
 /// Submitted proof request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProofRequest {
     /// Optional client-provided idempotency key.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,7 +87,7 @@ pub struct ProofRequest {
 
 /// Concrete proof request variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "proofType", content = "payload", rename_all = "snake_case")]
+#[serde(tag = "proof_type", content = "payload", rename_all = "snake_case")]
 pub enum ProofRequestKind {
     /// Request a compressed ZK proof.
     Compressed(ZkProofRequest),
@@ -103,7 +99,6 @@ pub enum ProofRequestKind {
 
 /// ZK proof request parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ZkProofRequest {
     /// First L2 block number to prove.
     pub start_block_number: u64,
@@ -124,7 +119,6 @@ pub struct ZkProofRequest {
 
 /// Groth16 SNARK proof request parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SnarkGroth16ProofRequest {
     /// Underlying ZK proof request.
     pub proof: ZkProofRequest,
@@ -134,33 +128,16 @@ pub struct SnarkGroth16ProofRequest {
 
 /// Trusted execution environment proof request parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TeeProofRequest {
-    /// L1 head hash.
-    pub l1_head: B256,
-    /// Agreed L2 head block hash.
-    pub agreed_l2_head_hash: B256,
-    /// Agreed L2 output root.
-    pub agreed_l2_output_root: B256,
-    /// Claimed L2 output root.
-    pub claimed_l2_output_root: B256,
-    /// Claimed L2 block number.
-    pub claimed_l2_block_number: u64,
-    /// Proposal submitter address.
-    pub proposer: Address,
-    /// Intermediate block interval.
-    pub intermediate_block_interval: u64,
-    /// L1 head block number.
-    pub l1_head_number: u64,
-    /// TEE image hash.
-    pub image_hash: B256,
+    /// Underlying TEE proof request.
+    pub proof: PrimitiveProofRequest,
     /// Trusted execution environment implementation.
     pub tee_kind: TeeKind,
 }
 
 /// Proof result payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "proofType", content = "payload", rename_all = "snake_case")]
+#[serde(tag = "proof_type", content = "payload", rename_all = "snake_case")]
 pub enum ProofResult {
     /// Compressed ZK proof result.
     Compressed(ZkProofResult),
@@ -172,7 +149,6 @@ pub enum ProofResult {
 
 /// ZK proof result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ZkProofResult {
     /// ZK virtual machine implementation that produced the proof.
     pub zk_vm: ZkVm,
@@ -182,7 +158,6 @@ pub struct ZkProofResult {
 
 /// Groth16 SNARK proof result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SnarkGroth16ProofResult {
     /// Wrapped ZK proof result.
     pub proof: ZkProofResult,
@@ -190,40 +165,17 @@ pub struct SnarkGroth16ProofResult {
 
 /// TEE proof result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TeeProofResult {
-    /// Aggregate proposal, if one was produced.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregate_proposal: Option<TeeProposal>,
+    /// Aggregate proposal covering the entire proven block range.
+    pub aggregate_proposal: Proposal,
     /// Individual signed proposals.
-    pub proposals: Vec<TeeProposal>,
+    pub proposals: Vec<Proposal>,
     /// Trusted execution environment implementation that produced the proof.
     pub tee_kind: TeeKind,
 }
 
-/// Signed TEE proposal data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TeeProposal {
-    /// Output root.
-    pub output_root: B256,
-    /// Serialized signature bytes.
-    pub signature: Bytes,
-    /// L1 origin block hash.
-    pub l1_origin_hash: B256,
-    /// L1 origin block number.
-    pub l1_origin_number: u64,
-    /// L2 block number.
-    pub l2_block_number: u64,
-    /// Previous output root.
-    pub prev_output_root: B256,
-    /// Rollup config hash.
-    pub config_hash: B256,
-}
-
 /// Request to fetch proof status and result data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GetProofRequest {
     /// Proof session identifier.
     pub session_id: String,
@@ -231,7 +183,6 @@ pub struct GetProofRequest {
 
 /// Proof status and result data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GetProofResponse {
     /// Current proof status.
     pub status: ProofStatus,
@@ -245,7 +196,6 @@ pub struct GetProofResponse {
 
 /// Request to list submitted proofs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ListProofsRequest {
     /// Number of rows to skip.
     pub offset: u64,
@@ -258,7 +208,6 @@ pub struct ListProofsRequest {
 
 /// Summary of a submitted proof request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProofSummary {
     /// Proof session identifier.
     pub session_id: String,
@@ -286,7 +235,6 @@ pub struct ProofSummary {
 
 /// Response containing proof summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ListProofsResponse {
     /// Proof summaries.
     pub proofs: Vec<ProofSummary>,
@@ -296,7 +244,6 @@ pub struct ListProofsResponse {
 
 /// Worker-owned proof job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProofJob {
     /// Proof session identifier.
     pub session_id: String,
@@ -306,15 +253,15 @@ pub struct ProofJob {
     pub request: ProofRequest,
     /// Current attempt number.
     pub attempt: u32,
-    /// Current lease identifier, if the job is leased.
+    /// Server-issued lock identifier, if the job is claimed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease_id: Option<String>,
-    /// Worker identifier, if the job is leased.
+    pub lock_id: Option<String>,
+    /// Worker identifier, if the job is claimed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
-    /// Timestamp when the lease expires.
+    /// Timestamp when the worker claim expires.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub lock_expires_at: Option<DateTime<Utc>>,
     /// Timestamp when the job was created.
     pub created_at: DateTime<Utc>,
     /// Timestamp when the job was last updated.
@@ -327,135 +274,81 @@ pub struct ProofJob {
     pub error_message: Option<String>,
 }
 
-/// Request to fetch a proof job.
+/// Request to claim the next available proof job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetProofJobRequest {
-    /// Proof session identifier.
-    pub session_id: String,
-}
-
-/// Proof job response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetProofJobResponse {
-    /// Matching proof job, if it exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub job: Option<ProofJob>,
-}
-
-/// Request to claim a proof job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimProofJobRequest {
-    /// Proof type the worker can process.
-    pub proof_type: ProofType,
+pub struct GetNextProofRequest {
     /// Worker identifier.
     pub worker_id: String,
-    /// Requested lease duration in seconds. Zero uses the server default.
-    pub lease_duration_seconds: u32,
-    /// Optional TEE implementation restrictions.
+    /// Proof type this worker can execute.
+    pub proof_type: ProofType,
+    /// TEE implementations this worker can execute for TEE proofs.
     #[serde(default)]
     pub tee_kinds: Vec<TeeKind>,
-    /// Optional ZK virtual machine restrictions.
+    /// ZK virtual machines this worker can execute for ZK proofs.
     #[serde(default)]
     pub zk_vms: Vec<ZkVm>,
+    /// Requested lock duration in seconds. Zero uses the server default.
+    pub lock_duration_seconds: u32,
 }
 
-/// Response returned when a worker attempts to claim a proof job.
+/// Response returned when a worker claims the next proof job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimProofJobResponse {
-    /// Whether a job was claimed.
-    pub claimed: bool,
+pub struct GetNextProofResponse {
     /// Claimed proof job, if one was available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job: Option<ProofJob>,
 }
 
-/// Request to extend a proof job lease.
+/// Request to extend a proof job lock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeartbeatProofJobRequest {
+pub struct HeartbeatRequest {
     /// Proof session identifier.
     pub session_id: String,
-    /// Lease identifier.
-    pub lease_id: String,
+    /// Server-issued lock identifier for this worker claim.
+    pub lock_id: String,
     /// Worker identifier.
     pub worker_id: String,
-    /// Requested lease duration in seconds. Zero uses the server default.
-    pub lease_duration_seconds: u32,
+    /// Requested lock duration in seconds. Zero uses the server default.
+    pub lock_duration_seconds: u32,
 }
 
 /// Response returned after a proof job heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeartbeatProofJobResponse {
-    /// Whether the heartbeat was accepted.
-    pub accepted: bool,
-    /// Updated proof job, if accepted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub job: Option<ProofJob>,
+pub struct HeartbeatResponse {
+    /// Updated proof job.
+    pub job: ProofJob,
 }
 
-/// Request to complete a proof job.
+/// Request to submit a proof result for a proof job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompleteProofJobRequest {
+pub struct WorkerSubmitProofRequest {
     /// Proof session identifier.
     pub session_id: String,
-    /// Lease identifier.
-    pub lease_id: String,
+    /// Server-issued lock identifier for this worker claim.
+    pub lock_id: String,
     /// Worker identifier.
     pub worker_id: String,
     /// Proof result.
     pub result: ProofResult,
 }
 
-/// Response returned after a proof job is completed.
+/// Response returned after a worker proof submission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompleteProofJobResponse {
+pub struct WorkerSubmitProofResponse {
     /// Completed proof job.
     pub job: ProofJob,
 }
 
-/// Request to fail a proof job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FailProofJobRequest {
-    /// Proof session identifier.
-    pub session_id: String,
-    /// Lease identifier.
-    pub lease_id: String,
-    /// Worker identifier.
-    pub worker_id: String,
-    /// Failure reason.
-    pub error_message: String,
-    /// Whether the job should be retried.
-    pub retryable: bool,
-}
-
-/// Response returned after a proof job is failed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FailProofJobResponse {
-    /// Updated proof job.
-    pub job: ProofJob,
-    /// Whether the server will retry the job.
-    pub will_retry: bool,
-}
-
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::address;
+    use alloy_primitives::{Bytes, address};
     use serde_json::json;
 
     use super::*;
 
     #[test]
     fn proof_request_serializes_as_json_rpc_payload() {
-        let request = SubmitProofRequest {
+        let request = ProveBlockRangeRequest {
             proof: ProofRequest {
                 session_id: Some("proof-session".to_owned()),
                 request: ProofRequestKind::Compressed(ZkProofRequest {
@@ -475,15 +368,15 @@ mod tests {
             value,
             json!({
                 "proof": {
-                    "sessionId": "proof-session",
+                    "session_id": "proof-session",
                     "request": {
-                        "proofType": "compressed",
+                        "proof_type": "compressed",
                         "payload": {
-                            "startBlockNumber": 10,
-                            "numberOfBlocksToProve": 20,
-                            "l1Head": format!("{:#x}", B256::repeat_byte(0xab)),
-                            "intermediateRootInterval": 128,
-                            "zkVm": "sp1"
+                            "start_block_number": 10,
+                            "number_of_blocks_to_prove": 20,
+                            "l1_head": format!("{:#x}", B256::repeat_byte(0xab)),
+                            "intermediate_root_interval": 128,
+                            "zk_vm": "sp1"
                         }
                     }
                 }
@@ -494,6 +387,168 @@ mod tests {
     #[test]
     fn tee_request_uses_hex_encoded_fixed_values() {
         let request = TeeProofRequest {
+            proof: PrimitiveProofRequest {
+                l1_head: B256::repeat_byte(1),
+                agreed_l2_head_hash: B256::repeat_byte(2),
+                agreed_l2_output_root: B256::repeat_byte(3),
+                claimed_l2_output_root: B256::repeat_byte(4),
+                claimed_l2_block_number: 5,
+                proposer: address!("0000000000000000000000000000000000000006"),
+                intermediate_block_interval: 7,
+                l1_head_number: 8,
+                image_hash: B256::repeat_byte(9),
+            },
+            tee_kind: TeeKind::AwsNitro,
+        };
+
+        let value = serde_json::to_value(request).expect("tee request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "proof": {
+                    "l1_head": format!("{:#x}", B256::repeat_byte(1)),
+                    "agreed_l2_head_hash": format!("{:#x}", B256::repeat_byte(2)),
+                    "agreed_l2_output_root": format!("{:#x}", B256::repeat_byte(3)),
+                    "claimed_l2_output_root": format!("{:#x}", B256::repeat_byte(4)),
+                    "claimed_l2_block_number": 5,
+                    "proposer": "0x0000000000000000000000000000000000000006",
+                    "intermediate_block_interval": 7,
+                    "l1_head_number": 8,
+                    "image_hash": format!("{:#x}", B256::repeat_byte(9)),
+                },
+                "tee_kind": "aws_nitro",
+            })
+        );
+    }
+
+    #[test]
+    fn tee_request_requires_tee_kind() {
+        let result = serde_json::from_value::<TeeProofRequest>(json!({
+            "proof": {
+                "l1_head": format!("{:#x}", B256::repeat_byte(1)),
+                "agreed_l2_head_hash": format!("{:#x}", B256::repeat_byte(2)),
+                "agreed_l2_output_root": format!("{:#x}", B256::repeat_byte(3)),
+                "claimed_l2_output_root": format!("{:#x}", B256::repeat_byte(4)),
+                "claimed_l2_block_number": 5,
+                "proposer": "0x0000000000000000000000000000000000000006",
+                "intermediate_block_interval": 7,
+                "l1_head_number": 8,
+                "image_hash": format!("{:#x}", B256::repeat_byte(9)),
+            }
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tee_request_rejects_flat_shape() {
+        let result = serde_json::from_value::<TeeProofRequest>(json!({
+            "l1_head": format!("{:#x}", B256::repeat_byte(1)),
+            "agreed_l2_head_hash": format!("{:#x}", B256::repeat_byte(2)),
+            "agreed_l2_output_root": format!("{:#x}", B256::repeat_byte(3)),
+            "claimed_l2_output_root": format!("{:#x}", B256::repeat_byte(4)),
+            "claimed_l2_block_number": 5,
+            "proposer": "0x0000000000000000000000000000000000000006",
+            "intermediate_block_interval": 7,
+            "l1_head_number": 8,
+            "image_hash": format!("{:#x}", B256::repeat_byte(9)),
+            "tee_kind": "aws_nitro"
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tee_result_uses_flat_proposal_shape() {
+        let aggregate_proposal = tee_proposal(1, 20);
+        let proposal = tee_proposal(2, 19);
+        let result = ProofResult::Tee(TeeProofResult {
+            aggregate_proposal: aggregate_proposal.clone(),
+            proposals: vec![proposal.clone()],
+            tee_kind: TeeKind::AwsNitro,
+        });
+
+        let value = serde_json::to_value(result).expect("tee result should serialize");
+
+        assert_eq!(value["proof_type"], json!("tee"));
+        assert_eq!(value["payload"]["tee_kind"], json!("aws_nitro"));
+        assert_eq!(
+            value["payload"]["aggregate_proposal"],
+            json!({
+                "output_root": format!("{:#x}", aggregate_proposal.output_root),
+                "signature": "0x010101",
+                "l1_origin_hash": format!("{:#x}", aggregate_proposal.l1_origin_hash),
+                "l1_origin_number": aggregate_proposal.l1_origin_number,
+                "l2_block_number": aggregate_proposal.l2_block_number,
+                "prev_output_root": format!("{:#x}", aggregate_proposal.prev_output_root),
+                "config_hash": format!("{:#x}", aggregate_proposal.config_hash),
+            })
+        );
+        assert_eq!(
+            value["payload"]["proposals"][0],
+            json!({
+                "output_root": format!("{:#x}", proposal.output_root),
+                "signature": "0x020202",
+                "l1_origin_hash": format!("{:#x}", proposal.l1_origin_hash),
+                "l1_origin_number": proposal.l1_origin_number,
+                "l2_block_number": proposal.l2_block_number,
+                "prev_output_root": format!("{:#x}", proposal.prev_output_root),
+                "config_hash": format!("{:#x}", proposal.config_hash),
+            })
+        );
+    }
+
+    #[test]
+    fn tee_result_rejects_nested_proof_shape() {
+        let aggregate_proposal = tee_proposal(1, 20);
+        let result = serde_json::from_value::<ProofResult>(json!({
+            "proof_type": "tee",
+            "payload": {
+                "proof": {
+                    "aggregate_proposal": {
+                        "output_root": format!("{:#x}", aggregate_proposal.output_root),
+                        "signature": "0x010101",
+                        "l1_origin_hash": format!("{:#x}", aggregate_proposal.l1_origin_hash),
+                        "l1_origin_number": aggregate_proposal.l1_origin_number,
+                        "l2_block_number": aggregate_proposal.l2_block_number,
+                        "prev_output_root": format!("{:#x}", aggregate_proposal.prev_output_root),
+                        "config_hash": format!("{:#x}", aggregate_proposal.config_hash),
+                    },
+                    "proposals": []
+                },
+                "tee_kind": "aws_nitro"
+            }
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tee_result_requires_aggregate_proposal() {
+        let proposal = tee_proposal(2, 19);
+        let result = serde_json::from_value::<ProofResult>(json!({
+            "proof_type": "tee",
+            "payload": {
+                "proposals": [{
+                    "output_root": format!("{:#x}", proposal.output_root),
+                    "signature": "0x020202",
+                    "l1_origin_hash": format!("{:#x}", proposal.l1_origin_hash),
+                    "l1_origin_number": proposal.l1_origin_number,
+                    "l2_block_number": proposal.l2_block_number,
+                    "prev_output_root": format!("{:#x}", proposal.prev_output_root),
+                    "config_hash": format!("{:#x}", proposal.config_hash),
+                }],
+                "tee_kind": "aws_nitro"
+            }
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tee_proof_payload_uses_hex_encoded_fixed_values() {
+        let request = PrimitiveProofRequest {
             l1_head: B256::repeat_byte(1),
             agreed_l2_head_hash: B256::repeat_byte(2),
             agreed_l2_output_root: B256::repeat_byte(3),
@@ -503,22 +558,70 @@ mod tests {
             intermediate_block_interval: 7,
             l1_head_number: 8,
             image_hash: B256::repeat_byte(9),
+        };
+
+        let value = serde_json::to_value(request).expect("tee request payload should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "l1_head": format!("{:#x}", B256::repeat_byte(1)),
+                "agreed_l2_head_hash": format!("{:#x}", B256::repeat_byte(2)),
+                "agreed_l2_output_root": format!("{:#x}", B256::repeat_byte(3)),
+                "claimed_l2_output_root": format!("{:#x}", B256::repeat_byte(4)),
+                "claimed_l2_block_number": 5,
+                "proposer": "0x0000000000000000000000000000000000000006",
+                "intermediate_block_interval": 7,
+                "l1_head_number": 8,
+                "image_hash": format!("{:#x}", B256::repeat_byte(9)),
+            })
+        );
+    }
+
+    #[test]
+    fn tee_proposal_uses_hex_encoded_fixed_values() {
+        let aggregate_proposal = tee_proposal(1, 20);
+        let proposal = tee_proposal(2, 19);
+        let result = TeeProofResult {
+            aggregate_proposal: aggregate_proposal.clone(),
+            proposals: vec![proposal.clone()],
             tee_kind: TeeKind::AwsNitro,
         };
 
-        let value = serde_json::to_value(request).expect("tee request should serialize");
+        let value = serde_json::to_value(result).expect("tee result payload should serialize");
 
-        assert_eq!(value["l1Head"], json!(format!("{:#x}", B256::repeat_byte(1))));
-        assert_eq!(value["proposer"], json!("0x0000000000000000000000000000000000000006"));
-        assert_eq!(value["teeKind"], json!("aws_nitro"));
+        assert_eq!(
+            value["aggregate_proposal"],
+            json!({
+                "output_root": format!("{:#x}", aggregate_proposal.output_root),
+                "signature": "0x010101",
+                "l1_origin_hash": format!("{:#x}", aggregate_proposal.l1_origin_hash),
+                "l1_origin_number": aggregate_proposal.l1_origin_number,
+                "l2_block_number": aggregate_proposal.l2_block_number,
+                "prev_output_root": format!("{:#x}", aggregate_proposal.prev_output_root),
+                "config_hash": format!("{:#x}", aggregate_proposal.config_hash),
+            })
+        );
+        assert_eq!(
+            value["proposals"][0],
+            json!({
+                "output_root": format!("{:#x}", proposal.output_root),
+                "signature": "0x020202",
+                "l1_origin_hash": format!("{:#x}", proposal.l1_origin_hash),
+                "l1_origin_number": proposal.l1_origin_number,
+                "l2_block_number": proposal.l2_block_number,
+                "prev_output_root": format!("{:#x}", proposal.prev_output_root),
+                "config_hash": format!("{:#x}", proposal.config_hash),
+            })
+        );
     }
 
     #[test]
     fn omitted_optional_fields_deserialize_to_none() {
         let request: ZkProofRequest = serde_json::from_value(json!({
-            "startBlockNumber": 10,
-            "numberOfBlocksToProve": 20,
-            "zkVm": "sp1"
+            "start_block_number": 10,
+            "number_of_blocks_to_prove": 20,
+            "zk_vm": "sp1"
         }))
         .expect("zk request should accept omitted optional fields");
 
@@ -538,33 +641,109 @@ mod tests {
     #[test]
     fn zk_l1_head_rejects_malformed_hash() {
         let result = serde_json::from_value::<ZkProofRequest>(json!({
-            "startBlockNumber": 10,
-            "numberOfBlocksToProve": 20,
-            "l1Head": "0xabc",
-            "zkVm": "sp1"
+            "start_block_number": 10,
+            "number_of_blocks_to_prove": 20,
+            "l1_head": "0xabc",
+            "zk_vm": "sp1"
         }));
 
         assert!(result.is_err());
     }
 
     #[test]
-    fn claim_request_defaults_omitted_filters_to_empty_lists() {
-        let request: ClaimProofJobRequest = serde_json::from_value(json!({
-            "proofType": "compressed",
-            "workerId": "worker-1",
-            "leaseDurationSeconds": 30
-        }))
-        .expect("claim request should accept omitted optional filters");
+    fn get_next_proof_request_serializes_as_worker_claim() {
+        let request = GetNextProofRequest {
+            worker_id: "worker-1".to_owned(),
+            proof_type: ProofType::Compressed,
+            tee_kinds: Vec::new(),
+            zk_vms: vec![ZkVm::Sp1],
+            lock_duration_seconds: 30,
+        };
+
+        let value = serde_json::to_value(request).expect("get next proof request should serialize");
 
         assert_eq!(
-            request,
-            ClaimProofJobRequest {
-                proof_type: ProofType::Compressed,
-                worker_id: "worker-1".to_owned(),
-                lease_duration_seconds: 30,
-                tee_kinds: Vec::new(),
-                zk_vms: Vec::new(),
-            }
+            value,
+            json!({
+                "worker_id": "worker-1",
+                "proof_type": "compressed",
+                "tee_kinds": [],
+                "zk_vms": ["sp1"],
+                "lock_duration_seconds": 30
+            })
         );
+    }
+
+    #[test]
+    fn get_next_proof_request_defaults_omitted_capability_lists() {
+        let request: GetNextProofRequest = serde_json::from_value(json!({
+            "worker_id": "worker-1",
+            "proof_type": "compressed",
+            "lock_duration_seconds": 30
+        }))
+        .expect("get next proof request should accept omitted capability lists");
+
+        assert_eq!(request.tee_kinds, Vec::new());
+        assert_eq!(request.zk_vms, Vec::new());
+    }
+
+    #[test]
+    fn worker_ownership_requests_require_lock_fencing_token() {
+        let heartbeat = HeartbeatRequest {
+            session_id: "session-1".to_owned(),
+            lock_id: "lock-1".to_owned(),
+            worker_id: "worker-1".to_owned(),
+            lock_duration_seconds: 30,
+        };
+
+        let heartbeat_value = serde_json::to_value(heartbeat).expect("heartbeat should serialize");
+        assert_eq!(heartbeat_value["lock_id"], json!("lock-1"));
+        assert!(
+            serde_json::from_value::<HeartbeatRequest>(json!({
+                "session_id": "session-1",
+                "worker_id": "worker-1",
+                "lock_duration_seconds": 30,
+            }))
+            .is_err()
+        );
+
+        let submit = WorkerSubmitProofRequest {
+            session_id: "session-1".to_owned(),
+            lock_id: "lock-1".to_owned(),
+            worker_id: "worker-1".to_owned(),
+            result: ProofResult::Compressed(ZkProofResult {
+                zk_vm: ZkVm::Sp1,
+                proof: vec![1, 2, 3].into(),
+            }),
+        };
+
+        let submit_value = serde_json::to_value(submit).expect("submit should serialize");
+        assert_eq!(submit_value["lock_id"], json!("lock-1"));
+        assert!(
+            serde_json::from_value::<WorkerSubmitProofRequest>(json!({
+                "session_id": "session-1",
+                "worker_id": "worker-1",
+                "result": {
+                    "proof_type": "compressed",
+                    "payload": {
+                        "zk_vm": "sp1",
+                        "proof": "0x010203"
+                    }
+                }
+            }))
+            .is_err()
+        );
+    }
+
+    fn tee_proposal(byte: u8, l2_block_number: u64) -> Proposal {
+        Proposal {
+            output_root: B256::repeat_byte(byte),
+            signature: Bytes::from(vec![byte; 3]),
+            l1_origin_hash: B256::repeat_byte(byte + 1),
+            l1_origin_number: u64::from(byte) + 100,
+            l2_block_number,
+            prev_output_root: B256::repeat_byte(byte + 2),
+            config_hash: B256::repeat_byte(byte + 3),
+        }
     }
 }

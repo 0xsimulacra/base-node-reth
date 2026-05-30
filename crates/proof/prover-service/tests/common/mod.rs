@@ -2,10 +2,12 @@
 
 use alloy_primitives::{Address, B256};
 use anyhow::{Context, Result, bail};
+use base_proof_primitives::ProofRequest as PrimitiveProofRequest;
 pub(crate) use base_prover_service::ProveBlockRequest;
 use base_prover_service_protocol::{
-    ProofRequest, ProofRequestKind, ProverRequesterApiClient, SnarkGroth16ProofRequest,
-    SubmitProofRequest, SubmitProofResponse, TeeKind, TeeProofRequest, ZkProofRequest, ZkVm,
+    ProofRequest, ProofRequestKind, ProveBlockRangeRequest, ProveBlockRangeResponse,
+    ProverRequesterApiClient, SnarkGroth16ProofRequest, TeeKind, TeeProofRequest, ZkProofRequest,
+    ZkVm,
 };
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 
@@ -22,12 +24,12 @@ pub(crate) fn connect() -> HttpClient {
 pub(crate) async fn prove_block(
     client: &HttpClient,
     request: ProveBlockRequest,
-) -> Result<SubmitProofResponse> {
-    let request = to_submit_proof_request(request)?;
-    client.submit_proof(request).await.context("submit_proof failed")
+) -> Result<ProveBlockRangeResponse> {
+    let request = to_prove_block_range_request(request)?;
+    client.prove_block_range(request).await.context("prove_block_range failed")
 }
 
-fn to_submit_proof_request(request: ProveBlockRequest) -> Result<SubmitProofRequest> {
+fn to_prove_block_range_request(request: ProveBlockRequest) -> Result<ProveBlockRangeRequest> {
     let l1_head = request
         .l1_head
         .as_deref()
@@ -54,19 +56,23 @@ fn to_submit_proof_request(request: ProveBlockRequest) -> Result<SubmitProofRequ
             ProofRequestKind::SnarkGroth16(SnarkGroth16ProofRequest { proof, prover_address })
         }
         -1 => ProofRequestKind::Tee(TeeProofRequest {
-            l1_head: B256::ZERO,
-            agreed_l2_head_hash: B256::ZERO,
-            agreed_l2_output_root: B256::ZERO,
-            claimed_l2_output_root: B256::ZERO,
-            claimed_l2_block_number: 0,
-            proposer: Address::ZERO,
-            intermediate_block_interval: 0,
-            l1_head_number: 0,
-            image_hash: B256::ZERO,
+            proof: PrimitiveProofRequest {
+                l1_head: B256::ZERO,
+                agreed_l2_head_hash: B256::ZERO,
+                agreed_l2_output_root: B256::ZERO,
+                claimed_l2_output_root: B256::ZERO,
+                claimed_l2_block_number: 0,
+                proposer: Address::ZERO,
+                intermediate_block_interval: 0,
+                l1_head_number: 0,
+                image_hash: B256::ZERO,
+            },
             tee_kind: TeeKind::AwsNitro,
         }),
         proof_type => bail!("invalid proof_type {proof_type}"),
     };
 
-    Ok(SubmitProofRequest { proof: ProofRequest { session_id: request.session_id, request: body } })
+    Ok(ProveBlockRangeRequest {
+        proof: ProofRequest { session_id: request.session_id, request: body },
+    })
 }
