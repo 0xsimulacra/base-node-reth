@@ -1,8 +1,8 @@
 name: Base Std Fork Tests
 
 on:
-  # pull_request:
-  # merge_group:
+  pull_request:
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -18,6 +18,7 @@ env:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   fork-tests:
@@ -46,6 +47,10 @@ jobs:
 
       - name: Clone fork-test repositories
         shell: bash
+        env:
+          # BASE_STD_TOKEN must be a PAT with Contents:Read on base/base-std.
+          # GITHUB_TOKEN is repo-scoped and cannot access other repos, even internal ones.
+          GH_TOKEN: ${{ secrets.BASE_STD_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -53,9 +58,10 @@ jobs:
           rm -rf "$workdir"
           mkdir -p "$workdir"
 
-          git clone --depth 1 --single-branch --recurse-submodules --shallow-submodules \
-            --branch "$BASE_STD_REF" \
-            https://github.com/base/base-std.git "$workdir/base-std"
+          # base-std is internal — use gh CLI with a cross-repo PAT.
+          gh repo clone base/base-std "$workdir/base-std" -- \
+            --depth 1 --single-branch --branch "$BASE_STD_REF" \
+            --recurse-submodules --shallow-submodules
           git clone --depth 1 --single-branch --branch "$BASE_ANVIL_REF" \
             https://github.com/base/base-anvil.git "$workdir/base-anvil"
 
@@ -88,4 +94,56 @@ jobs:
           ANVIL_BIN="$BASE_ANVIL_DIR/target/release/anvil" \
             FORGE_BIN="$BASE_ANVIL_DIR/target/release/forge" \
             ANVIL_LOG="$RUNNER_TEMP/base-std-anvil.log" \
-            ./script/run-fork-tests.sh
+            ./script/run-fork-tests.sh 2>&1 | tee "$RUNNER_TEMP/fork-test-output.txt"
+
+      - name: Comment fork test results on PR
+        if: github.event_name == 'pull_request' && always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          output="$RUNNER_TEMP/fork-test-output.txt"
+          passed=$(grep -c '\[PASS\]' "$output" 2>/dev/null || echo 0)
+          failed=$(grep -c '\[FAIL' "$output" 2>/dev/null || echo 0)
+          marker="<!-- fork-test-results -->"
+
+          if [ ! -s "$output" ] || [ "$((passed + failed))" -eq 0 ]; then
+            body="${marker}
+### ❌ base-std fork tests did not run
+The build or setup step failed before any tests could execute. Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+          elif [ "$failed" -eq 0 ]; then
+            body="${marker}
+### ✅ base-std fork tests: all ${passed} passed
+base/base is fully in sync with the base-std spec."
+          else
+            failing=$(grep '\[FAIL' "$output" \
+              | sed 's/\x1B\[[0-9;]*m//g' \
+              | sed 's/^\[FAIL: \(.*\)\] \(.*\) (runs.*$/- **\2**: `\1`/' \
+              | sort -u || true)
+            body="${marker}
+### ❌ base-std fork tests: ${failed} failed, ${passed} passed
+
+base/base diverges from the base-std spec.
+
+<details>
+<summary>Failing tests</summary>
+
+${failing}
+
+</details>"
+          fi
+
+          pr="${{ github.event.pull_request.number }}"
+          repo="${{ github.repository }}"
+
+          existing_id=$(gh api "repos/${repo}/issues/${pr}/comments" \
+            --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" \
+            | head -1)
+
+          if [ -n "$existing_id" ]; then
+            gh api "repos/${repo}/issues/comments/${existing_id}" \
+              -X PATCH --field body="$body" > /dev/null
+          else
+            gh api "repos/${repo}/issues/${pr}/comments" \
+              --field body="$body" > /dev/null
+          fi
