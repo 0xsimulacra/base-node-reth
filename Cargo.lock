@@ -3594,6 +3594,7 @@ dependencies = [
  "base-proof-primitives",
  "base-proof-rpc",
  "base-protocol",
+ "base-prover-service-protocol",
  "base-runtime",
  "base-tx-manager",
  "base-zk-client",
@@ -5875,7 +5876,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -6049,6 +6049,7 @@ dependencies = [
  "jsonrpsee",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
