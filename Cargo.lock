@@ -5856,6 +5856,7 @@ dependencies = [
  "base-proof-contracts",
  "base-proof-primitives",
  "base-proof-rpc",
+ "base-prover-service-client",
  "base-prover-service-protocol",
  "base-tx-manager",
  "clap",
