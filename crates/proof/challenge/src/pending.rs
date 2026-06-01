@@ -17,6 +17,8 @@ use base_prover_service_client::ProofRequesterProvider;
 use base_prover_service_protocol::{GetProofRequest, ProofStatus, SnarkGroth16ProofRequest};
 use tracing::warn;
 
+use crate::ChallengerProofAdapter;
+
 /// The kind of proof being generated.
 #[derive(Debug, Clone)]
 pub enum ProofKind {
@@ -123,6 +125,24 @@ impl PendingProof {
         }
     }
 
+    /// Creates a new TEE `PendingProof` in the `AwaitingProof` phase.
+    pub fn awaiting_tee(
+        session_id: String,
+        invalid_index: u64,
+        expected_root: B256,
+        zk_fallback_request: Option<SnarkGroth16ProofRequest>,
+        zk_fallback_intent: Option<DisputeIntent>,
+    ) -> Self {
+        Self {
+            phase: ProofPhase::AwaitingProof { session_id, started_at: Instant::now() },
+            kind: ProofKind::Tee { zk_fallback_request, zk_fallback_intent },
+            invalid_index,
+            expected_root,
+            retry_count: 0,
+            intent: DisputeIntent::Nullify,
+        }
+    }
+
     /// Creates a new ZK `PendingProof` in the `ReadyToSubmit` phase.
     pub const fn ready(
         proof_bytes: Bytes,
@@ -138,29 +158,6 @@ impl PendingProof {
             expected_root,
             retry_count: 0,
             intent,
-        }
-    }
-
-    /// Creates a new TEE `PendingProof` in the `ReadyToSubmit` phase.
-    ///
-    /// TEE proofs always target `nullify()`. If the TEE transaction
-    /// submission fails, the driver will fall back to a ZK proof using the
-    /// provided `zk_fallback_request` and `zk_fallback_intent`. When either
-    /// is `None` the driver drops the entry instead of falling back.
-    pub const fn ready_tee(
-        proof_bytes: Bytes,
-        invalid_index: u64,
-        expected_root: B256,
-        zk_fallback_request: Option<SnarkGroth16ProofRequest>,
-        zk_fallback_intent: Option<DisputeIntent>,
-    ) -> Self {
-        Self {
-            phase: ProofPhase::ReadyToSubmit { proof_bytes },
-            kind: ProofKind::Tee { zk_fallback_request, zk_fallback_intent },
-            invalid_index,
-            expected_root,
-            retry_count: 0,
-            intent: DisputeIntent::Nullify,
         }
     }
 
@@ -286,8 +283,29 @@ impl PendingProofs {
                     pending.phase = ProofPhase::NeedsRetry;
                     return Ok(Some(ProofUpdate::NeedsRetry));
                 };
-                let proof_bytes =
-                    crate::ChallengerProofAdapter::snark_groth16_dispute_proof_bytes(result)?;
+                let proof_bytes = match &pending.kind {
+                    ProofKind::Zk { .. } => {
+                        ChallengerProofAdapter::snark_groth16_dispute_proof_bytes(result)?
+                    }
+                    ProofKind::Tee { .. } => {
+                        match ChallengerProofAdapter::tee_dispute_proof_bytes(
+                            result,
+                            pending.expected_root,
+                        ) {
+                            Ok(proof_bytes) => proof_bytes,
+                            Err(e) => {
+                                warn!(
+                                    game = %game,
+                                    error = %e,
+                                    "TEE proof validation failed, falling back to ZK"
+                                );
+                                pending.retry_count += 1;
+                                pending.phase = ProofPhase::NeedsRetry;
+                                return Ok(Some(ProofUpdate::NeedsRetry));
+                            }
+                        }
+                    }
+                };
                 let update = ProofUpdate::Ready(proof_bytes.clone());
 
                 pending.phase = ProofPhase::ReadyToSubmit { proof_bytes };
