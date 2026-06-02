@@ -31,6 +31,10 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
     pub const OPERATOR_ROLE: B256 =
         b256!("97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929");
 
+    /// Role identifier for metadata updaters: `keccak256("METADATA_ROLE")`.
+    pub const METADATA_ROLE: B256 =
+        b256!("6bd6b5318a46e5fff572d5e4258a20774aab40cc35ac7680654b9081fcc82f80");
+
     /// Policy scope identifier for redeem senders: `keccak256("REDEEM_SENDER_POLICY")`.
     pub const REDEEM_SENDER_POLICY: B256 = B20AssetStorage::REDEEM_SENDER_POLICY;
 
@@ -110,6 +114,11 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
     /// Ensures the caller has the security operator role.
     pub fn ensure_operator_role(&self, caller: Address, privileged: bool) -> Result<()> {
         if privileged { Ok(()) } else { self.ensure_role(caller, Self::OPERATOR_ROLE) }
+    }
+
+    /// Ensures the caller has the metadata role.
+    pub fn ensure_metadata_role(&self, caller: Address, privileged: bool) -> Result<()> {
+        if privileged { Ok(()) } else { self.ensure_role(caller, Self::METADATA_ROLE) }
     }
 
     /// Ensures the caller has the default admin role.
@@ -210,7 +219,7 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
         value: String,
         privileged: bool,
     ) -> Result<()> {
-        self.ensure_operator_role(caller, privileged)?;
+        self.ensure_metadata_role(caller, privileged)?;
         if identifier_type.is_empty() {
             return Err(BasePrecompileError::revert(IB20Asset::InvalidIdentifierType {}));
         }
@@ -503,6 +512,7 @@ mod tests {
     #[test]
     fn role_and_policy_ids_match_solidity_hashes() {
         assert_eq!(TestSecurityToken::OPERATOR_ROLE, keccak256("OPERATOR_ROLE"));
+        assert_eq!(TestSecurityToken::METADATA_ROLE, keccak256("METADATA_ROLE"));
         assert_eq!(TestSecurityToken::REDEEM_SENDER_POLICY, keccak256("REDEEM_SENDER_POLICY"));
     }
 
@@ -540,5 +550,27 @@ mod tests {
         let err = token.update_policy(CALLER, invalid_scope, 999, false).unwrap_err();
 
         assert_eq!(err, expected_update_policy_error(setup, invalid_scope));
+    }
+
+    /// Caller holding only `OPERATOR_ROLE` must be denied `updateExtraMetadata`.
+    ///
+    /// This guards against regressions where `ensure_metadata_role` is accidentally
+    /// reverted to `ensure_operator_role`, collapsing the two distinct capabilities.
+    #[test]
+    fn update_extra_metadata_requires_metadata_role_not_operator_role() {
+        let mut token = make_token();
+        token.accounting_mut().roles.insert((TestSecurityToken::OPERATOR_ROLE, CALLER), true);
+
+        let err = token
+            .update_extra_metadata(CALLER, "ISIN".to_string(), "US0000000000".to_string(), false)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            BasePrecompileError::revert(IB20::AccessControlUnauthorizedAccount {
+                account: CALLER,
+                neededRole: TestSecurityToken::METADATA_ROLE,
+            })
+        );
     }
 }
