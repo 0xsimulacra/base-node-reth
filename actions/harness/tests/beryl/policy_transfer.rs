@@ -231,7 +231,7 @@ struct PolicyTransferScenario {
 }
 
 impl PolicyTransferScenario {
-    /// Sets up with `TOKEN_FACTORY`, `B20_TOKEN`, and `POLICY_REGISTRY` active, creates a custom
+    /// Sets up with `TOKEN_FACTORY`, `B20_ASSET`, and `POLICY_REGISTRY` active, creates a custom
     /// `policy_type` policy (Alice as admin), then deploys a B-20 token with the
     /// `TRANSFER_SENDER_POLICY` wired to that policy via an `updatePolicy` init call.
     async fn new_with_custom_policy(
@@ -249,14 +249,14 @@ impl PolicyTransferScenario {
         // Activate all three features in one block.
         let activate_factory =
             scenario.env.activate_feature_tx(BerylTestEnv::b20_factory_feature());
-        let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_token_feature());
+        let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_asset_feature());
         let activate_registry =
             scenario.env.activate_feature_tx(BerylTestEnv::policy_registry_feature());
         let block = scenario
             .build_block_with_transactions(vec![activate_factory, activate_b20, activate_registry])
             .await;
         assert!(scenario.env.user_tx_succeeded(&block, 0), "TOKEN_FACTORY activation must succeed");
-        assert!(scenario.env.user_tx_succeeded(&block, 1), "B20_TOKEN activation must succeed");
+        assert!(scenario.env.user_tx_succeeded(&block, 1), "B20_ASSET activation must succeed");
         assert!(
             scenario.env.user_tx_succeeded(&block, 2),
             "POLICY_REGISTRY activation must succeed"
@@ -302,14 +302,14 @@ impl PolicyTransferScenario {
 
         let activate_factory =
             scenario.env.activate_feature_tx(BerylTestEnv::b20_factory_feature());
-        let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_token_feature());
+        let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_asset_feature());
         let activate_registry =
             scenario.env.activate_feature_tx(BerylTestEnv::policy_registry_feature());
         let block = scenario
             .build_block_with_transactions(vec![activate_factory, activate_b20, activate_registry])
             .await;
         assert!(scenario.env.user_tx_succeeded(&block, 0), "TOKEN_FACTORY activation must succeed");
-        assert!(scenario.env.user_tx_succeeded(&block, 1), "B20_TOKEN activation must succeed");
+        assert!(scenario.env.user_tx_succeeded(&block, 1), "B20_ASSET activation must succeed");
         assert!(
             scenario.env.user_tx_succeeded(&block, 2),
             "POLICY_REGISTRY activation must succeed"
@@ -326,7 +326,7 @@ impl PolicyTransferScenario {
         scenario
     }
 
-    /// Sets up with `TOKEN_FACTORY` and `B20_TOKEN` active, then deploys a B-20 token without
+    /// Sets up with `TOKEN_FACTORY` and `B20_ASSET` active, then deploys a B-20 token without
     /// an `updatePolicy` init call. The `TRANSFER_SENDER_POLICY` slot defaults to `ALWAYS_ALLOW` (0),
     /// so all transfers are permitted.
     async fn new_with_default_policy() -> Self {
@@ -339,11 +339,11 @@ impl PolicyTransferScenario {
 
         let activate_factory =
             scenario.env.activate_feature_tx(BerylTestEnv::b20_factory_feature());
-        let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_token_feature());
+        let activate_b20 = scenario.env.activate_feature_tx(BerylTestEnv::b20_asset_feature());
         let block =
             scenario.build_block_with_transactions(vec![activate_factory, activate_b20]).await;
         assert!(scenario.env.user_tx_succeeded(&block, 0), "TOKEN_FACTORY activation must succeed");
-        assert!(scenario.env.user_tx_succeeded(&block, 1), "B20_TOKEN activation must succeed");
+        assert!(scenario.env.user_tx_succeeded(&block, 1), "B20_ASSET activation must succeed");
 
         // No updatePolicy init call: the TRANSFER_SENDER_POLICY slot reads zero (ALWAYS_ALLOW).
         let create_token = scenario.create_token_tx(None);
@@ -384,7 +384,7 @@ impl PolicyTransferScenario {
             TxKind::Call(B20FactoryStorage::ADDRESS),
             Bytes::from(
                 IB20Factory::createB20Call {
-                    variant: IB20Factory::B20Variant::DEFAULT,
+                    variant: IB20Factory::B20Variant::ASSET,
                     salt: BerylTestEnv::b20_token_salt(),
                     params: Self::token_params().abi_encode().into(),
                     initCalls: init_calls,
@@ -428,12 +428,14 @@ impl PolicyTransferScenario {
         self.env.derive_blocks(self.blocks, expected_safe_head).await;
     }
 
-    fn token_params() -> IB20Factory::B20CreateParams {
-        IB20Factory::B20CreateParams {
-            version: B20Variant::B20.supported_version(),
+    fn token_params() -> IB20Factory::B20AssetCreateParams {
+        IB20Factory::B20AssetCreateParams {
+            version: B20Variant::Asset.supported_version(),
             name: "Policy B20".to_string(),
             symbol: "PB20".to_string(),
             initialAdmin: BerylTestEnv::alice(),
+            isin: String::new(),
+            minimumRedeemable: U256::ZERO,
         }
     }
 }
