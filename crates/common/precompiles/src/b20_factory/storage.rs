@@ -1238,4 +1238,13 @@ mod tests {
         assert_eq!(params.version, super::B20_STABLECOIN_EVENT_PARAMS_VERSION);
         assert_eq!(params.currency, "USD");
     }
+
+    #[test]
+    fn variant_supported_versions_are_nonzero() {
+        // Each variant has its own match arm in supported_version() so adding a new
+        // variant without an explicit version is a compile error, preventing silent
+        // constant sharing.
+        assert!(B20Variant::Stablecoin.supported_version() > 0);
+        assert!(B20Variant::Asset.supported_version() > 0);
+    }
 }
