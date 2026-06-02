@@ -16,7 +16,7 @@ use crate::{
 /// EVM precompile for the asset B-20 variant.
 ///
 /// Mirrors the structure of [`crate::B20Token`] but requires `S: SecurityAccounting`
-/// so the dispatch layer can read and write security-specific storage (share ratio,
+/// so the dispatch layer can read and write security-specific storage (multiplier,
 /// security identifiers, announcement IDs). The `in_announcement` flag guards against
 /// recursive `announce` calls within a single precompile invocation.
 #[derive(Debug, Clone)]
@@ -154,32 +154,32 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
         )
     }
 
-    // --- Share Ratio Operations ---
+    // --- Multiplier Operations ---
 
-    /// Converts a token balance to shares: `balance * sharesToTokensRatio / WAD`.
-    pub fn to_shares(&self, balance: U256) -> Result<U256> {
-        let ratio = self.accounting().shares_to_tokens_ratio()?;
-        let product = balance.checked_mul(ratio).ok_or_else(BasePrecompileError::under_overflow)?;
+    /// Converts a raw balance to its scaled view: `rawBalance * multiplier / WAD`.
+    pub fn to_scaled_balance(&self, raw_balance: U256) -> Result<U256> {
+        let m = self.accounting().multiplier()?;
+        let product = raw_balance.checked_mul(m).ok_or_else(BasePrecompileError::under_overflow)?;
         Ok(product / B20AssetStorage::WAD)
     }
 
-    /// Returns the shares for an account (balance converted to shares).
-    pub fn shares_of(&self, account: Address) -> Result<U256> {
+    /// Returns the scaled balance for an account.
+    pub fn scaled_balance_of(&self, account: Address) -> Result<U256> {
         let balance = self.accounting().balance_of(account)?;
-        self.to_shares(balance)
+        self.to_scaled_balance(balance)
     }
 
-    /// Updates the share-to-tokens ratio.
-    pub fn update_share_ratio(
+    /// Sets a new multiplier.
+    pub fn update_multiplier(
         &mut self,
         caller: Address,
-        new_ratio: U256,
+        new_multiplier: U256,
         privileged: bool,
     ) -> Result<()> {
         self.ensure_operator_role(caller, privileged)?;
-        self.accounting_mut().set_shares_to_tokens_ratio(new_ratio)?;
+        self.accounting_mut().set_multiplier(new_multiplier)?;
         self.accounting_mut().emit_event(
-            IB20Asset::ShareRatioUpdated { sharesToTokensRatio: new_ratio }.encode_log_data(),
+            IB20Asset::MultiplierUpdated { multiplier: new_multiplier }.encode_log_data(),
         )
     }
 
@@ -223,10 +223,10 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
 
     // --- Security Redeem Operations ---
 
-    /// Performs a security-specific redeem: share-based floor check, burn, security `Redeemed` event.
+    /// Performs a security-specific redeem: multiplier floor check, burn, security `Redeemed` event.
     pub fn security_redeem(&mut self, caller: Address, amount: U256) -> Result<()> {
-        let ratio = self.security_redeem_burn(caller, amount)?;
-        self.emit_redeemed(caller, amount, ratio)
+        let multiplier = self.security_redeem_burn(caller, amount)?;
+        self.emit_redeemed(caller, amount, multiplier)
     }
 
     /// [`Self::security_redeem`] with a memo emitted between `Transfer` and `Redeemed`.
@@ -236,24 +236,24 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
         amount: U256,
         memo: B256,
     ) -> Result<()> {
-        let ratio = self.security_redeem_burn(caller, amount)?;
+        let multiplier = self.security_redeem_burn(caller, amount)?;
         self.accounting_mut().emit_event(IB20::Memo { caller, memo }.encode_log_data())?;
-        self.emit_redeemed(caller, amount, ratio)
+        self.emit_redeemed(caller, amount, multiplier)
     }
 
-    /// Performs the shared security redeem burn and returns the ratio used for the floor check.
+    /// Performs the shared security redeem burn and returns the multiplier used for the floor check.
     fn security_redeem_burn(&mut self, caller: Address, amount: U256) -> Result<U256> {
         B20Guards::ensure_not_paused::<Self>(self, IB20::PausableFeature::REDEEM)?;
         B20Guards::ensure_policy::<Self>(self, Self::REDEEM_SENDER_POLICY, caller)?;
-        let ratio = self.accounting().shares_to_tokens_ratio()?;
+        let multiplier = self.accounting().multiplier()?;
         if !amount.is_zero() {
-            let shares =
-                amount.checked_mul(ratio).ok_or_else(BasePrecompileError::under_overflow)?
+            let scaled =
+                amount.checked_mul(multiplier).ok_or_else(BasePrecompileError::under_overflow)?
                     / B20AssetStorage::WAD;
             let minimum = self.accounting().minimum_redeemable()?;
-            if shares == U256::ZERO || shares < minimum {
+            if scaled == U256::ZERO || scaled < minimum {
                 return Err(BasePrecompileError::revert(IB20Asset::BelowMinimumRedeemable {
-                    shares,
+                    scaledAmount: scaled,
                     minimum,
                 }));
             }
@@ -274,13 +274,12 @@ impl<S: SecurityAccounting, P: Policy> B20AssetToken<S, P> {
         self.accounting_mut().emit_event(
             IB20::Transfer { from: caller, to: Address::ZERO, amount }.encode_log_data(),
         )?;
-        Ok(ratio)
+        Ok(multiplier)
     }
 
-    fn emit_redeemed(&mut self, caller: Address, amount: U256, ratio: U256) -> Result<()> {
+    fn emit_redeemed(&mut self, caller: Address, amount: U256, multiplier: U256) -> Result<()> {
         self.accounting_mut().emit_event(
-            IB20Asset::Redeemed { from: caller, amt: amount, sharesToTokensRatio: ratio }
-                .encode_log_data(),
+            IB20Asset::Redeemed { from: caller, amt: amount, multiplier }.encode_log_data(),
         )
     }
 
@@ -342,7 +341,7 @@ mod tests {
 
     fn make_token() -> TestSecurityToken {
         let mut accounting = InMemoryTokenAccounting::new(TOKEN);
-        accounting.shares_to_tokens_ratio = B20AssetStorage::WAD;
+        accounting.multiplier = B20AssetStorage::WAD;
         accounting.policy_ids.insert(
             TestSecurityToken::REDEEM_SENDER_POLICY,
             PolicyRegistryStorage::ALWAYS_ALLOW_ID,
@@ -360,7 +359,7 @@ mod tests {
 
     fn setup_batch_mint(setup: BatchMintSetup) -> (TestSecurityToken, Vec<Address>, Vec<U256>) {
         let mut accounting = InMemoryTokenAccounting::new(TOKEN);
-        accounting.shares_to_tokens_ratio = B20AssetStorage::WAD;
+        accounting.multiplier = B20AssetStorage::WAD;
         let recipients;
         let amounts;
 
@@ -420,7 +419,7 @@ mod tests {
 
     fn setup_security_redeem(setup: SecurityRedeemSetup) -> TestSecurityToken {
         let mut accounting = InMemoryTokenAccounting::new(TOKEN);
-        accounting.shares_to_tokens_ratio = B20AssetStorage::WAD;
+        accounting.multiplier = B20AssetStorage::WAD;
 
         match setup {
             SecurityRedeemSetup::Paused => {
