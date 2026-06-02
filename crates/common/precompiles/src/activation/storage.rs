@@ -31,8 +31,8 @@ pub enum ActivationFeature {
     PolicyRegistry,
     /// `keccak256("base.b20_stablecoin")`
     B20Stablecoin,
-    /// `keccak256("base.b20_security")`
-    B20Security,
+    /// `keccak256("base.b20_asset")`
+    B20Asset,
 }
 
 impl ActivationFeature {
@@ -51,8 +51,8 @@ impl ActivationFeature {
             Self::B20Stablecoin => {
                 b256!("0xecfa0def2c10020caaf65e6155aa69c84b24892aaef76eeac52e0e2b3a0b8601")
             }
-            Self::B20Security => {
-                b256!("0x83d32fab502ae0e8bc4352a117767262cb5e47cc8d67a744008ed4ff03fcf5e6")
+            Self::B20Asset => {
+                b256!("0xcdcc772fe4cbdb1029f822861176d09e646db96723d4c1e82ddfdeb8163ef54c")
             }
         }
     }
@@ -182,7 +182,7 @@ mod tests {
         activation::storage::slots,
     };
 
-    const FEATURE: B256 = ActivationFeature::B20Security.id();
+    const FEATURE: B256 = ActivationFeature::B20Asset.id();
     const ADMIN: Address = address!("0xcb00000000000000000000000000000000000000");
     const ACTIVATION_REGISTRY_ROOT: U256 =
         uint!(0x43ee1bbe25e988521cccd8b2c8fbd38c8287ebff8e074e825a70dfd3885cce00_U256);
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(ActivationFeature::B20Factory.id(), keccak256("base.b20_factory"));
         assert_eq!(ActivationFeature::PolicyRegistry.id(), keccak256("base.policy_registry"));
         assert_eq!(ActivationFeature::B20Stablecoin.id(), keccak256("base.b20_stablecoin"));
-        assert_eq!(ActivationFeature::B20Security.id(), keccak256("base.b20_security"));
+        assert_eq!(ActivationFeature::B20Asset.id(), keccak256("base.b20_asset"));
     }
 
     #[test]

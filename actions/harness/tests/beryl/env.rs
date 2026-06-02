@@ -11,8 +11,8 @@ use base_action_harness::{
 use base_batcher_encoder::{DaType, EncoderConfig};
 use base_common_consensus::{BaseBlock, BaseReceipt, BaseTxEnvelope};
 use base_common_precompiles::{
-    ActivationFeature, ActivationRegistryStorage, B20FactoryStorage, B20SecurityStorage,
-    B20Variant, IActivationRegistry, IB20, IB20Factory, IPolicyRegistry, PolicyRegistryStorage,
+    ActivationFeature, ActivationRegistryStorage, B20FactoryStorage, B20Variant,
+    IActivationRegistry, IB20, IB20Factory, IPolicyRegistry,
 };
 use base_precompile_storage::StorageKey;
 use base_test_utils::Account;
@@ -201,9 +201,9 @@ impl BerylTestEnv {
         ActivationFeature::B20Stablecoin.id()
     }
 
-    /// Activation registry feature ID for the B-20 security precompile.
-    pub(crate) const fn b20_security_feature() -> B256 {
-        ActivationFeature::B20Security.id()
+    /// Activation registry feature ID for the B-20 asset precompile.
+    pub(crate) const fn b20_asset_feature() -> B256 {
+        ActivationFeature::B20Asset.id()
     }
 
     /// Activation registry feature ID for the policy registry precompile.
@@ -588,17 +588,11 @@ impl BerylTestEnv {
         IB20Factory::createB20Call {
             variant: IB20Factory::B20Variant::SECURITY,
             salt,
-            params: self.b20_security_params().abi_encode().into(),
+            params: self.b20_asset_params().abi_encode().into(),
             initCalls: vec![
                 IB20::mintCall { to: Self::alice(), amount: U256::from(Self::B20_INITIAL_SUPPLY) }
                     .abi_encode()
                     .into(),
-                IB20::updatePolicyCall {
-                    policyScope: B20SecurityStorage::REDEEM_SENDER_POLICY,
-                    newPolicyId: PolicyRegistryStorage::ALWAYS_ALLOW_ID,
-                }
-                .abi_encode()
-                .into(),
             ],
         }
     }
@@ -652,8 +646,8 @@ impl BerylTestEnv {
         }
     }
 
-    fn b20_security_params(&self) -> IB20Factory::B20SecurityCreateParams {
-        IB20Factory::B20SecurityCreateParams {
+    fn b20_asset_params(&self) -> IB20Factory::B20AssetCreateParams {
+        IB20Factory::B20AssetCreateParams {
             version: B20Variant::Security.supported_version(),
             name: Self::B20_SECURITY_NAME.to_string(),
             symbol: Self::B20_SECURITY_SYMBOL.to_string(),
