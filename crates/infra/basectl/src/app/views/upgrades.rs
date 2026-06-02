@@ -108,6 +108,7 @@ fn specs_from_config(cfg: &ChainConfig) -> Vec<UpgradeSpec> {
         UpgradeSpec { name: "Jovian", timestamp: Some(cfg.jovian_timestamp) },
         UpgradeSpec { name: "Azul", timestamp: cfg.azul_timestamp },
         UpgradeSpec { name: "Beryl", timestamp: cfg.beryl_timestamp },
+        UpgradeSpec { name: "Cobalt", timestamp: cfg.cobalt_timestamp },
     ]
 }
 
@@ -1820,7 +1821,7 @@ mod tests {
         assert_eq!(target_hardfork(&chain, 100), Some("Beryl"));
 
         chain.apply_hardforks(&HardForkConfig {
-            base: HardforkConfig { azul: Some(10), beryl: Some(12) },
+            base: HardforkConfig { azul: Some(10), beryl: Some(12), cobalt: None },
             ..HardForkConfig::default()
         });
 
@@ -1838,7 +1839,7 @@ mod tests {
         };
         chain.apply_hardforks(&HardForkConfig {
             jovian_time: Some(10),
-            base: HardforkConfig { azul: Some(20), beryl: None },
+            base: HardforkConfig { azul: Some(20), beryl: None, cobalt: None },
             ..HardForkConfig::default()
         });
 
@@ -1856,7 +1857,7 @@ mod tests {
         let delta = chain.specs.iter().find(|spec| spec.name == "Delta").unwrap().timestamp;
 
         chain.apply_hardforks(&HardForkConfig {
-            base: HardforkConfig { azul: Some(20), beryl: None },
+            base: HardforkConfig { azul: Some(20), beryl: None, cobalt: None },
             ..HardForkConfig::default()
         });
 
