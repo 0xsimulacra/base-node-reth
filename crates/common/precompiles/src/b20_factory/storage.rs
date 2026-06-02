@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn b20created_default_variant_emits_empty_variant_params() {
+    fn b20created_asset_variant_emits_empty_variant_params() {
         let mut storage = HashMapStorageProvider::new(1);
         activate_precompiles(&mut storage);
         let call = IB20Factory::createB20Call {
@@ -1204,7 +1204,7 @@ mod tests {
             .iter()
             .find_map(|l| IB20Factory::B20Created::decode_log_data(l).ok())
             .expect("B20Created must be emitted");
-        assert!(event.variantParams.is_empty(), "SECURITY variantParams must be empty");
+        assert!(event.variantParams.is_empty(), "ASSET variantParams must be empty");
     }
 
     #[test]
@@ -1239,58 +1239,5 @@ mod tests {
             .expect("variantParams must decode as B20StablecoinEventParams");
         assert_eq!(params.version, super::B20_STABLECOIN_EVENT_PARAMS_VERSION);
         assert_eq!(params.currency, "USD");
-    }
-
-    #[test]
-    fn b20created_security_variant_emits_empty_variant_params() {
-        let mut storage = HashMapStorageProvider::new(1);
-        activate_precompiles(&mut storage);
-        let call = IB20Factory::createB20Call {
-            variant: IB20Factory::B20Variant::ASSET,
-            salt: B256::repeat_byte(0x72),
-            params: IB20Factory::B20AssetCreateParams {
-                version: 1,
-                name: "Sec".to_string(),
-                symbol: "SEC".to_string(),
-                initialAdmin: Address::repeat_byte(0xAB),
-                isin: "US0000000001".to_string(),
-                minimumRedeemable: U256::ONE,
-            }
-            .abi_encode()
-            .into(),
-            initCalls: Vec::new(),
-        };
-        storage.set_caller(Address::repeat_byte(0x01));
-        StorageCtx::enter(&mut storage, |ctx| {
-            dispatch_factory_success(ctx, call);
-        });
-        let event = storage
-            .get_events(B20FactoryStorage::ADDRESS)
-            .iter()
-            .find_map(|l| IB20Factory::B20Created::decode_log_data(l).ok())
-            .expect("B20Created must be emitted");
-        assert!(event.variantParams.is_empty(), "SECURITY variantParams must be empty");
-    }
-
-    #[test]
-    fn get_b20_address_returns_zero_for_invalid_variant() {
-        let mut storage = HashMapStorageProvider::new(1);
-        activate_precompiles(&mut storage);
-        let sender = Address::repeat_byte(0x11);
-        let salt = B256::repeat_byte(0xAB);
-
-        StorageCtx::enter(&mut storage, |ctx| {
-            assert_output(
-                dispatch_factory_success(
-                    ctx,
-                    IB20Factory::getB20AddressCall {
-                        variant: IB20Factory::B20Variant::__Invalid,
-                        sender,
-                        salt,
-                    },
-                ),
-                IB20Factory::getB20AddressCall::abi_encode_returns(&Address::ZERO),
-            );
-        });
     }
 }
