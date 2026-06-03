@@ -1,7 +1,7 @@
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.94"
 license = "MIT"
 homepage = "https://github.com/base/base"
 repository = "https://github.com/base/base"
@@ -61,7 +61,7 @@ members = [
   "crates/common/*",
   "crates/execution/*",
   "etc/tools/*",
-  "devnet",
+  "etc/systems",
   "actions/*",
 ]
 default-members = [
@@ -296,7 +296,7 @@ base-runtime = { path = "crates/utilities/runtime", default-features = false }
 revm = { version = "38.0.0", default-features = false }
 revm-bytecode = { version = "10.0.0", default-features = false }
 revm-database = { version = "13.0.0", default-features = false }
-revm-inspectors = { version = "0.39.0", default-features = false }
+revm-inspectors = { version = "0.39.1", default-features = false }
 revm-precompile = { version = "34.0.0", default-features = false }
 revm-primitives = { version = "23.0.0", default-features = false }
 revm-context-interface = { version = "17.0.1", default-features = false }
@@ -459,13 +459,13 @@ boundless-market = "1.1"
 risc0-ethereum-contracts = "3.0.1"
 risc0-zkvm = { version = "^3.0", default-features = false }
 
-# SP1 v6.1.0 (Hypercube) — used by crates/proof/succinct
-sp1-sdk = { version = "=6.2.1" }
+# SP1 v6.2.1 (Hypercube) — used by crates/proof/succinct
 sp1-build = "=6.2.1"
 sp1-prover-types = "=6.2.1"
-sp1-cluster-artifact = { git = "https://github.com/succinctlabs/sp1-cluster", tag = "v2.3.2" }
-sp1-cluster-common = { git = "https://github.com/succinctlabs/sp1-cluster", tag = "v2.3.2" }
+sp1-sdk = { version = "=6.2.1" }
 sp1-cluster-utils = { git = "https://github.com/succinctlabs/sp1-cluster", tag = "v2.3.2" }
+sp1-cluster-common = { git = "https://github.com/succinctlabs/sp1-cluster", tag = "v2.3.2" }
+sp1-cluster-artifact = { git = "https://github.com/succinctlabs/sp1-cluster", tag = "v2.3.2" }
 
 # crypto
 sha3 = "0.10"
