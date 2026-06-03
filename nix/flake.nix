@@ -9,12 +9,16 @@
     url = "github:numtide/flake-utils";
     inputs.systems.follows = "systems";
   };
-  inputs.fenix={
+  inputs.fenix = {
     url = "github:nix-community/fenix/monthly";
     inputs.nixpkgs.follows = "nixpkgs";
   };
-  inputs.foundry.url = "github:shazow/foundry.nix/stable";
-
+  inputs.foundry = {
+    url = "github:shazow/foundry.nix/stable";
+    inputs = {
+       flake-utils.follows = "flake-utils";
+    };
+  };
   outputs =
     { nixpkgs
     , flake-utils
