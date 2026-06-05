@@ -2,6 +2,7 @@
 
 mod block;
 mod cli;
+mod sync_status;
 
 use basectl_cli::{MonitoringConfig, ViewId, run_app, run_flashblocks_json};
 use clap::{CommandFactory, Parser};
@@ -23,6 +24,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(cli::Commands::Block { reference, json, raw }) => {
             block::run(MonitoringConfig::load(config).await?, &reference, json, raw).await
+        }
+        Some(cli::Commands::SyncStatus { el_rpc, cl_rpc, tip_tolerance, json, raw }) => {
+            sync_status::run(
+                MonitoringConfig::load(config).await?,
+                el_rpc,
+                cl_rpc,
+                tip_tolerance,
+                json,
+                raw,
+            )
+            .await
         }
         Some(cli::Commands::Flashblocks) => {
             run_flashblocks_json(MonitoringConfig::load(config).await?).await

@@ -53,6 +53,42 @@ pub(crate) enum Commands {
         #[arg(long, requires = "json")]
         raw: bool,
     },
+    /// Report combined CL `optimism_syncStatus` + EL `eth_syncing`.
+    SyncStatus {
+        /// Override the execution-layer RPC URL.
+        ///
+        /// Defaults to the chain config's `rpc` field, which on the
+        /// `mainnet` and `sepolia` presets resolves to the public proxyd
+        /// fleet — `eth_syncing` against that always reports "not syncing"
+        /// because proxyd routes only-healthy backends. Pass this flag to
+        /// point at a single node.
+        #[arg(long = "el-rpc", value_name = "URL")]
+        el_rpc: Option<Url>,
+        /// Override the consensus-node RPC URL.
+        ///
+        /// The mainnet and sepolia presets ship `consensus_node_rpc` unset, so
+        /// non-devnet users must pass this flag (or set the field in their YAML
+        /// config).
+        #[arg(long = "cl-rpc", value_name = "URL")]
+        cl_rpc: Option<Url>,
+        /// Block tolerance for the tip-reference `caught_up` classification.
+        ///
+        /// The local node is reported as `caught_up` when within ±this many
+        /// blocks of the public reference. Beyond the window, status flips
+        /// to `behind` or `ahead`. Default 5 ≈ ~10s of network jitter at
+        /// Base's 2s block time. Lower the value for stricter alerting,
+        /// raise it to dampen noise on flaky networks.
+        #[arg(long = "tip-tolerance", value_name = "BLOCKS", default_value_t = 5)]
+        tip_tolerance: u64,
+        /// Emit JSON (humanized — decoded numbers, ISO + local timestamps,
+        /// precomputed `safeLag*`) instead of the pretty table.
+        #[arg(long)]
+        json: bool,
+        /// With `--json`, emit the JSON-RPC wire format (the alloy-typed
+        /// `optimism_syncStatus` response) instead of the humanized JSON.
+        #[arg(long, requires = "json")]
+        raw: bool,
+    },
     /// Stream flashblocks as JSON lines.
     #[command(after_help = "Use `basectl monitor flashblocks` for the TUI.")]
     Flashblocks,

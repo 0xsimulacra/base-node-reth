@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 url = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
 alloy-eips = { workspace = true }
 basectl-cli = { workspace = true }
 alloy-provider = { workspace = true }
@@ -24,6 +23,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 serde = { workspace = true, features = ["derive", "std"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-rpc-types-eth = { workspace = true, features = ["std"] }
+base-protocol = { workspace = true, features = ["serde", "std"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
