@@ -83,6 +83,7 @@ serde_json = { workspace = true, optional = true }
 rstest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 base-challenger = { path = ".", features = ["test-utils"] }
+metrics-util = { workspace = true, features = ["debugging"] }
 
 [features]
 metrics = [ "base-metrics/metrics", "base-tx-manager/metrics", "dep:metrics" ]
