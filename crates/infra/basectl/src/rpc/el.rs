@@ -1,21 +1,49 @@
 use std::sync::Arc;
 
 use alloy_consensus::{Transaction, transaction::SignerRecoverable};
-use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+use alloy_eips::{
+    BlockId,
+    eip2718::{Decodable2718, Encodable2718},
+};
 use alloy_primitives::{Address, B256, Bytes};
-use alloy_provider::{Provider, ProviderBuilder, network::TransactionResponse};
+use alloy_provider::{Network, Provider, ProviderBuilder, network::TransactionResponse};
 use alloy_rpc_types_eth::BlockNumberOrTag;
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use base_common_consensus::BaseTxEnvelope;
 use base_common_network::Base;
 use futures::{StreamExt, stream};
 use tokio::sync::mpsc;
 use tracing::warn;
+use url::Url;
 
 use super::fetch_safe_and_latest;
 use crate::tui::Toast;
 
 const CONCURRENT_BLOCK_FETCHES: usize = 16;
+
+/// Fetches a single L2 block via `eth_getBlockByHash` or `eth_getBlockByNumber`.
+///
+/// `reference` selects the block by hash, number, or tag (alloy's `BlockId`
+/// dispatches between the two RPC methods internally). The `pending` tag is
+/// not supported because alloy's typed `Block` does not accept a null
+/// number/hash; pass a number, hash, or `latest` / `safe` / `finalized` /
+/// `earliest`.
+pub async fn fetch_block(
+    rpc: &Url,
+    reference: BlockId,
+) -> Result<<Base as Network>::BlockResponse> {
+    let provider = ProviderBuilder::new()
+        .disable_recommended_fillers()
+        .network::<Base>()
+        .connect(rpc.as_str())
+        .await
+        .with_context(|| format!("connecting to L2 RPC at {rpc}"))?;
+    provider
+        .get_block(reference)
+        .await
+        .with_context(|| format!("fetching block {reference}"))?
+        .ok_or_else(|| anyhow!("block {reference} not found"))
+}
 
 /// DA and gas information for a single L2 block.
 #[derive(Debug, Clone)]

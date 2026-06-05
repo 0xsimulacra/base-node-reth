@@ -40,6 +40,19 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: Option<MonitorCommands>,
     },
+    /// Inspect a single L2 block.
+    #[command(visible_alias = "b")]
+    Block {
+        /// Block number (decimal or 0x-hex), tag (latest/safe/finalized/earliest), or 32-byte block hash.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Emit JSON (humanized — decoded numbers, ISO + local timestamps) instead of the pretty table.
+        #[arg(long)]
+        json: bool,
+        /// With `--json`, emit the JSON-RPC wire format (camelCase, hex-string quantities) instead of the humanized JSON.
+        #[arg(long, requires = "json")]
+        raw: bool,
+    },
     /// Stream flashblocks as JSON lines.
     #[command(after_help = "Use `basectl monitor flashblocks` for the TUI.")]
     Flashblocks,
