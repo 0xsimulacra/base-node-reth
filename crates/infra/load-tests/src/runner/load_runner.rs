@@ -320,7 +320,7 @@ impl LoadRunner {
                     OsakaTarget::Clz => 80_000,
                     OsakaTarget::P256verifyOsaka | OsakaTarget::ModexpOsaka => 30_000,
                 },
-                TxType::UniswapV3 { .. } | TxType::AerodromeCl { .. } => 250_000,
+                TxType::UniswapV3 { .. } | TxType::AerodromeCl { .. } => 115_000,
             };
             weighted_gas += gas_estimate * tx_config.weight as u64;
         }
@@ -493,7 +493,9 @@ impl LoadRunner {
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        if error_str.contains("already known") {
+                        if error_str.contains("already known")
+                            || error_str.contains("replacement transaction underpriced")
+                        {
                             retries.push((address, deficit, nonce));
                         } else if error_str.contains("nonce too low") {
                             info!(to = %address, nonce, "nonce too low, will refresh and retry");
@@ -1632,7 +1634,9 @@ impl LoadRunner {
                 let failed = self.collector.failed_count();
                 let reverted = self.collector.reverted_count();
                 let in_flight = results_tracker.total_in_flight();
+                let pending = results_tracker.pending_count();
                 let senders_blocked = results_tracker.senders_at_limit(max_in_flight_per_sender);
+                let total_queued: u64 = queued_per_sender.values().sum();
                 let (p50, p99) = self.collector.rolling_p50_p99();
                 let (block_receipt_delay_p50, block_receipt_delay_p99) =
                     self.collector.rolling_block_receipt_delay_p50_p99();
@@ -1645,6 +1649,8 @@ impl LoadRunner {
                     failed,
                     reverted,
                     in_flight,
+                    pending,
+                    total_queued,
                     senders_blocked,
                     gas_price = self.gas_price,
                     p50_ms = p50.as_millis() as u64,
@@ -1842,7 +1848,10 @@ impl LoadRunner {
                 }
             }
 
-            let expired = results_tracker.expire_pending(PENDING_CONFIRMATION_TIMEOUT);
+            // Use a shorter expiry during drain: the test is over, so any
+            // pending tx older than the drain window itself is stale.
+            let drain_expiry = PENDING_CONFIRMATION_TIMEOUT.saturating_sub(drain_start.elapsed());
+            let expired = results_tracker.expire_pending(drain_expiry);
             if expired > 0 {
                 self.collector.record_failures("expired without confirmation", expired);
             }
