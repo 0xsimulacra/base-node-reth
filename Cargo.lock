@@ -5349,6 +5349,7 @@ dependencies = [
  "base-common-genesis",
  "base-common-network",
  "base-common-rpc-types",
+ "base-retry",
  "metrics",
  "moka",
  "serde",
@@ -5720,6 +5721,7 @@ dependencies = [
  "base-proof-tee-nitro-enclave",
  "base-prover-service-client",
  "base-prover-service-protocol",
+ "base-retry",
  "chrono",
  "eyre",
  "jsonrpsee",
@@ -5858,6 +5860,7 @@ dependencies = [
  "base-proof-rpc",
  "base-prover-service-client",
  "base-prover-service-protocol",
+ "base-retry",
  "base-tx-manager",
  "clap",
  "eyre",
@@ -6003,6 +6006,7 @@ dependencies = [
  "async-trait",
  "backon",
  "base-prover-service-protocol",
+ "base-retry",
  "chrono",
  "jsonrpsee",
  "rstest",
@@ -6086,6 +6090,13 @@ dependencies = [
  "base-reth-cli",
  "clap",
  "reth-cli-util",
+]
+
+[[package]]
+name = "base-retry"
+version = "0.0.0"
+dependencies = [
+ "backon",
 ]
 
 [[package]]
