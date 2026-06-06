@@ -3,7 +3,7 @@
 //! Uses the `metrics` crate facade (`counter!`, `histogram!`) so the exporter
 //! backend is determined by the binary (e.g. Prometheus, `DogStatsD`).
 
-use base_prover_service_db::ProofType;
+use base_prover_service_db::{ApiProofType, ProofType};
 use metrics::{counter, describe_counter, describe_histogram, histogram};
 
 // ---------------------------------------------------------------------------
@@ -25,6 +25,8 @@ pub const PROOF_REQUESTS_COMPLETED: &str = "zk_prover_service.proof_requests_com
 pub const STUCK_REQUESTS: &str = "zk_prover_service.stuck_requests";
 /// Stuck requests retried (reset to CREATED). Tags: `proof_type`
 pub const RETRIED_REQUESTS: &str = "zk_prover_service.retried_requests";
+/// Worker jobs terminally failed by a background reaper. Tags: `reason`, `proof_type`
+pub const WORKER_JOBS_FAILED: &str = "zk_prover_service.worker_jobs_failed";
 
 // ---------------------------------------------------------------------------
 // ProverMetrics — metric descriptions (called once at init)
@@ -51,6 +53,10 @@ impl ProverMetrics {
         describe_counter!(PROOF_REQUESTS_COMPLETED, "Terminal proof request outcomes");
         describe_counter!(STUCK_REQUESTS, "Stuck requests detected and failed");
         describe_counter!(RETRIED_REQUESTS, "Stuck requests retried (reset to CREATED)");
+        describe_counter!(
+            WORKER_JOBS_FAILED,
+            "Worker jobs terminally failed by a background reaper"
+        );
     }
 }
 
@@ -114,6 +120,15 @@ pub fn inc_retried_requests(proof_type: &str) {
     counter!(RETRIED_REQUESTS, "proof_type" => proof_type.to_string()).increment(1);
 }
 
+/// Increment the worker-jobs-failed counter for a reaper outcome.
+pub fn inc_worker_jobs_failed(reason: &str, proof_type: &str) {
+    counter!(WORKER_JOBS_FAILED,
+        "reason" => reason.to_string(),
+        "proof_type" => proof_type.to_string(),
+    )
+    .increment(1);
+}
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
@@ -123,5 +138,14 @@ pub const fn proof_type_label(proof_type: ProofType) -> &'static str {
     match proof_type {
         ProofType::OpSuccinctSp1ClusterCompressed => "compressed",
         ProofType::OpSuccinctSp1ClusterSnarkGroth16 => "snark_groth16",
+    }
+}
+
+/// Map API proof type to a short string for metric tags.
+pub const fn api_proof_type_label(proof_type: ApiProofType) -> &'static str {
+    match proof_type {
+        ApiProofType::Compressed => "compressed",
+        ApiProofType::SnarkGroth16 => "snark_groth16",
+        ApiProofType::Tee => "tee",
     }
 }

@@ -1,10 +1,30 @@
 use std::time::Duration;
 
-use base_prover_service_db::{ProofRequestRepo, RetryOutcome};
+use base_prover_service_db::{FailExpiredProofJobs, ProofJob, ProofRequestRepo, RetryOutcome};
 use tokio::time::sleep;
 use tracing::{Instrument, error, info, warn};
 
 use crate::{metrics, proof_request_manager::ProofRequestManager};
+
+/// Server-side worker queue tuning shared by worker claims and the expired-claim reaper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerQueueConfig {
+    /// Reclaim budget: an expired claim is failed once `attempt >= reclaim_attempts`.
+    pub reclaim_attempts: u32,
+    /// Maximum expired claims to fail per poll tick.
+    pub reaper_batch_size: u32,
+}
+
+impl WorkerQueueConfig {
+    /// Default worker queue tuning.
+    pub const DEFAULT: Self = Self { reclaim_attempts: 5, reaper_batch_size: 100 };
+}
+
+impl Default for WorkerQueueConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// Background worker that polls proving backends for status updates
 /// on RUNNING proof requests.
@@ -22,19 +42,35 @@ pub struct StatusPoller {
     poll_interval_secs: u64,
     stuck_timeout_mins: i32,
     max_proof_retries: i32,
+    worker_queue: WorkerQueueConfig,
+    expired_claim_error_message: String,
 }
 
 impl StatusPoller {
     /// Creates a status poller (`poll_interval_secs=<secs>`, `stuck_timeout_mins=<mins>`,
-    /// `max_proof_retries=<n>`).
-    pub const fn new(
+    /// `max_proof_retries=<n>`) with the given worker queue tuning.
+    pub fn new(
         repo: ProofRequestRepo,
         manager: ProofRequestManager,
         poll_interval_secs: u64,
         stuck_timeout_mins: i32,
         max_proof_retries: i32,
+        worker_queue: WorkerQueueConfig,
     ) -> Self {
-        Self { repo, manager, poll_interval_secs, stuck_timeout_mins, max_proof_retries }
+        let expired_claim_error_message = format!(
+            "Worker claim expired after exhausting {} attempts",
+            worker_queue.reclaim_attempts
+        );
+
+        Self {
+            repo,
+            manager,
+            poll_interval_secs,
+            stuck_timeout_mins,
+            max_proof_retries,
+            worker_queue,
+            expired_claim_error_message,
+        }
     }
 
     /// Run the status poller in a loop
@@ -50,18 +86,12 @@ impl StatusPoller {
         }
     }
 
-    /// Poll once for all RUNNING proof requests and detect stuck requests
     async fn poll_once(&self) -> anyhow::Result<()> {
-        // Get all RUNNING proof_requests
         let running_requests = self.repo.get_running_proof_requests().await?;
 
         if !running_requests.is_empty() {
             info!(count = running_requests.len(), "Polling status for RUNNING proof requests");
 
-            // Process each RUNNING proof request.
-            // Terminal metrics (proof_requests_completed, proof_request_duration_ms) are
-            // emitted inside sync_and_update_proof_status, so they fire regardless of
-            // whether the transition is triggered by this poller or by a GetProof RPC.
             for proof_request in &running_requests {
                 let poll_span = tracing::info_span!(
                     "poll_proof_status",
@@ -82,7 +112,6 @@ impl StatusPoller {
             }
         }
 
-        // Check for stuck requests (PENDING without any sessions)
         let stuck_requests = self.repo.get_stuck_requests(self.stuck_timeout_mins).await?;
 
         if !stuck_requests.is_empty() {
@@ -141,6 +170,38 @@ impl StatusPoller {
             }
         }
 
+        self.reap_expired_claims().await;
+
         Ok(())
+    }
+
+    /// Fail claimed jobs whose lock expired after exhausting the reclaim budget.
+    async fn reap_expired_claims(&self) {
+        let result = self
+            .repo
+            .fail_expired_proof_jobs(FailExpiredProofJobs {
+                max_attempts: self.worker_queue.reclaim_attempts,
+                batch_size: self.worker_queue.reaper_batch_size,
+                error_message: &self.expired_claim_error_message,
+            })
+            .await;
+
+        match result {
+            Ok(failed) if !failed.is_empty() => {
+                warn!(count = failed.len(), "Failed expired worker claims past reclaim budget");
+                Self::record_reaped_jobs("expired_exhausted", &failed);
+            }
+            Ok(_) => {}
+            Err(e) => error!(error = %e, "Failed to reap expired worker claims"),
+        }
+    }
+
+    /// Emit terminal-failure metrics for a batch of reaped jobs.
+    fn record_reaped_jobs(reason: &str, jobs: &[ProofJob]) {
+        for job in jobs {
+            let proof_type = metrics::api_proof_type_label(job.api_proof_type);
+            metrics::inc_worker_jobs_failed(reason, proof_type);
+            metrics::inc_proof_requests_completed("failed", proof_type);
+        }
     }
 }
