@@ -10,6 +10,7 @@ use jsonrpsee::{
     core::RpcResult,
     types::{ErrorCode, ErrorObject},
 };
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{AdminApiServer, SequencerAdminAPIClient};
 
@@ -19,11 +20,16 @@ pub enum NetworkAdminQuery {
     /// An admin rpc request to post an unsafe payload.
     PostUnsafePayload {
         /// The payload to post.
-        payload: BaseExecutionPayloadEnvelope,
+        payload: Box<BaseExecutionPayloadEnvelope>,
+    },
+    /// An admin rpc request to clear pending outbound P2P connections.
+    ClearPendingP2pConnections {
+        /// The response channel for the number of cleared pending connections.
+        out: oneshot::Sender<usize>,
     },
 }
 
-type NetworkAdminQuerySender = tokio::sync::mpsc::Sender<NetworkAdminQuery>;
+type NetworkAdminQuerySender = mpsc::Sender<NetworkAdminQuery>;
 
 /// The admin rpc server.
 #[derive(Debug)]
@@ -75,9 +81,21 @@ where
         // operation that is valid on both sequencer and validator nodes.
         Metrics::rpc_calls("admin_postUnsafePayload").increment(1.0);
         self.network_sender
-            .send(NetworkAdminQuery::PostUnsafePayload { payload })
+            .send(NetworkAdminQuery::PostUnsafePayload { payload: Box::new(payload) })
             .await
             .map_err(|_| ErrorObject::from(ErrorCode::InternalError))
+    }
+
+    async fn admin_clear_pending_p2p_connections(&self) -> RpcResult<usize> {
+        Metrics::rpc_calls("admin_clearPendingP2pConnections").increment(1.0);
+
+        let (tx, rx) = oneshot::channel();
+        self.network_sender
+            .send(NetworkAdminQuery::ClearPendingP2pConnections { out: tx })
+            .await
+            .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
+
+        rx.await.map_err(|_| ErrorObject::from(ErrorCode::InternalError))
     }
 
     async fn admin_sequencer_active(&self) -> RpcResult<bool> {
