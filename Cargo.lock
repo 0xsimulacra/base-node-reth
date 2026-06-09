@@ -3712,6 +3712,8 @@ dependencies = [
  "base-common-consensus",
  "base-common-flz",
  "base-common-precompiles",
+ "base-metrics",
+ "metrics",
  "reth-evm",
  "revm",
  "rstest",
