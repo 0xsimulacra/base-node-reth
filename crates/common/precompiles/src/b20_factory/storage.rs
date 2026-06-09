@@ -285,7 +285,7 @@ impl TokenCreateParams {
     pub fn decode(variant: B20Variant, params: &Bytes) -> Result<Self> {
         match variant {
             B20Variant::Stablecoin => {
-                let p = IB20Factory::B20StablecoinCreateParams::abi_decode(params)
+                let p = IB20Factory::B20StablecoinCreateParams::abi_decode_validate(params)
                     .map_err(Self::invalid_params)?;
                 Ok(Self::Stablecoin {
                     common: CommonParams { version: p.version, initial_admin: p.initialAdmin },
@@ -298,7 +298,7 @@ impl TokenCreateParams {
                 })
             }
             B20Variant::Asset => {
-                let p = IB20Factory::B20AssetCreateParams::abi_decode(params)
+                let p = IB20Factory::B20AssetCreateParams::abi_decode_validate(params)
                     .map_err(Self::invalid_params)?;
                 Ok(Self::Asset {
                     common: CommonParams { version: p.version, initial_admin: p.initialAdmin },
@@ -996,18 +996,6 @@ mod tests {
                 IB20Factory::getB20AddressCall::abi_encode_returns(&expected_token),
             );
             assert_output(
-                dispatch_factory_success(
-                    ctx,
-                    IB20Factory::getB20AddressCall {
-                        variant: IB20Factory::B20Variant::__Invalid,
-                        sender: creator,
-                        salt,
-                    },
-                ),
-                IB20Factory::getB20AddressCall::abi_encode_returns(&Address::ZERO),
-            );
-
-            assert_output(
                 dispatch_factory_success(ctx, call),
                 IB20Factory::createB20Call::abi_encode_returns(&expected_token),
             );
@@ -1274,23 +1262,22 @@ mod tests {
     }
 
     #[test]
-    fn get_b20_address_returns_zero_for_invalid_variant() {
+    fn get_b20_address_reverts_for_invalid_variant() {
         let mut storage = HashMapStorageProvider::new(1);
         activate_precompiles(&mut storage);
         let sender = Address::repeat_byte(0x11);
         let salt = B256::repeat_byte(0xAB);
 
         StorageCtx::enter(&mut storage, |ctx| {
-            assert_output(
-                dispatch_factory_success(
-                    ctx,
-                    IB20Factory::getB20AddressCall {
-                        variant: IB20Factory::B20Variant::__Invalid,
-                        sender,
-                        salt,
-                    },
-                ),
-                IB20Factory::getB20AddressCall::abi_encode_returns(&Address::ZERO),
+            // Strict ABI decoding rejects non-canonical enum discriminants, so an
+            // out-of-range variant produces an ABI decode error rather than Address::ZERO.
+            dispatch_factory_revert(
+                ctx,
+                IB20Factory::getB20AddressCall {
+                    variant: IB20Factory::B20Variant::__Invalid,
+                    sender,
+                    salt,
+                },
             );
         });
     }
