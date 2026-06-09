@@ -12,11 +12,9 @@ use std::{
     time::Duration,
 };
 
-use alloy_primitives::{Address, Bytes, hex};
-use alloy_sol_types::SolCall;
-use base_proof_contracts::ITEEProverRegistry;
+use alloy_primitives::{Address, hex};
 use base_proof_tee_nitro_attestation_prover::AttestationProofProvider;
-use base_tx_manager::{TxCandidate, TxManager};
+use base_tx_manager::TxManager;
 use futures::stream::StreamExt;
 use rand::random;
 use tokio::{
@@ -27,9 +25,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::{
-    CertManager, CrlConfig, InstanceDiscovery, InstanceHealthStatus, NitroVerifierClient,
-    ProofHandlerConfig, ProverClient, ProverInstance, RegistrarError, RegistrarMetrics,
-    RegistrationManager, RegistryClient, Result, SignerClient,
+    CertManager, CrlConfig, DeregistrationManager, InstanceDiscovery, InstanceHealthStatus,
+    NitroVerifierClient, ProofHandlerConfig, ProverClient, ProverInstance, RegistrarError,
+    RegistrarMetrics, RegistrationManager, RegistryClient, Result, SignerClient,
 };
 
 /// Default maximum number of instances processed concurrently.
@@ -264,14 +262,9 @@ pub struct RegistrationDriver<D, P, R, T, S> {
     /// the ~20 minute Boundless proof generation) so deduplication holds
     /// across cycles as well as within one.
     in_flight_registrations: Arc<Mutex<HashSet<Address>>>,
-    /// Last-known EC2 instance ID for every signer address the registrar
-    /// has ever observed advertising itself in a discovery cycle.
-    /// Updated in `discover_and_resolve`, consulted by
-    /// `submit_deregistration` so the "Deregistering signer" log line
-    /// can attribute the orphan to the EC2 instance it last lived on.
-    /// `None` on dereg is the strongest single diagnostic that another
-    /// registrar (or a prior deployment) wrote the signer.
-    /// Entries are never evicted — bounded by historic fleet size.
+    /// Last-known EC2 instance ID for every signer observed during discovery.
+    /// Used to annotate orphan deregistration logs.
+    /// Entries are never evicted; bounded by historic fleet size.
     signer_history: Arc<Mutex<HashMap<Address, String>>>,
 }
 
@@ -428,15 +421,8 @@ where
                     }
 
                     if resolution.ok_to_dereg && !self.config.cancel.is_cancelled() {
-                        // Protect every in-flight signer in addition to
-                        // `active_signers`. An instance whose
-                        // `resolve_instance` failed this cycle is in
-                        // `unresolved_instance_ids` (so reconcile
-                        // preserves its task), but its signer is absent
-                        // from `active_signers`. Without this union the
-                        // preserved task could complete and `register`
-                        // the signer mid-pass, and the very same orphan
-                        // sweep would then deregister it (TOCTOU).
+                        // Pending proof tasks can register while orphan cleanup
+                        // is running, so protect those signers too.
                         let protected = Self::protected_signers(&resolution, &pending);
                         if let Err(e) = self.run_orphan_dereg(&protected).await {
                             warn!(error = %e, "orphan deregistration pass failed");
@@ -733,10 +719,8 @@ where
                     if outcome.unresolved {
                         unresolved_instance_ids.insert(instance.instance_id.clone());
                     }
-                    // Record signer -> instance attribution before the
-                    // `instance` is moved into `RegisterableSigner` below.
-                    // Consumed by `submit_deregistration` to annotate the
-                    // dereg log with the last-known instance.
+                    // Record signer -> instance attribution before `instance`
+                    // is moved into `RegisterableSigner` below.
                     {
                         let mut history =
                             self.signer_history.lock().unwrap_or_else(|e| e.into_inner());
@@ -807,45 +791,21 @@ where
         })
     }
 
-    /// Drives the orphan-deregistration pass.
-    ///
-    /// Loads onchain signers, computes the orphan set (`registered \ active`),
-    /// and deregisters each in sequence with a ghost-entry guard. The
-    /// [`Self::run`] pipeline invokes this independently of the concurrent
-    /// registration path.
-    ///
-    /// Both error paths (registry load and per-orphan deregistration)
-    /// propagate uniformly so the caller can log + increment
-    /// `processing_errors_total` once at a single site.
+    /// Runs orphan deregistration through [`DeregistrationManager`].
     async fn run_orphan_dereg(&self, protected_signers: &HashSet<Address>) -> Result<()> {
-        // Cancel-aware: `get_registered_signers` is a side-effect-free
-        // read, so dropping it on cancel is safe. Without this select,
-        // a shutdown during the registry RPC would extend drain latency
-        // by an entire round-trip before `deregister_orphans` is even
-        // reached.
-        let registered_signers = tokio::select! {
-            biased;
-            () = self.config.cancel.cancelled() => {
-                debug!("cancelled before loading registered signers for orphan dereg");
-                return Ok(());
-            }
-            res = self.registry.get_registered_signers() => res?,
-        };
-        self.deregister_orphans(protected_signers, &registered_signers).await
+        let manager = DeregistrationManager::new(
+            self.config.registry_address,
+            &self.registry,
+            &self.tx_manager,
+            &self.signer_history,
+        );
+        manager.run_orphan_dereg(protected_signers, &self.config.cancel).await
     }
 
-    /// Builds the protected-signer set for the orphan-dereg pass: the
-    /// union of `resolution.active_signers` and the keys of `pending`.
+    /// Builds the protected-signer set for orphan deregistration.
     ///
-    /// Including `pending.keys()` closes the TOCTOU window described on
-    /// [`Self::run`]: when an instance fails [`Self::resolve_instance`]
-    /// transiently this cycle, its signer is absent from
-    /// `active_signers`, but [`Self::reconcile_proof_tasks`] preserves
-    /// the in-flight proof task (its instance id is in
-    /// [`DiscoveryResolution::unresolved_instance_ids`]). If that task
-    /// successfully registers the signer just as the orphan pass runs,
-    /// the union ensures the freshly registered signer is treated as
-    /// protected rather than as an orphan to be deregistered.
+    /// Includes both active signers and pending proof tasks so a signer that
+    /// registers mid-pass is not immediately deregistered.
     fn protected_signers(
         resolution: &DiscoveryResolution,
         pending: &HashMap<Address, PendingRegistration>,
@@ -1196,151 +1156,6 @@ where
         }
         RegistrarMetrics::proof_tasks_pending().set(0.0);
     }
-
-    /// Submits a `deregisterSigner` transaction and returns whether it succeeded.
-    async fn submit_deregistration(&self, signer: Address) -> bool {
-        let calldata =
-            Bytes::from(ITEEProverRegistry::deregisterSignerCall { signer }.abi_encode());
-
-        // `last_known_instance = None` is the strongest single diagnostic
-        // for phantom rotations: a signer we never observed in any
-        // discovery cycle implies another registrar (or a prior
-        // deployment) wrote it.
-        let last_known_instance = {
-            let history = self.signer_history.lock().unwrap_or_else(|e| e.into_inner());
-            history.get(&signer).cloned()
-        };
-        info!(
-            signer = %signer,
-            last_known_instance = ?last_known_instance,
-            registry = %self.config.registry_address,
-            calldata_len = calldata.len(),
-            "Deregistering signer"
-        );
-
-        let candidate = TxCandidate {
-            tx_data: calldata,
-            to: Some(self.config.registry_address),
-            ..Default::default()
-        };
-
-        info!(
-            tx = ?candidate,
-            "Sending tx candidate",
-        );
-
-        match self.tx_manager.send(candidate).await {
-            Ok(receipt) => {
-                if !receipt.inner.status() {
-                    warn!(
-                        signer = %signer,
-                        tx_hash = %receipt.transaction_hash,
-                        "deregistration transaction reverted onchain",
-                    );
-                    RegistrarMetrics::processing_errors_total().increment(1);
-                    return false;
-                }
-                info!(
-                    signer = %signer,
-                    tx_hash = %receipt.transaction_hash,
-                    "signer deregistered"
-                );
-                true
-            }
-            Err(e) => {
-                warn!(error = %e, signer = %signer, "failed to deregister signer");
-                RegistrarMetrics::processing_errors_total().increment(1);
-                false
-            }
-        }
-    }
-
-    /// Deregisters any onchain signer that is not in the `protected_signers` set.
-    ///
-    /// These orphans arise when a prover instance is terminated (e.g. ASG
-    /// scale-down) without first deregistering its signer onchain. The
-    /// `protected_signers` set is built by [`Self::protected_signers`] as
-    /// the union of resolved-this-cycle signers and signers with an
-    /// in-flight proof task, so transiently-unresolved instances and
-    /// mid-flight registrations are both shielded from the sweep.
-    ///
-    /// # Defense in depth
-    ///
-    /// Before submitting a deregistration transaction, each orphan candidate is
-    /// verified via [`RegistryClient::is_registered`] (backed by the
-    /// `isRegisteredSigner` mapping). This guards against ghost entries in the
-    /// onchain `EnumerableSetLib.AddressSet` that can appear after certain
-    /// add/remove sequences due to a bug in Solady v0.0.245. Without this
-    /// check, ghost addresses would be deregistered every cycle in an infinite
-    /// loop, burning gas without effect.
-    ///
-    /// # Assumptions
-    ///
-    /// - **Single registrar**: This method queries *all* onchain signers and
-    ///   treats any signer not in `protected_signers` as an orphan. If multiple
-    ///   registrar instances manage disjoint prover fleets, one registrar would
-    ///   incorrectly deregister another's signers. The current deployment model
-    ///   assumes a single registrar per registry contract.
-    async fn deregister_orphans(
-        &self,
-        protected_signers: &HashSet<Address>,
-        registered_signers: &[Address],
-    ) -> Result<()> {
-        let orphans: Vec<_> = registered_signers
-            .iter()
-            .copied()
-            .filter(|addr| !protected_signers.contains(addr))
-            .collect();
-
-        if orphans.is_empty() {
-            return Ok(());
-        }
-
-        info!(count = orphans.len(), "deregistering orphan signers");
-
-        let mut deregistered = 0usize;
-        for signer in orphans {
-            if self.config.cancel.is_cancelled() {
-                debug!("shutdown requested, stopping orphan deregistration");
-                break;
-            }
-
-            // Verify the signer is truly registered onchain before spending
-            // gas on a deregistration tx. The `getRegisteredSigners()` view
-            // reads from an `EnumerableSetLib.AddressSet` which can contain
-            // ghost entries (addresses that appear in `values()` but have
-            // `isRegisteredSigner == false`) due to a storage corruption bug
-            // in Solady v0.0.245. Skipping ghosts prevents an infinite
-            // deregistration loop.
-            match self.registry.is_registered(signer).await {
-                Ok(false) => {
-                    warn!(
-                        signer = %signer,
-                        "signer appears in getRegisteredSigners but isRegisteredSigner is false, \
-                         skipping (possible EnumerableSet ghost entry)"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        signer = %signer,
-                        "failed to verify signer registration status, skipping deregistration"
-                    );
-                    continue;
-                }
-                Ok(true) => {}
-            }
-
-            if self.submit_deregistration(signer).await {
-                RegistrarMetrics::deregistrations_total().increment(1);
-                deregistered += 1;
-            }
-        }
-
-        info!(count = deregistered, "orphan deregistration complete");
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -1359,6 +1174,7 @@ mod tests {
     use alloy_rpc_types_eth::TransactionReceipt;
     use alloy_sol_types::SolCall;
     use async_trait::async_trait;
+    use base_proof_contracts::ITEEProverRegistry;
     use base_proof_tee_nitro_attestation_prover::AttestationProof;
     use base_tx_manager::{SendHandle, TxCandidate, TxManager};
     use hex_literal::hex;
@@ -1371,17 +1187,6 @@ mod tests {
     use crate::{InstanceHealthStatus, RegistryClient, Result, SignerClient};
 
     // ── Shared constants ────────────────────────────────────────────────
-
-    /// Expected byte length of ABI-encoded `deregisterSigner(address)` calldata:
-    /// 4-byte selector + 32-byte left-padded address word.
-    const DEREGISTER_CALLDATA_LEN: usize = 36;
-
-    /// Number of zero-padding bytes before the 20-byte address in the ABI word.
-    const ABI_ADDRESS_PAD: usize = 12;
-
-    /// Byte offset where the raw 20-byte address starts in the encoded calldata
-    /// (after the 4-byte selector and 12 bytes of zero-padding).
-    const ABI_ADDRESS_OFFSET: usize = 4 + ABI_ADDRESS_PAD;
 
     /// Well-known Hardhat / Anvil account #0 address.
     const HARDHAT_ACCOUNT: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -1731,30 +1536,6 @@ mod tests {
                 fetch_timeout: Duration::from_secs(crate::DEFAULT_CRL_FETCH_TIMEOUT_SECS),
             },
         }
-    }
-
-    /// Builds a driver for `deregister_orphans` tests (no signer client needed).
-    fn driver_with_shared_tx(
-        registered_signers: Vec<Address>,
-        tx: SharedTxManager,
-    ) -> RegistrationDriver<
-        MockDiscovery,
-        StubProofProvider,
-        MockRegistry,
-        SharedTxManager,
-        StubSignerClient,
-    > {
-        let registry = MockRegistry::with_signers(registered_signers);
-        RegistrationDriver::new(
-            MockDiscovery { instances: vec![] },
-            StubProofProvider,
-            registry,
-            tx,
-            StubSignerClient,
-            default_config(CancellationToken::new()),
-            None,
-        )
-        .expect("test driver construction succeeds")
     }
 
     /// Builds a fully-configured driver for primitive-level tests that
@@ -2248,172 +2029,6 @@ mod tests {
             ok_to_dereg: true,
             unresolved_instance_ids: HashSet::new(),
         }
-    }
-
-    // ── Calldata encoding tests ─────────────────────────────────────────
-
-    #[rstest]
-    #[case::zero_address(Address::ZERO)]
-    #[case::hardhat_account(HARDHAT_ACCOUNT)]
-    #[case::all_ones(Address::repeat_byte(0xFF))]
-    fn deregister_calldata_encodes_correctly(#[case] signer: Address) {
-        let calldata = ITEEProverRegistry::deregisterSignerCall { signer }.abi_encode();
-
-        assert_eq!(calldata.len(), DEREGISTER_CALLDATA_LEN);
-        assert_eq!(&calldata[..4], &ITEEProverRegistry::deregisterSignerCall::SELECTOR);
-        // The 12 bytes between the selector and the address must be zero-padding.
-        assert_eq!(&calldata[4..ABI_ADDRESS_OFFSET], &[0u8; ABI_ADDRESS_PAD]);
-        // The last 20 bytes must be the raw signer address.
-        assert_eq!(&calldata[ABI_ADDRESS_OFFSET..], signer.as_slice());
-    }
-
-    // ── deregister_orphans tests ────────────────────────────────────────
-
-    #[rstest]
-    #[case::no_orphans(vec![ORPHAN_A, ORPHAN_B], vec![ORPHAN_A, ORPHAN_B], 0)]
-    #[case::one_orphan(vec![ORPHAN_A, ORPHAN_B], vec![ORPHAN_A], 1)]
-    #[case::all_orphans(vec![ORPHAN_A, ORPHAN_B], vec![], 2)]
-    #[tokio::test]
-    async fn deregister_orphans_tx_count(
-        #[case] registered: Vec<Address>,
-        #[case] active: Vec<Address>,
-        #[case] expected_txs: usize,
-    ) {
-        let active: HashSet<Address> = active.into_iter().collect();
-
-        let tx = SharedTxManager::new();
-        let driver = driver_with_shared_tx(registered.clone(), tx.clone());
-
-        driver.deregister_orphans(&active, &registered).await.unwrap();
-
-        assert_eq!(tx.sent_calldata().len(), expected_txs);
-    }
-
-    #[tokio::test]
-    async fn deregister_orphans_calldata_targets_orphan() {
-        let registered = vec![ORPHAN_A, ORPHAN_B];
-        let tx = SharedTxManager::new();
-        let driver = driver_with_shared_tx(registered.clone(), tx.clone());
-
-        driver.deregister_orphans(&HashSet::from([ORPHAN_A]), &registered).await.unwrap();
-
-        let sent = tx.sent_calldata();
-        let expected = ITEEProverRegistry::deregisterSignerCall { signer: ORPHAN_B }.abi_encode();
-        assert_eq!(sent[0], Bytes::from(expected));
-    }
-
-    #[tokio::test]
-    async fn deregister_orphans_respects_cancellation() {
-        let tx = SharedTxManager::new();
-        let cancel = CancellationToken::new();
-        let registry = MockRegistry::with_signers(vec![ORPHAN_A]);
-        let driver = RegistrationDriver::new(
-            MockDiscovery { instances: vec![] },
-            StubProofProvider,
-            registry,
-            tx.clone(),
-            StubSignerClient,
-            default_config(cancel.clone()),
-            None,
-        )
-        .expect("test driver construction succeeds");
-
-        let registered = vec![ORPHAN_A];
-        cancel.cancel();
-        driver.deregister_orphans(&HashSet::new(), &registered).await.unwrap();
-
-        assert!(tx.sent_calldata().is_empty(), "no txs should be sent after cancellation");
-    }
-
-    /// Mock registry that simulates a corrupted `EnumerableSetLib.AddressSet`.
-    ///
-    /// `get_registered_signers()` returns `all_values` (including ghost entries),
-    /// but `is_registered()` only returns `true` for addresses in
-    /// `truly_registered`. This models the Solady v0.0.245 bug where
-    /// `values()` contains stale addresses whose `isRegisteredSigner`
-    /// mapping is `false`.
-    #[derive(Debug)]
-    struct GhostRegistry {
-        /// Addresses returned by `getRegisteredSigners()` (includes ghosts).
-        all_values: Vec<Address>,
-        /// Addresses for which `isRegisteredSigner` is `true`.
-        truly_registered: HashSet<Address>,
-    }
-
-    impl GhostRegistry {
-        /// Creates a registry where `ghosts` appear in `values()` but have
-        /// `isRegisteredSigner == false`, and `real` signers appear in both.
-        fn new(real: Vec<Address>, ghosts: Vec<Address>) -> Self {
-            let truly_registered: HashSet<Address> = real.iter().copied().collect();
-            let mut all_values = real;
-            all_values.extend(ghosts);
-            Self { all_values, truly_registered }
-        }
-    }
-
-    #[async_trait]
-    impl RegistryClient for GhostRegistry {
-        async fn is_registered(&self, signer: Address) -> Result<bool> {
-            Ok(self.truly_registered.contains(&signer))
-        }
-
-        async fn get_registered_signers(&self) -> Result<Vec<Address>> {
-            Ok(self.all_values.clone())
-        }
-    }
-
-    #[tokio::test]
-    async fn deregister_orphans_skips_ghost_entries() {
-        // Simulates the Solady v0.0.245 EnumerableSetLib bug: ORPHAN_A is a
-        // ghost entry that appears in getRegisteredSigners() but has
-        // isRegisteredSigner == false. ORPHAN_B is a real orphan.
-        let ghost_registry = GhostRegistry::new(vec![ORPHAN_B], vec![ORPHAN_A]);
-
-        let tx = SharedTxManager::new();
-        let driver = RegistrationDriver::new(
-            MockDiscovery { instances: vec![] },
-            StubProofProvider,
-            ghost_registry,
-            tx.clone(),
-            StubSignerClient,
-            default_config(CancellationToken::new()),
-            None,
-        )
-        .expect("test driver construction succeeds");
-
-        // Both ORPHAN_A and ORPHAN_B are "registered" (in values()),
-        // neither is in active_signers.
-        let registered = vec![ORPHAN_A, ORPHAN_B];
-        driver.deregister_orphans(&HashSet::new(), &registered).await.unwrap();
-
-        let sent = tx.sent_calldata();
-        // Only ORPHAN_B should be deregistered; ORPHAN_A is a ghost.
-        assert_eq!(sent.len(), 1, "ghost entry should be skipped");
-        let expected = ITEEProverRegistry::deregisterSignerCall { signer: ORPHAN_B }.abi_encode();
-        assert_eq!(sent[0], Bytes::from(expected));
-    }
-
-    #[tokio::test]
-    async fn deregister_orphans_skips_all_ghosts_sends_nothing() {
-        // All orphan candidates are ghost entries — no tx should be sent.
-        let ghost_registry = GhostRegistry::new(vec![], vec![ORPHAN_A, ORPHAN_B, ORPHAN_C]);
-
-        let tx = SharedTxManager::new();
-        let driver = RegistrationDriver::new(
-            MockDiscovery { instances: vec![] },
-            StubProofProvider,
-            ghost_registry,
-            tx.clone(),
-            StubSignerClient,
-            default_config(CancellationToken::new()),
-            None,
-        )
-        .expect("test driver construction succeeds");
-
-        let registered = vec![ORPHAN_A, ORPHAN_B, ORPHAN_C];
-        driver.deregister_orphans(&HashSet::new(), &registered).await.unwrap();
-
-        assert!(tx.sent_calldata().is_empty(), "all ghosts should be skipped, no txs sent");
     }
 
     #[tokio::test]
