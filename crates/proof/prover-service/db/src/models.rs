@@ -131,6 +131,11 @@ impl SessionStatus {
             Self::Failed => "FAILED",
         }
     }
+
+    /// Whether this status represents a terminal backend session.
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
 }
 
 impl std::fmt::Display for SessionStatus {
@@ -1088,6 +1093,45 @@ pub struct JobLockState<'a> {
     pub worker_id: Option<&'a str>,
     /// When the active lock expires, if any.
     pub lock_expires_at: Option<DateTime<Utc>>,
+}
+
+/// Parameters for an external worker recording a backend session id against a
+/// claimed job, so a restart or reclaim resumes the in-flight backend job.
+#[derive(Debug, Clone)]
+pub struct WorkerSessionUpsert {
+    /// Public proof session identifier.
+    pub session_id: String,
+    /// Current worker fencing token.
+    pub lock_id: Uuid,
+    /// Worker identifier that owns the claim.
+    pub worker_id: String,
+    /// Backend session type being recorded.
+    pub session_type: SessionType,
+    /// Backend-issued session identifier to persist.
+    pub backend_session_id: String,
+    /// Backend session lifecycle state to persist.
+    pub status: SessionStatus,
+    /// Failure reason to persist, typically set alongside a `Failed` status.
+    pub error_message: Option<String>,
+}
+
+/// Outcome of attempting to record a backend session for a worker job.
+#[derive(Debug, Clone)]
+pub enum RecordSessionOutcome {
+    /// The session was inserted or updated and the active row is returned.
+    Recorded(ProofSession),
+    /// No proof job exists for the supplied `session_id`.
+    NotFound,
+    /// The job exists but is not currently claimed.
+    NotClaimed,
+    /// The supplied `worker_id` or `lock_id` no longer owns the job.
+    StaleLock,
+    /// The supplied lock matched the job, but it had already expired.
+    Expired,
+    /// The job is already terminal.
+    Terminal,
+    /// The requested session status is terminal and must be coordinated with job completion.
+    TerminalSessionStatus,
 }
 
 /// Result of checking a worker's fencing token against a claimed job's lock.
