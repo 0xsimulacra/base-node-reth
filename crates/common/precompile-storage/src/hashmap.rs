@@ -4,6 +4,7 @@ use alloy_primitives::{Address, LogData, U256};
 use revm::{
     context::journaled_state::JournalCheckpoint,
     context_interface::cfg::GasParams,
+    interpreter::gas::{KECCAK256, KECCAK256WORD},
     state::{AccountInfo, Bytecode},
 };
 
@@ -26,6 +27,7 @@ pub struct HashMapStorageProvider {
     is_static: bool,
     counter_sload: u64,
     counter_sstore: u64,
+    gas_deducted: u64,
     snapshots: Vec<Snapshot>,
     gas_params: GasParams,
     state_gas_used: u64,
@@ -64,6 +66,7 @@ impl HashMapStorageProvider {
             is_static: false,
             counter_sload: 0,
             counter_sstore: 0,
+            gas_deducted: 0,
             gas_params: GasParams::default(),
             state_gas_used: 0,
             gas_refunded: 0,
@@ -94,12 +97,15 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
         }
 
         let code_len = code.len();
-        // Mirror the production is_new_account check so state gas tracking is faithful.
-        let is_new_account = self.accounts.get(&address).is_none_or(AccountInfo::is_empty);
-        if is_new_account {
-            self.deduct_state_gas(self.gas_params.create_state_gas())?;
-            self.deduct_state_gas(self.gas_params.code_deposit_state_gas(code_len))?;
+        self.deduct_gas(self.gas_params.code_deposit_cost(code_len))?;
+
+        let is_new_code = self.accounts.get(&address).is_none_or(|info| info.is_empty_code_hash());
+        if is_new_code {
+            self.deduct_gas(self.gas_params.create_cost())?;
+            let num_words = code_len.div_ceil(32) as u64;
+            self.deduct_gas(KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(num_words)))?;
         }
+
         let account = self.accounts.entry(address).or_default();
         account.code_hash = code.hash_slow();
         account.code = Some(code);
@@ -170,7 +176,8 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
         Ok(self.transient.get(&(address, key)).copied().unwrap_or(U256::ZERO))
     }
 
-    fn deduct_gas(&mut self, _gas: u64) -> Result<(), BasePrecompileError> {
+    fn deduct_gas(&mut self, gas: u64) -> Result<(), BasePrecompileError> {
+        self.gas_deducted = self.gas_deducted.saturating_add(gas);
         Ok(())
     }
 
@@ -263,6 +270,12 @@ impl HashMapStorageProvider {
         self.events.get(&address).unwrap_or(&EMPTY)
     }
 
+    /// Sets the balance for the given address (test-utils only).
+    pub fn set_balance(&mut self, address: Address, balance: U256) {
+        let account = self.accounts.entry(address).or_default();
+        account.balance = balance;
+    }
+
     /// Sets the nonce for the given address (test-utils only).
     pub fn set_nonce(&mut self, address: Address, nonce: u64) {
         let account = self.accounts.entry(address).or_default();
@@ -312,6 +325,11 @@ impl HashMapStorageProvider {
     /// Returns the SSTORE counter (test-utils only).
     pub const fn counter_sstore(&self) -> u64 {
         self.counter_sstore
+    }
+
+    /// Returns the total gas deducted via [`PrecompileStorageProvider::deduct_gas`] (test-utils only).
+    pub const fn gas_deducted(&self) -> u64 {
+        self.gas_deducted
     }
 
     /// Resets the SLOAD/SSTORE counters (test-utils only).

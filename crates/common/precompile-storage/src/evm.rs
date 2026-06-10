@@ -96,30 +96,24 @@ impl PrecompileStorageProvider for EvmPrecompileStorageProvider<'_> {
         // Yellow Paper G_codedeposit: 200 gas per byte of deployed bytecode.
         self.deduct_gas(self.gas_params.code_deposit_cost(code_len))?;
 
-        // For new (empty) accounts charge the CREATE equivalent costs (Yellow Paper G_create).
-        let is_new_account = {
+        // Charge CREATE equivalent costs whenever code is written to an account that had no code,
+        // regardless of its balance. A prefunded account (balance > 0, no code) passes the
+        // factory's collision check (which only rejects accounts that already have code), but
+        // must still pay G_create and the keccak hash cost.
+        let is_new_code = {
             let state_load = self
                 .internals
                 .load_account(address)
                 .map_err(|e| BasePrecompileError::Fatal(e.to_string()))?;
-            state_load.data.info.is_empty()
+            state_load.data.info.is_empty_code_hash()
         };
 
-        if is_new_account {
+        if is_new_code {
             // Yellow Paper G_create: base cost for creating a new contract account.
             self.deduct_gas(self.gas_params.create_cost())?;
             // Yellow Paper G_sha3 + G_sha3word: cost of computing the stored code hash.
             let num_words = code_len.div_ceil(32) as u64;
             self.deduct_gas(KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(num_words)))?;
-            // EIP-8037: both state gas charges are gated on is_new_account.
-            // create_state_gas covers the new account entry in the state trie.
-            // code_deposit_state_gas covers the new code object. Replacing code on an
-            // existing account is not a state-creating operation in the EIP-8037 model —
-            // the code slot already occupies a trie node — so it is intentionally excluded.
-            // In practice, precompile set_code is only called during factory token creation,
-            // where the target address is always a fresh account.
-            self.deduct_state_gas(self.gas_params.create_state_gas())?;
-            self.deduct_state_gas(self.gas_params.code_deposit_state_gas(code_len))?;
         }
 
         self.internals
@@ -477,47 +471,51 @@ mod tests {
         assert_eq!(provider.gas_used(), 0);
     }
 
-    /// `set_code` on a brand-new account must charge both `create_state_gas` and
-    /// `code_deposit_state_gas` against the state-gas counter.
+    /// `set_code` on a prefunded account (balance > 0, no code) must charge the same gas
+    /// as a fully empty account. Before the fix, `is_empty()` returned false for prefunded
+    /// accounts, silently skipping `G_create` and the keccak hash cost (~32 036 gas).
     #[test]
-    fn set_code_new_account_charges_create_and_deposit_state_gas() {
-        let mut provider = amsterdam_provider();
-        let addr = Address::from([0x42u8; 20]);
+    fn set_code_prefunded_account_charges_same_gas_as_empty_account() {
+        let addr = Address::from([0x43u8; 20]);
         let code = Bytecode::new_raw([0x60u8, 0x00].as_ref().into());
-        let code_len = code.len();
-        let gas_params = GasParams::new_spec(SpecId::AMSTERDAM);
 
-        provider.set_code(addr, code).unwrap();
+        let mut empty_provider = amsterdam_provider();
+        empty_provider.set_code(addr, code.clone()).unwrap();
+        let gas_for_empty = empty_provider.gas_deducted();
 
-        let expected = gas_params.create_state_gas() + gas_params.code_deposit_state_gas(code_len);
-        assert!(expected > 0, "AMSTERDAM state gas must be non-zero");
-        assert_eq!(provider.state_gas_used(), expected);
+        let mut prefunded_provider = amsterdam_provider();
+        prefunded_provider.set_balance(addr, U256::from(1u64));
+        prefunded_provider.set_code(addr, code).unwrap();
+        let gas_for_prefunded = prefunded_provider.gas_deducted();
+
+        assert!(gas_for_empty > 0, "set_code must charge non-zero gas");
+        assert_eq!(
+            gas_for_empty, gas_for_prefunded,
+            "prefunded account must pay identical gas to an empty account"
+        );
     }
 
-    /// `set_code` on an already-initialised account must NOT charge any additional
-    /// state gas (the account and its metadata already exist in the trie).
+    /// `set_code` on an account that already has code must replace it without error.
     #[test]
-    fn set_code_existing_account_skips_state_gas() {
+    fn set_code_existing_account_replaces_code() {
         let mut provider = amsterdam_provider();
         let addr = Address::from([0x42u8; 20]);
-        let code = Bytecode::new_raw([0x60u8, 0x00].as_ref().into());
+        let code1 = Bytecode::new_raw([0x60u8, 0x00].as_ref().into());
+        let code2 = Bytecode::new_raw([0x60u8, 0x01].as_ref().into());
+        let expected_hash = code2.hash_slow();
 
-        // First call creates the account and charges state gas.
-        provider.set_code(addr, code.clone()).unwrap();
-        let after_first = provider.state_gas_used();
-        assert!(after_first > 0);
+        provider.set_code(addr, code1).unwrap();
+        provider.set_code(addr, code2).unwrap();
 
-        // Second call updates an existing account; state gas must not increase.
-        provider.set_code(addr, code).unwrap();
         assert_eq!(
-            provider.state_gas_used(),
-            after_first,
-            "state_gas_used must not increase for an existing account"
+            provider.get_account_info(addr).map(|i| i.code_hash),
+            Some(expected_hash),
+            "second set_code must replace the stored code hash"
         );
     }
 
     #[test]
-    fn set_code_static_context_reverts_before_state_gas_or_code_mutation() {
+    fn set_code_static_context_reverts_before_code_mutation() {
         let mut provider = amsterdam_provider();
         provider.set_static(true);
         let addr = Address::from([0x42u8; 20]);
@@ -526,7 +524,6 @@ mod tests {
         let err = provider.set_code(addr, code).unwrap_err();
 
         assert_eq!(err, BasePrecompileError::StaticCallViolation);
-        assert_eq!(provider.state_gas_used(), 0);
         assert!(provider.get_account_info(addr).is_none());
     }
 }

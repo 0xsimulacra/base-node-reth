@@ -602,6 +602,26 @@ mod tests {
         });
     }
 
+    /// A prefunded token address (balance > 0, no code) must not block `create_b20`.
+    /// The factory collision check rejects only accounts that already have code, so a
+    /// prefunded address is a valid deployment target and `set_code` must succeed.
+    #[test]
+    fn test_create_token_at_prefunded_address_succeeds() {
+        let mut storage = HashMapStorageProvider::new(1);
+        activate_precompiles(&mut storage);
+
+        let caller = Address::repeat_byte(0x55);
+        let salt = B256::repeat_byte(0xF0);
+        let (token_addr, _) = B20Variant::Asset.compute_address(caller, salt);
+
+        storage.set_balance(token_addr, U256::from(1u64));
+
+        StorageCtx::enter(&mut storage, |ctx| {
+            let mut factory = B20FactoryStorage::new(ctx);
+            factory.create_b20(caller, b20_call(salt)).unwrap();
+        });
+    }
+
     #[test]
     fn test_create_token_reverts_for_invalid_version_and_variant() {
         let mut storage = HashMapStorageProvider::new(1);
