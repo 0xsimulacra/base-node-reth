@@ -236,7 +236,7 @@ pub struct RegistrationDriver<D, P, R, T, S> {
     config: DriverConfig,
     /// Optional certificate revocation manager. Built once at construction
     /// time when CRL checking is enabled. `None` when CRL checking is disabled.
-    cert_manager: Option<CertManager>,
+    cert_manager: Option<CertManager<T>>,
     /// Bounds the number of proof-generation calls that may be in-flight
     /// across the spawned task pool at once. Sized from
     /// [`DriverConfig::max_concurrency`], matching the discovery/resolve
@@ -262,16 +262,16 @@ where
     D: InstanceDiscovery + 'static,
     P: AttestationProofProvider + 'static,
     R: RegistryClient + 'static,
-    T: TxManager + 'static,
+    T: TxManager + Clone + 'static,
     S: SignerClient + 'static,
 {
     /// Creates a new registration driver.
     ///
     /// When CRL checking is enabled, pre-builds the HTTP client used for
     /// CRL fetches so it can be reused across registration cycles. The
-    /// optional `nitro_verifier` client consults the onchain durable
-    /// revocation sentinel before each registration; pass `None` to disable
-    /// the onchain pre-check (useful for tests and unit deployments).
+    /// required `nitro_verifier` client consults the onchain durable
+    /// revocation sentinel before each registration and provides the
+    /// `revokeCert` transaction destination.
     ///
     /// # Errors
     ///
@@ -297,7 +297,7 @@ where
                         .into(),
                 ));
             };
-            Some(CertManager::new(&config.crl, nitro_verifier)?)
+            Some(CertManager::new(&config.crl, nitro_verifier, tx_manager.clone())?)
         } else {
             None
         };
@@ -601,10 +601,7 @@ where
                 })?;
             let cert_manager =
                 self.cert_manager.as_ref().expect("cert_manager required when CRL enabled");
-            match cert_manager
-                .check_and_revoke_crls(first_attestation, instance, &self.tx_manager)
-                .await
-            {
+            match cert_manager.check_and_revoke_crls(first_attestation, instance).await {
                 Ok(true) => {
                     warn!(
                         instance = %instance.instance_id,
@@ -1549,6 +1546,25 @@ mod tests {
             )
             .expect("test driver construction succeeds"),
         )
+    }
+
+    #[test]
+    fn new_rejects_crl_enabled_without_nitro_verifier() {
+        let mut config = default_config(CancellationToken::new());
+        config.crl.enabled = true;
+
+        let err = RegistrationDriver::new(
+            MockDiscovery { instances: vec![] },
+            StubProofProvider,
+            MockRegistry::with_signers(vec![]),
+            SharedTxManager::new(),
+            MockSignerClient::from_keys(&[]),
+            config,
+            None,
+        )
+        .expect_err("enabled CRL requires a Nitro verifier client");
+
+        assert!(matches!(err, RegistrarError::Config(_)));
     }
 
     // ── Proof-task mock types ─────────────────────────────────────────
