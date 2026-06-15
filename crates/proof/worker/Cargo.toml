@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 # base
+base-retry.workspace = true
 base-prover-service-client.workspace = true
 base-prover-service-protocol.workspace = true
 
@@ -22,6 +23,7 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 # misc
+backon.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
