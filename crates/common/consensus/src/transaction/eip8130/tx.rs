@@ -66,6 +66,10 @@ pub struct TxEip8130 {
     /// Calls dispatched by the protocol after account changes apply, grouped
     /// into phases (`Vec<Vec<Call>>`).
     pub calls: Vec<Vec<Call>>,
+    /// Opaque attribution/annotation bytes; empty when unused. Carried in the
+    /// wire body between `calls` and `payer` and committed to by both the
+    /// sender and payer signatures, but otherwise uninterpreted by the protocol.
+    pub metadata: Bytes,
     /// Optional explicit payer; `None` means the resolved sender pays gas.
     pub payer: Option<Address>,
 }
@@ -151,6 +155,7 @@ impl TxEip8130 {
             + self.gas_limit.length()
             + self.account_changes.length()
             + Self::calls_encoded_length(&self.calls)
+            + self.metadata.length()
             + Self::address_opt_encoded_length(&self.payer)
     }
 
@@ -166,6 +171,7 @@ impl TxEip8130 {
         self.gas_limit.encode(out);
         self.account_changes.encode(out);
         Self::encode_calls(&self.calls, out);
+        self.metadata.encode(out);
         Self::encode_address_opt(&self.payer, out);
     }
 
@@ -182,6 +188,7 @@ impl TxEip8130 {
             gas_limit: Decodable::decode(buf)?,
             account_changes: Decodable::decode(buf)?,
             calls: Self::decode_calls(buf)?,
+            metadata: Decodable::decode(buf)?,
             payer: Self::decode_address_opt(buf)?,
         })
     }
@@ -215,8 +222,11 @@ impl TxEip8130 {
 
     /// Signing-hash preimage for the payer, per [EIP-8130].
     ///
-    /// `keccak256(EIP8130_PAYER_TYPE || rlp(unsigned body fields with the
-    /// `sender` slot replaced by the recovered sender address))`.
+    /// `keccak256(EIP8130_PAYER_TYPE || rlp([all body fields through `payer`]))`
+    /// with the `sender` slot replaced by the recovered sender address. The
+    /// payer commits to the full transaction body — including the `payer` slot
+    /// itself — and only the `sender_auth` / `payer_auth` slots (which live in
+    /// the signed wrapper) are excluded.
     ///
     /// [EIP-8130]: https://eips.ethereum.org/EIPS/eip-8130
     pub fn payer_signature_hash(&self, resolved_sender: Address) -> B256 {
@@ -239,6 +249,7 @@ impl TxEip8130 {
             + mem::size_of::<u64>()
             + self.account_changes.capacity() * mem::size_of::<AccountChange>()
             + self.calls.iter().map(|p| p.capacity() * mem::size_of::<Call>()).sum::<usize>()
+            + self.metadata.len()
             + mem::size_of::<Option<Address>>()
     }
 }
@@ -402,6 +413,7 @@ mod tests {
                 to: address!("0x00000000000000000000000000000000000000cc"),
                 data: bytes!("deadbeef"),
             }]],
+            metadata: bytes!("c0ffee"),
             payer: None,
         }
     }
@@ -541,6 +553,37 @@ mod tests {
         assert_eq!(payer_hash_v1, payer_hash_v2);
     }
 
+    // `metadata` is committed to by both signatures.
+    #[test]
+    fn metadata_is_covered_by_both_signature_hashes() {
+        let tx = sample_tx();
+        let resolved = address!("0x00000000000000000000000000000000000000dd");
+        let mut other = tx.clone();
+        other.metadata = bytes!("beef");
+
+        assert_ne!(tx.sender_signature_hash(), other.sender_signature_hash());
+        assert_ne!(tx.payer_signature_hash(resolved), other.payer_signature_hash(resolved));
+    }
+
+    // Both signatures commit to the full body through `payer`, so changing the
+    // `payer` slot changes both the sender and payer hashes.
+    #[test]
+    fn payer_field_is_covered_by_both_signature_hashes() {
+        let resolved = address!("0x00000000000000000000000000000000000000dd");
+        let mut self_pay = sample_tx();
+        self_pay.payer = None;
+        let sponsored = TxEip8130 {
+            payer: Some(address!("0x00000000000000000000000000000000000000ee")),
+            ..self_pay.clone()
+        };
+
+        assert_ne!(
+            self_pay.payer_signature_hash(resolved),
+            sponsored.payer_signature_hash(resolved)
+        );
+        assert_ne!(self_pay.sender_signature_hash(), sponsored.sender_signature_hash());
+    }
+
     /// Proves that EIP-8130 transactions can be deserialized through the
     /// `BaseTxEnvelope` tagged-enum path with hex-string quantity fields.
     ///
@@ -569,6 +612,7 @@ mod tests {
                 "gasLimit": 21000,
                 "accountChanges": [],
                 "calls": [],
+                "metadata": "0x",
                 "payer": null
             },
             "senderAuth": "0x",
