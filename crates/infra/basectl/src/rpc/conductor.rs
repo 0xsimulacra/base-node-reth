@@ -5,9 +5,13 @@ use base_consensus_rpc::{
     ServerSuffrage,
 };
 use futures::{StreamExt, stream};
-use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder, rpc_params};
+use jsonrpsee::{
+    core::client::{ClientT, Error as JsonRpcClientError},
+    http_client::{HttpClient, HttpClientBuilder},
+    rpc_params,
+};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::{ConductorNodeConfig, ConductorSource};
 
@@ -77,6 +81,482 @@ pub struct ConductorNodeStatus {
     pub discovered: bool,
 }
 
+/// Typed conductor RPC helper surface for non-TUI commands.
+#[derive(Debug)]
+pub struct ConductorControl;
+
+/// One-shot conductor cluster snapshot.
+#[derive(Debug, Clone)]
+pub struct ConductorClusterSnapshot {
+    /// Node configs used for this snapshot.
+    pub nodes: Vec<ConductorNodeConfig>,
+    /// Per-node status rows fetched from the cluster.
+    pub statuses: Vec<ConductorNodeStatus>,
+    /// Raft membership observed while fetching the snapshot.
+    pub membership: Option<ClusterMembership>,
+    /// Error returned by the best-effort membership lookup for static snapshots.
+    pub membership_error: Option<String>,
+    /// Whether this snapshot was built from discovered raft membership.
+    pub discovered: bool,
+}
+
+/// Result of running a conductor control RPC across several nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConductorFanoutReport {
+    /// Total nodes targeted.
+    pub total: usize,
+    /// Node names whose RPC succeeded.
+    pub successes: Vec<String>,
+    /// Node names and errors for failed RPCs.
+    pub failures: Vec<ConductorNodeFailure>,
+}
+
+/// Per-node fanout failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConductorNodeFailure {
+    /// Node name.
+    pub name: String,
+    /// Error returned while mutating the node.
+    pub error: String,
+}
+
+impl ConductorFanoutReport {
+    /// Returns true only when at least one node was targeted and every RPC succeeded.
+    pub const fn is_success(&self) -> bool {
+        self.total > 0 && self.failures.is_empty()
+    }
+
+    /// Formats the same summary string used by the TUI toast path.
+    ///
+    /// `verb` is the past-tense action used for success and partial-failure
+    /// summaries. Add new verbs to [`empty_fanout_verb`] so the zero-target
+    /// branch can render the infinitive form.
+    pub fn summary(&self, verb: &str) -> String {
+        if self.total == 0 {
+            return format!("no conductor nodes to {}", empty_fanout_verb(verb));
+        }
+        let ok_count = self.successes.len();
+        if self.failures.is_empty() {
+            format!("conductor {verb} on {ok_count}/{} nodes", self.total)
+        } else {
+            let detail = self
+                .failures
+                .iter()
+                .map(|failure| format!("{}: {}", failure.name, failure.error))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("conductor {verb} on {ok_count}/{} nodes; failures: {detail}", self.total)
+        }
+    }
+
+    /// Converts the report into the TUI's success-or-warning result shape.
+    pub fn to_result(&self, verb: &str) -> Result<String, String> {
+        if self.is_success() { Ok(self.summary(verb)) } else { Err(self.summary(verb)) }
+    }
+}
+
+fn empty_fanout_verb(verb: &str) -> &str {
+    match verb {
+        "paused" => "pause",
+        "resumed" => "resume",
+        other => other,
+    }
+}
+
+impl ConductorControl {
+    /// Fetches a one-shot conductor cluster snapshot.
+    pub async fn snapshot(source: ConductorSource) -> anyhow::Result<ConductorClusterSnapshot> {
+        const RPC_TIMEOUT: Duration = Duration::from_millis(500);
+
+        match &source {
+            ConductorSource::Static(nodes) => {
+                let (membership, membership_error) = match Self::current_membership(&source).await {
+                    Ok(membership) => (Some(membership), None),
+                    Err(error) => {
+                        warn!(error = %error, "failed to fetch conductor cluster membership for static snapshot");
+                        (None, Some(error.to_string()))
+                    }
+                };
+                let clients = build_conductor_clients(nodes, RPC_TIMEOUT);
+                let statuses = fetch_conductor_statuses(&clients, membership.as_ref(), false).await;
+                Ok(ConductorClusterSnapshot {
+                    nodes: nodes.clone(),
+                    statuses,
+                    membership,
+                    membership_error,
+                    discovered: false,
+                })
+            }
+            ConductorSource::Discover { .. } => {
+                let membership = Self::current_membership(&source).await?;
+                let nodes = Self::nodes_from_membership(&source, &membership)?;
+                let clients = build_conductor_clients(&nodes, RPC_TIMEOUT);
+                let statuses = fetch_conductor_statuses(&clients, Some(&membership), true).await;
+                Ok(ConductorClusterSnapshot {
+                    nodes,
+                    statuses,
+                    membership: Some(membership),
+                    membership_error: None,
+                    discovered: true,
+                })
+            }
+        }
+    }
+
+    /// Fetches live raft membership from the configured conductor source.
+    pub async fn current_membership(source: &ConductorSource) -> anyhow::Result<ClusterMembership> {
+        const TIMEOUT: Duration = Duration::from_millis(500);
+
+        let nodes: Vec<ConductorNodeConfig> = match source {
+            ConductorSource::Static(nodes) => nodes.clone(),
+            ConductorSource::Discover { .. } => source.bootstrap_node().into_iter().collect(),
+        };
+        if nodes.is_empty() {
+            anyhow::bail!("no conductor nodes configured");
+        }
+
+        let mut failures = Vec::new();
+        for node in nodes {
+            let client = match HttpClientBuilder::default()
+                .request_timeout(TIMEOUT)
+                .build(node.conductor_rpc.as_str())
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", node.name));
+                    continue;
+                }
+            };
+            match ConductorApiClient::conductor_cluster_membership(&client).await {
+                Ok(membership) => return Ok(membership),
+                Err(error) => failures.push(format!("{}: {error}", node.name)),
+            }
+        }
+
+        anyhow::bail!(
+            "failed to fetch conductor cluster membership from any node: {}",
+            failures.join("; ")
+        )
+    }
+
+    /// Resolves node configs for every server in a live raft membership snapshot.
+    pub fn nodes_from_membership(
+        source: &ConductorSource,
+        membership: &ClusterMembership,
+    ) -> anyhow::Result<Vec<ConductorNodeConfig>> {
+        match source {
+            ConductorSource::Discover { .. } => {
+                source.synthesize_nodes(membership).filter(|nodes| !nodes.is_empty()).ok_or_else(
+                    || anyhow::anyhow!("failed to synthesize conductor nodes from membership"),
+                )
+            }
+            ConductorSource::Static(configured) => {
+                let mut nodes = Vec::new();
+                let mut missing = Vec::new();
+                for server in &membership.servers {
+                    if let Some(node) = configured.iter().find(|node| node.server_id == server.id) {
+                        nodes.push(node.clone());
+                    } else {
+                        missing.push(server.id.clone());
+                    }
+                }
+                if !missing.is_empty() {
+                    anyhow::bail!(
+                        "raft membership contains server(s) missing from conductor config: {}",
+                        missing.join(", ")
+                    );
+                }
+                if nodes.is_empty() {
+                    anyhow::bail!("conductor cluster membership is empty");
+                }
+                Ok(nodes)
+            }
+        }
+    }
+
+    /// Finds the current Raft leader and transfers leadership.
+    pub async fn transfer_leader(
+        nodes: &[ConductorNodeConfig],
+        target_name: Option<&str>,
+    ) -> anyhow::Result<String> {
+        const TIMEOUT: Duration = Duration::from_millis(500);
+        const SUBMIT_ATTEMPTS: usize = 3;
+
+        let target_node = match target_name {
+            Some(target) => Some(
+                nodes
+                    .iter()
+                    .find(|n| n.name == target)
+                    .ok_or_else(|| anyhow::anyhow!("target node {target} not found"))?,
+            ),
+            None => None,
+        };
+        let mut last_error = None;
+
+        for _ in 0..SUBMIT_ATTEMPTS {
+            let leader_lookup = find_conductor_leader(nodes, TIMEOUT).await;
+            let failure_summary = leader_lookup.failure_summary();
+            let Some((leader_name, leader)) = leader_lookup.leader else {
+                last_error = Some(
+                    failure_summary.unwrap_or_else(|| "no leader found in cluster".to_string()),
+                );
+                tokio::time::sleep(TIMEOUT).await;
+                continue;
+            };
+
+            match target_node {
+                None => match ConductorApiClient::conductor_transfer_leader(&leader).await {
+                    Ok(()) => {
+                        let observed = wait_for_stable_leader(
+                            nodes,
+                            StableLeaderGoal::ReplacementFor(&leader_name),
+                        )
+                        .await?;
+                        return Ok(format!(
+                            "leadership transferred from {leader_name} to {observed}"
+                        ));
+                    }
+                    Err(error) if is_stale_leader_error(&error) => {
+                        last_error = Some(error.to_string());
+                        tokio::time::sleep(TIMEOUT).await;
+                    }
+                    Err(error) => return Err(anyhow::anyhow!("{error}")),
+                },
+                Some(target_node) => {
+                    if leader_name == target_node.name.as_str() {
+                        return Ok(format!("leadership already on {}", target_node.name));
+                    }
+                    match ConductorApiClient::conductor_transfer_leader_to_server(
+                        &leader,
+                        target_node.server_id.clone(),
+                        target_node.raft_addr.clone(),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let observed = wait_for_stable_leader(
+                                nodes,
+                                StableLeaderGoal::Specific(target_node.name.as_str()),
+                            )
+                            .await?;
+                            return Ok(format!("leadership transferred to {observed}"));
+                        }
+                        Err(error) if is_stale_leader_error(&error) => {
+                            last_error = Some(error.to_string());
+                            tokio::time::sleep(TIMEOUT).await;
+                        }
+                        Err(error) => return Err(anyhow::anyhow!("{error}")),
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "failed to submit leadership transfer after {SUBMIT_ATTEMPTS} attempts: {}",
+            last_error.unwrap_or_else(|| "no leader found in cluster".to_string())
+        )
+    }
+
+    /// Pauses op-conductor's control loop on a single node.
+    pub async fn pause_node(node: &ConductorNodeConfig) -> anyhow::Result<String> {
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
+        let client = HttpClientBuilder::default()
+            .request_timeout(TIMEOUT)
+            .build(node.conductor_rpc.as_str())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        ConductorApiClient::conductor_pause(&client).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(format!("conductor paused on {}", node.name))
+    }
+
+    /// Resumes op-conductor's control loop on a single node.
+    pub async fn resume_node(node: &ConductorNodeConfig) -> anyhow::Result<String> {
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
+        let client = HttpClientBuilder::default()
+            .request_timeout(TIMEOUT)
+            .build(node.conductor_rpc.as_str())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        ConductorApiClient::conductor_resume(&client).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(format!("conductor resumed on {}", node.name))
+    }
+
+    /// Pauses op-conductor's control loop on every node in parallel.
+    pub async fn pause_all(nodes: Vec<ConductorNodeConfig>) -> ConductorFanoutReport {
+        fan_out_conductor_control(nodes, |client| async move {
+            ConductorApiClient::conductor_pause(&client).await.map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await
+    }
+
+    /// Resumes op-conductor's control loop on every node in parallel.
+    pub async fn resume_all(nodes: Vec<ConductorNodeConfig>) -> ConductorFanoutReport {
+        fan_out_conductor_control(nodes, |client| async move {
+            ConductorApiClient::conductor_resume(&client).await.map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await
+    }
+}
+
+#[derive(Debug)]
+struct LeaderLookup {
+    leader: Option<(String, HttpClient)>,
+    failures: Vec<ConductorNodeFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StableLeaderGoal<'a> {
+    Specific(&'a str),
+    ReplacementFor(&'a str),
+}
+
+impl StableLeaderGoal<'_> {
+    fn matches(self, observed: &str) -> bool {
+        match self {
+            Self::Specific(target) => observed == target,
+            Self::ReplacementFor(original) => observed != original,
+        }
+    }
+
+    fn timeout_message(
+        self,
+        observation_timeout: Duration,
+        last_observed: &str,
+        probe_suffix: &str,
+    ) -> String {
+        match self {
+            Self::Specific(target) => format!(
+                "leadership transfer submitted, but target {target} was not observed as stable leader after {}s (last observed leader: {last_observed}{probe_suffix})",
+                observation_timeout.as_secs(),
+            ),
+            Self::ReplacementFor(original) => format!(
+                "leadership transfer submitted, but no stable replacement leader for {original} was observed after {}s (last observed leader: {last_observed}{probe_suffix})",
+                observation_timeout.as_secs(),
+            ),
+        }
+    }
+}
+
+impl LeaderLookup {
+    fn failure_summary(&self) -> Option<String> {
+        (!self.failures.is_empty()).then(|| {
+            self.failures
+                .iter()
+                .map(|failure| format!("{}: {}", failure.name, failure.error))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
+}
+
+async fn find_conductor_leader(nodes: &[ConductorNodeConfig], timeout: Duration) -> LeaderLookup {
+    let results = futures::future::join_all(nodes.iter().map(|node| async move {
+        let client = HttpClientBuilder::default()
+            .request_timeout(timeout)
+            .build(node.conductor_rpc.as_str())
+            .map_err(|error| {
+                debug!(error = %error, node = %node.name, rpc = %node.conductor_rpc, "failed to build conductor client for leader probe");
+                ConductorNodeFailure { name: node.name.clone(), error: error.to_string() }
+            })?;
+        let is_leader = ConductorApiClient::conductor_leader(&client).await.map_err(|error| {
+            debug!(error = %error, node = %node.name, rpc = %node.conductor_rpc, "failed to probe conductor leader");
+            ConductorNodeFailure { name: node.name.clone(), error: error.to_string() }
+        })?;
+        Ok::<_, ConductorNodeFailure>((node.name.clone(), client, is_leader))
+    }))
+    .await;
+
+    let mut leader = None;
+    let mut failures = Vec::new();
+    for result in results {
+        match result {
+            Ok((name, client, true)) if leader.is_none() => leader = Some((name, client)),
+            Ok((name, _, true)) => {
+                let first_leader =
+                    leader.as_ref().map_or("unknown", |(leader_name, _)| leader_name.as_str());
+                warn!(first_leader = %first_leader, node = %name, "multiple nodes report is_leader=true; possible split-brain");
+            }
+            Ok(_) => {}
+            Err(failure) => failures.push(failure),
+        }
+    }
+
+    LeaderLookup { leader, failures }
+}
+
+async fn wait_for_stable_leader(
+    nodes: &[ConductorNodeConfig],
+    goal: StableLeaderGoal<'_>,
+) -> anyhow::Result<String> {
+    const LEADER_RPC_TIMEOUT: Duration = Duration::from_millis(500);
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+    // Keep a short stabilization barrier so back-to-back conductor actions do
+    // not race leader churn, while still returning quickly once leadership settles.
+    const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(6);
+    const STABLE_OBSERVATIONS: usize = 2;
+
+    let deadline = tokio::time::sleep(OBSERVATION_TIMEOUT);
+    tokio::pin!(deadline);
+    let mut last_observed = None;
+    let mut last_probe_error = None;
+    let mut stable_name: Option<String> = None;
+    let mut stable_observations = 0usize;
+
+    loop {
+        let leader_lookup = tokio::select! {
+            _ = &mut deadline => break,
+            leader_lookup = find_conductor_leader(nodes, LEADER_RPC_TIMEOUT) => leader_lookup,
+        };
+        let failure_summary = leader_lookup.failure_summary();
+        let observed = leader_lookup.leader.map(|(name, _)| name);
+        if let Some(name) = observed {
+            last_observed = Some(name.clone());
+            let _ = last_probe_error.take();
+            if goal.matches(name.as_str()) {
+                if stable_name.as_deref() == Some(name.as_str()) {
+                    stable_observations += 1;
+                } else {
+                    stable_name = Some(name.clone());
+                    stable_observations = 1;
+                }
+                if stable_observations >= STABLE_OBSERVATIONS {
+                    return Ok(name);
+                }
+            } else {
+                stable_name = None;
+                stable_observations = 0;
+            }
+        } else {
+            last_probe_error = failure_summary;
+            stable_name = None;
+            stable_observations = 0;
+        }
+
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+        }
+    }
+
+    let last = last_observed.as_deref().unwrap_or("none");
+    let probe_suffix = last_probe_error
+        .as_deref()
+        .map_or_else(String::new, |error| format!("; last probe errors: {error}"));
+    anyhow::bail!(goal.timeout_message(OBSERVATION_TIMEOUT, last, &probe_suffix))
+}
+
+fn is_stale_leader_error(error: &JsonRpcClientError) -> bool {
+    const SERVER_ERROR_CODE: i32 = -32000;
+    const STALE_LEADER_MESSAGE: &str = "node is not the leader";
+
+    matches!(
+        error,
+        JsonRpcClientError::Call(payload)
+            if payload.code() == SERVER_ERROR_CODE
+                && payload.message() == STALE_LEADER_MESSAGE
+    )
+}
+
 /// Finds the current Raft leader and transfers leadership.
 ///
 /// If `target_name` is `None`, leadership is transferred to any available peer
@@ -89,50 +569,7 @@ pub async fn transfer_conductor_leader(
     target_name: Option<String>,
     result_tx: mpsc::Sender<Result<String, String>>,
 ) {
-    const TIMEOUT: Duration = Duration::from_millis(500);
-
-    let outcome: anyhow::Result<String> = async {
-        let mut leader_client = None;
-        let mut leader_name = String::new();
-
-        for node in &nodes {
-            let client = HttpClientBuilder::default()
-                .request_timeout(TIMEOUT)
-                .build(node.conductor_rpc.as_str())
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            if ConductorApiClient::conductor_leader(&client).await.unwrap_or(false) {
-                leader_client = Some(client);
-                leader_name = node.name.clone();
-                break;
-            }
-        }
-
-        let leader = leader_client.ok_or_else(|| anyhow::anyhow!("no leader found in cluster"))?;
-
-        match target_name {
-            None => {
-                ConductorApiClient::conductor_transfer_leader(&leader)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok(format!("leadership transferred from {leader_name}"))
-            }
-            Some(ref target) => {
-                let target_node = nodes
-                    .iter()
-                    .find(|n| n.name == *target)
-                    .ok_or_else(|| anyhow::anyhow!("target node {target} not found"))?;
-                ConductorApiClient::conductor_transfer_leader_to_server(
-                    &leader,
-                    target_node.server_id.clone(),
-                    target_node.raft_addr.clone(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok(format!("leadership transferred to {target}"))
-            }
-        }
-    }
-    .await;
+    let outcome = ConductorControl::transfer_leader(&nodes, target_name.as_deref()).await;
 
     let _ = result_tx.send(outcome.map_err(|e| e.to_string())).await;
 }
@@ -146,17 +583,7 @@ pub async fn conductor_pause_node(
     node: ConductorNodeConfig,
     result_tx: mpsc::Sender<Result<String, String>>,
 ) {
-    const TIMEOUT: Duration = Duration::from_secs(5);
-
-    let outcome: anyhow::Result<String> = async {
-        let client = HttpClientBuilder::default()
-            .request_timeout(TIMEOUT)
-            .build(node.conductor_rpc.as_str())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        ConductorApiClient::conductor_pause(&client).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(format!("conductor paused on {}", node.name))
-    }
-    .await;
+    let outcome = ConductorControl::pause_node(&node).await;
 
     let _ = result_tx.send(outcome.map_err(|e| e.to_string())).await;
 }
@@ -166,17 +593,7 @@ pub async fn conductor_resume_node(
     node: ConductorNodeConfig,
     result_tx: mpsc::Sender<Result<String, String>>,
 ) {
-    const TIMEOUT: Duration = Duration::from_secs(5);
-
-    let outcome: anyhow::Result<String> = async {
-        let client = HttpClientBuilder::default()
-            .request_timeout(TIMEOUT)
-            .build(node.conductor_rpc.as_str())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        ConductorApiClient::conductor_resume(&client).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(format!("conductor resumed on {}", node.name))
-    }
-    .await;
+    let outcome = ConductorControl::resume_node(&node).await;
 
     let _ = result_tx.send(outcome.map_err(|e| e.to_string())).await;
 }
@@ -192,10 +609,7 @@ pub async fn conductor_pause_all_nodes(
     nodes: Vec<ConductorNodeConfig>,
     result_tx: mpsc::Sender<Result<String, String>>,
 ) {
-    let summary = fan_out_conductor_control(nodes, "paused", |client| async move {
-        ConductorApiClient::conductor_pause(&client).await.map_err(|e| anyhow::anyhow!("{e}"))
-    })
-    .await;
+    let summary = ConductorControl::pause_all(nodes).await.to_result("paused");
     let _ = result_tx.send(summary).await;
 }
 
@@ -206,22 +620,15 @@ pub async fn conductor_resume_all_nodes(
     nodes: Vec<ConductorNodeConfig>,
     result_tx: mpsc::Sender<Result<String, String>>,
 ) {
-    let summary = fan_out_conductor_control(nodes, "resumed", |client| async move {
-        ConductorApiClient::conductor_resume(&client).await.map_err(|e| anyhow::anyhow!("{e}"))
-    })
-    .await;
+    let summary = ConductorControl::resume_all(nodes).await.to_result("resumed");
     let _ = result_tx.send(summary).await;
 }
 
-/// Runs a per-node conductor control RPC against every node concurrently and
-/// builds a single summary toast string.
-///
-/// `verb` is the past-tense action ("paused" / "resumed") used in the message.
+/// Runs a per-node conductor control RPC against every node concurrently.
 async fn fan_out_conductor_control<F, Fut>(
     nodes: Vec<ConductorNodeConfig>,
-    verb: &'static str,
     call: F,
-) -> Result<String, String>
+) -> ConductorFanoutReport
 where
     F: Fn(jsonrpsee::http_client::HttpClient) -> Fut + Send + Sync + Clone + 'static,
     Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
@@ -229,7 +636,7 @@ where
     const TIMEOUT: Duration = Duration::from_secs(5);
 
     if nodes.is_empty() {
-        return Err(format!("no conductor nodes to {verb}"));
+        return ConductorFanoutReport { total: 0, successes: Vec::new(), failures: Vec::new() };
     }
     let total = nodes.len();
 
@@ -252,22 +659,18 @@ where
         .collect()
         .await;
 
-    let (ok, failures): (Vec<_>, Vec<_>) = results.into_iter().partition(|(_, r)| r.is_ok());
-    let ok_count = ok.len();
-
-    if failures.is_empty() {
-        Ok(format!("conductor {verb} on {ok_count}/{total} nodes"))
-    } else {
-        let detail = failures
-            .iter()
-            .map(|(name, r)| {
-                let err = r.as_ref().err().map_or_else(String::new, ToString::to_string);
-                format!("{name}: {err}")
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(format!("conductor {verb} on {ok_count}/{total} nodes; failures: {detail}"))
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+    for (name, result) in results {
+        match result {
+            Ok(()) => successes.push(name),
+            Err(error) => failures.push(ConductorNodeFailure { name, error: error.to_string() }),
+        }
     }
+    successes.sort();
+    failures.sort_by(|a, b| a.name.cmp(&b.name));
+
+    ConductorFanoutReport { total, successes, failures }
 }
 
 /// Restarts the docker containers for a single conductor cluster node.
@@ -417,6 +820,96 @@ fn build_conductor_clients(
         .collect()
 }
 
+async fn fetch_conductor_statuses(
+    clients: &[ConductorClientTuple],
+    membership_for_lookup: Option<&ClusterMembership>,
+    discovered: bool,
+) -> Vec<ConductorNodeStatus> {
+    futures::future::join_all(clients.iter().map(
+        |(name, server_id, conductor_client, cl_client, el_client)| async move {
+            // Fire all RPCs concurrently so a single timed-out node does not
+            // stall the poll for the full sum of all call timeouts.
+            let (
+                is_leader,
+                conductor_active,
+                conductor_paused,
+                conductor_stopped,
+                sequencer_healthy,
+                sequencer_active,
+                sync,
+                cl_peer_stats,
+                el_block_r,
+                el_syncing_r,
+                el_peers_r,
+            ) = tokio::join!(
+                ConductorApiClient::conductor_leader(conductor_client),
+                ConductorApiClient::conductor_active(conductor_client),
+                ConductorApiClient::conductor_paused(conductor_client),
+                ConductorApiClient::conductor_stopped(conductor_client),
+                ConductorApiClient::conductor_sequencer_healthy(conductor_client),
+                AdminApiClient::admin_sequencer_active(cl_client),
+                RollupNodeApiClient::sync_status(cl_client),
+                BaseP2PApiClient::opp2p_peer_stats(cl_client),
+                async {
+                    if let Some(el) = el_client {
+                        let r: Result<alloy_primitives::U64, _> =
+                            ClientT::request(el, "eth_blockNumber", rpc_params![]).await;
+                        r.ok().map(|v| v.to::<u64>())
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if let Some(el) = el_client {
+                        let r: Result<serde_json::Value, _> =
+                            ClientT::request(el, "eth_syncing", rpc_params![]).await;
+                        r.ok().map(|v| !matches!(v, serde_json::Value::Bool(false)))
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if let Some(el) = el_client {
+                        let r: Result<alloy_primitives::U64, _> =
+                            ClientT::request(el, "net_peerCount", rpc_params![]).await;
+                        r.ok().map(|v| v.to::<u32>())
+                    } else {
+                        None
+                    }
+                },
+            );
+
+            let sync = sync.ok();
+            let suffrage = membership_for_lookup
+                .and_then(|m| m.servers.iter().find(|s| s.id == *server_id))
+                .map(|s| s.suffrage);
+            ConductorNodeStatus {
+                name: name.clone(),
+                is_leader: is_leader.ok(),
+                conductor_active: conductor_active.ok(),
+                conductor_paused: conductor_paused.ok(),
+                conductor_stopped: conductor_stopped.ok(),
+                sequencer_healthy: sequencer_healthy.ok(),
+                sequencer_active: sequencer_active.ok(),
+                unsafe_l2_block: sync.as_ref().map(|s| s.unsafe_l2.block_info.number),
+                unsafe_l2_hash: sync.as_ref().map(|s| s.unsafe_l2.block_info.hash),
+                safe_l2_block: sync.as_ref().map(|s| s.safe_l2.block_info.number),
+                safe_l2_hash: sync.as_ref().map(|s| s.safe_l2.block_info.hash),
+                finalized_l2_block: sync.as_ref().map(|s| s.finalized_l2.block_info.number),
+                current_l1_block: sync.as_ref().map(|s| s.current_l1.number),
+                head_l1_block: sync.as_ref().map(|s| s.head_l1.number),
+                cl_peer_count: cl_peer_stats.ok().map(|s| s.connected),
+                el_block: el_block_r,
+                el_syncing: el_syncing_r,
+                el_peer_count: el_peers_r,
+                suffrage,
+                discovered,
+            }
+        },
+    ))
+    .await
+}
+
 /// Polls every conductor in the active source every 200 ms and forwards updates.
 ///
 /// Builds one pair of HTTP clients per node (conductor RPC + CL RPC) so connection
@@ -463,89 +956,8 @@ pub async fn run_conductor_poller(source: ConductorSource, tx: mpsc::Sender<Cond
             ConductorApiClient::conductor_cluster_membership(conductor_client).await.ok()
         };
 
-        let membership_for_lookup = last_membership.as_ref();
-        let statuses_fut = futures::future::join_all(clients.iter().map(
-            |(name, server_id, conductor_client, cl_client, el_client)| async move {
-                // Fire all RPCs concurrently so a single timed-out node does not
-                // stall the poll for the full sum of all call timeouts (11 × 500 ms).
-                let (
-                    is_leader,
-                    conductor_active,
-                    conductor_paused,
-                    conductor_stopped,
-                    sequencer_healthy,
-                    sequencer_active,
-                    sync,
-                    cl_peer_stats,
-                    el_block_r,
-                    el_syncing_r,
-                    el_peers_r,
-                ) = tokio::join!(
-                    ConductorApiClient::conductor_leader(conductor_client),
-                    ConductorApiClient::conductor_active(conductor_client),
-                    ConductorApiClient::conductor_paused(conductor_client),
-                    ConductorApiClient::conductor_stopped(conductor_client),
-                    ConductorApiClient::conductor_sequencer_healthy(conductor_client),
-                    AdminApiClient::admin_sequencer_active(cl_client),
-                    RollupNodeApiClient::sync_status(cl_client),
-                    BaseP2PApiClient::opp2p_peer_stats(cl_client),
-                    async {
-                        if let Some(el) = el_client {
-                            let r: Result<alloy_primitives::U64, _> =
-                                ClientT::request(el, "eth_blockNumber", rpc_params![]).await;
-                            r.ok().map(|v| v.to::<u64>())
-                        } else {
-                            None
-                        }
-                    },
-                    async {
-                        if let Some(el) = el_client {
-                            let r: Result<serde_json::Value, _> =
-                                ClientT::request(el, "eth_syncing", rpc_params![]).await;
-                            r.ok().map(|v| !matches!(v, serde_json::Value::Bool(false)))
-                        } else {
-                            None
-                        }
-                    },
-                    async {
-                        if let Some(el) = el_client {
-                            let r: Result<alloy_primitives::U64, _> =
-                                ClientT::request(el, "net_peerCount", rpc_params![]).await;
-                            r.ok().map(|v| v.to::<u32>())
-                        } else {
-                            None
-                        }
-                    },
-                );
-
-                let sync = sync.ok();
-                let suffrage = membership_for_lookup
-                    .and_then(|m| m.servers.iter().find(|s| s.id == *server_id))
-                    .map(|s| s.suffrage);
-                ConductorNodeStatus {
-                    name: name.clone(),
-                    is_leader: is_leader.ok(),
-                    conductor_active: conductor_active.ok(),
-                    conductor_paused: conductor_paused.ok(),
-                    conductor_stopped: conductor_stopped.ok(),
-                    sequencer_healthy: sequencer_healthy.ok(),
-                    sequencer_active: sequencer_active.ok(),
-                    unsafe_l2_block: sync.as_ref().map(|s| s.unsafe_l2.block_info.number),
-                    unsafe_l2_hash: sync.as_ref().map(|s| s.unsafe_l2.block_info.hash),
-                    safe_l2_block: sync.as_ref().map(|s| s.safe_l2.block_info.number),
-                    safe_l2_hash: sync.as_ref().map(|s| s.safe_l2.block_info.hash),
-                    finalized_l2_block: sync.as_ref().map(|s| s.finalized_l2.block_info.number),
-                    current_l1_block: sync.as_ref().map(|s| s.current_l1.number),
-                    head_l1_block: sync.as_ref().map(|s| s.head_l1.number),
-                    cl_peer_count: cl_peer_stats.ok().map(|s| s.connected),
-                    el_block: el_block_r,
-                    el_syncing: el_syncing_r,
-                    el_peer_count: el_peers_r,
-                    suffrage,
-                    discovered,
-                }
-            },
-        ));
+        let statuses_fut =
+            fetch_conductor_statuses(&clients, last_membership.as_deref(), discovered);
 
         let (statuses, new_membership) = tokio::join!(statuses_fut, membership_fut);
 
@@ -582,5 +994,184 @@ pub async fn run_conductor_poller(source: ConductorSource, tx: mpsc::Sender<Cond
                 last_membership = Some(membership);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use base_consensus_rpc::{ClusterMembership, ServerInfo, ServerSuffrage};
+    use jsonrpsee::{core::client::Error as JsonRpcClientError, types::ErrorObjectOwned};
+    use url::Url;
+
+    use super::{
+        ConductorControl, ConductorFanoutReport, ConductorNodeFailure, LeaderLookup,
+        StableLeaderGoal, is_stale_leader_error,
+    };
+    use crate::config::{ConductorNodeConfig, ConductorSource};
+
+    fn node(name: &str, server_id: &str) -> ConductorNodeConfig {
+        ConductorNodeConfig {
+            name: name.to_string(),
+            conductor_rpc: Url::parse("http://127.0.0.1:6545").unwrap(),
+            cl_rpc: Url::parse("http://127.0.0.1:7545").unwrap(),
+            server_id: server_id.to_string(),
+            raft_addr: format!("{name}:5050"),
+            el_rpc: None,
+            docker_conductor: None,
+            docker_el: None,
+            docker_cl: None,
+            flashblocks_ws: None,
+        }
+    }
+
+    fn membership(ids: &[&str]) -> ClusterMembership {
+        ClusterMembership {
+            version: 7,
+            servers: ids
+                .iter()
+                .map(|id| ServerInfo {
+                    id: (*id).to_string(),
+                    addr: format!("{id}:5050"),
+                    suffrage: ServerSuffrage::Voter,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn fanout_summary_formats_success() {
+        let report = ConductorFanoutReport {
+            total: 2,
+            successes: vec!["a".to_string(), "b".to_string()],
+            failures: Vec::new(),
+        };
+
+        assert!(report.is_success());
+        assert_eq!(report.summary("paused"), "conductor paused on 2/2 nodes");
+        assert_eq!(report.to_result("paused").unwrap(), "conductor paused on 2/2 nodes");
+    }
+
+    #[test]
+    fn fanout_summary_formats_partial_failure() {
+        let report = ConductorFanoutReport {
+            total: 2,
+            successes: vec!["a".to_string()],
+            failures: vec![ConductorNodeFailure {
+                name: "b".to_string(),
+                error: "request timed out".to_string(),
+            }],
+        };
+
+        assert!(!report.is_success());
+        assert_eq!(
+            report.summary("paused"),
+            "conductor paused on 1/2 nodes; failures: b: request timed out"
+        );
+        assert!(report.to_result("paused").is_err());
+    }
+
+    #[test]
+    fn fanout_summary_formats_empty_nodes() {
+        let report =
+            ConductorFanoutReport { total: 0, successes: Vec::new(), failures: Vec::new() };
+
+        assert!(!report.is_success());
+        assert_eq!(report.summary("paused"), "no conductor nodes to pause");
+    }
+
+    #[test]
+    fn nodes_from_membership_maps_static_nodes_by_server_id() {
+        let source = ConductorSource::Static(vec![node("op-conductor-0", "sequencer-0")]);
+        let membership = membership(&["sequencer-0"]);
+
+        let nodes = ConductorControl::nodes_from_membership(&source, &membership).unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "op-conductor-0");
+    }
+
+    #[test]
+    fn nodes_from_membership_rejects_unknown_static_member() {
+        let source = ConductorSource::Static(vec![node("op-conductor-0", "sequencer-0")]);
+        let membership = membership(&["sequencer-1"]);
+
+        let err = ConductorControl::nodes_from_membership(&source, &membership)
+            .expect_err("unknown member should fail");
+
+        assert!(err.to_string().contains("sequencer-1"));
+    }
+
+    #[test]
+    fn leader_lookup_failure_summary_formats_node_errors() {
+        let lookup = LeaderLookup {
+            leader: None,
+            failures: vec![
+                ConductorNodeFailure { name: "a".to_string(), error: "timeout".to_string() },
+                ConductorNodeFailure {
+                    name: "b".to_string(),
+                    error: "connection refused".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(lookup.failure_summary().as_deref(), Some("a: timeout; b: connection refused"));
+    }
+
+    #[test]
+    fn stable_leader_goal_matches_expected_observations() {
+        assert!(StableLeaderGoal::Specific("op-conductor-1").matches("op-conductor-1"));
+        assert!(!StableLeaderGoal::Specific("op-conductor-1").matches("op-conductor-0"));
+        assert!(StableLeaderGoal::ReplacementFor("op-conductor-0").matches("op-conductor-1"));
+        assert!(!StableLeaderGoal::ReplacementFor("op-conductor-0").matches("op-conductor-0"));
+    }
+
+    #[test]
+    fn stable_leader_goal_formats_timeout_messages() {
+        let targeted = StableLeaderGoal::Specific("op-conductor-1").timeout_message(
+            Duration::from_secs(6),
+            "op-conductor-0",
+            "; last probe errors: timeout",
+        );
+        let replacement = StableLeaderGoal::ReplacementFor("op-conductor-0").timeout_message(
+            Duration::from_secs(6),
+            "op-conductor-0",
+            "",
+        );
+
+        assert!(
+            targeted.contains("target op-conductor-1 was not observed as stable leader after 6s")
+        );
+        assert!(
+            targeted.contains("last observed leader: op-conductor-0; last probe errors: timeout")
+        );
+        assert!(
+            replacement
+                .contains("no stable replacement leader for op-conductor-0 was observed after 6s")
+        );
+    }
+
+    #[test]
+    fn stale_leader_error_matches_typed_jsonrpc_shape() {
+        let stale = JsonRpcClientError::Call(ErrorObjectOwned::owned(
+            -32000,
+            "node is not the leader",
+            None::<()>,
+        ));
+        let other_message = JsonRpcClientError::Call(ErrorObjectOwned::owned(
+            -32000,
+            "different server error",
+            None::<()>,
+        ));
+        let other_code = JsonRpcClientError::Call(ErrorObjectOwned::owned(
+            -32603,
+            "node is not the leader",
+            None::<()>,
+        ));
+
+        assert!(is_stale_leader_error(&stale));
+        assert!(!is_stale_leader_error(&other_message));
+        assert!(!is_stale_leader_error(&other_code));
     }
 }
