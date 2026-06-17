@@ -40,6 +40,8 @@ use url::Url;
 
 use crate::{AttestationProof, AttestationProofProvider, ProverError, Result};
 
+const DEFAULT_TRUSTED_CERTS_PREFIX_LEN: u8 = 1;
+
 /// Concrete [`Client`] type produced by the builder chain used in
 /// [`BoundlessProver`]. The uploader is [`NotProvided`] because we
 /// use inline inputs (stdin) rather than uploading to external storage.
@@ -55,6 +57,64 @@ type BoundlessClient = Client<
     StandardRequestBuilder<DynProvider, NotProvided, boundless_market::StandardDownloader>,
     PrivateKeySigner,
 >;
+
+/// Configuration for [`BoundlessProver`].
+pub struct BoundlessProverConfig {
+    /// Ethereum RPC URL for the Boundless settlement chain.
+    pub rpc_url: Url,
+    /// Signer for Boundless Network proving fees.
+    pub signer: PrivateKeySigner,
+    /// HTTP(S) URL where the guest ELF is hosted (e.g. a Pinata or Boundless IPFS gateway URL).
+    pub verifier_program_url: Url,
+    /// Expected image ID of the guest program.
+    pub image_id: [u32; 8],
+    /// Interval between fulfillment status checks.
+    pub poll_interval: Duration,
+    /// Maximum time to wait for proof fulfillment.
+    pub timeout: Duration,
+    /// Maximum number of deterministic request-ID slots to probe when
+    /// recovering in-flight proofs after an instance rotation.
+    pub max_recovery_attempts: u32,
+    /// Maximum age of an attestation timestamp for a recovered proof to
+    /// be considered fresh enough for on-chain submission.
+    pub max_attestation_age: Duration,
+    /// Optional minimum Boundless offer price for each submitted proof request.
+    pub offer_min_price: Option<Amount>,
+    /// Optional maximum Boundless offer price for each submitted proof request.
+    pub offer_max_price: Option<Amount>,
+    /// Optional duration in seconds for the Boundless offer price to
+    /// ramp from `offer_min_price` to `offer_max_price`.
+    pub offer_ramp_up_period_secs: Option<u32>,
+    /// Optional maximum time, in seconds, that a prover that locks a
+    /// request has to deliver the proof before forfeiting its stake bond.
+    pub offer_lock_timeout_secs: Option<u32>,
+    /// Delay, in seconds, between request submission and the moment
+    /// bidding is allowed to begin (`Offer.rampUpStart`).
+    pub offer_bidding_start_delay_secs: u64,
+}
+
+impl fmt::Debug for BoundlessProverConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundlessProverConfig")
+            .field("rpc_url", &self.rpc_url.origin().unicode_serialization())
+            .field("signer", &self.signer.address())
+            .field(
+                "verifier_program_url",
+                &self.verifier_program_url.origin().unicode_serialization(),
+            )
+            .field("image_id", &self.image_id)
+            .field("poll_interval", &self.poll_interval)
+            .field("timeout", &self.timeout)
+            .field("max_recovery_attempts", &self.max_recovery_attempts)
+            .field("max_attestation_age", &self.max_attestation_age)
+            .field("offer_min_price", &self.offer_min_price)
+            .field("offer_max_price", &self.offer_max_price)
+            .field("offer_ramp_up_period_secs", &self.offer_ramp_up_period_secs)
+            .field("offer_lock_timeout_secs", &self.offer_lock_timeout_secs)
+            .field("offer_bidding_start_delay_secs", &self.offer_bidding_start_delay_secs)
+            .finish()
+    }
+}
 
 /// Attestation prover using the Boundless marketplace.
 ///
@@ -151,6 +211,44 @@ impl fmt::Debug for BoundlessProver {
 }
 
 impl BoundlessProver {
+    /// Creates a Boundless prover.
+    pub fn new(config: BoundlessProverConfig) -> Self {
+        let BoundlessProverConfig {
+            rpc_url,
+            signer,
+            verifier_program_url,
+            image_id,
+            poll_interval,
+            timeout,
+            max_recovery_attempts,
+            max_attestation_age,
+            offer_min_price,
+            offer_max_price,
+            offer_ramp_up_period_secs,
+            offer_lock_timeout_secs,
+            offer_bidding_start_delay_secs,
+        } = config;
+
+        Self {
+            rpc_url,
+            signer,
+            verifier_program_url,
+            image_id,
+            poll_interval,
+            timeout,
+            trusted_certs_prefix_len: DEFAULT_TRUSTED_CERTS_PREFIX_LEN,
+            max_recovery_attempts,
+            max_attestation_age,
+            offer_min_price,
+            offer_max_price,
+            offer_ramp_up_period_secs,
+            offer_lock_timeout_secs,
+            offer_bidding_start_delay_secs,
+            submit_lock: Arc::new(Mutex::new(())),
+            recovery_blocked: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        }
+    }
+
     /// Derives a deterministic `u32` index for a Boundless request ID
     /// from the target signer address and an attempt counter.
     ///
@@ -1015,7 +1113,6 @@ mod tests {
     const TEST_IMAGE_ID: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     const TEST_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const TEST_TIMEOUT: Duration = Duration::from_secs(300);
-    const DEFAULT_TRUSTED_PREFIX: u8 = 1;
     const TEST_MAX_RECOVERY_ATTEMPTS: u32 = 5;
     const TEST_MIN_PRICE_ETH: &str = "0.01";
     const TEST_MAX_PRICE_ETH: &str = "0.03";
@@ -1038,7 +1135,7 @@ mod tests {
             image_id: TEST_IMAGE_ID,
             poll_interval: TEST_POLL_INTERVAL,
             timeout: TEST_TIMEOUT,
-            trusted_certs_prefix_len: DEFAULT_TRUSTED_PREFIX,
+            trusted_certs_prefix_len: DEFAULT_TRUSTED_CERTS_PREFIX_LEN,
             max_recovery_attempts: TEST_MAX_RECOVERY_ATTEMPTS,
             max_attestation_age: TEST_MAX_ATTESTATION_AGE,
             offer_min_price: None,
@@ -1072,7 +1169,7 @@ mod tests {
         assert_eq!(prover.image_id, TEST_IMAGE_ID);
         assert_eq!(prover.poll_interval, TEST_POLL_INTERVAL);
         assert_eq!(prover.timeout, TEST_TIMEOUT);
-        assert_eq!(prover.trusted_certs_prefix_len, DEFAULT_TRUSTED_PREFIX);
+        assert_eq!(prover.trusted_certs_prefix_len, DEFAULT_TRUSTED_CERTS_PREFIX_LEN);
         assert_eq!(prover.max_recovery_attempts, TEST_MAX_RECOVERY_ATTEMPTS);
         assert!(prover.offer_min_price.is_none());
         assert!(prover.offer_max_price.is_none());

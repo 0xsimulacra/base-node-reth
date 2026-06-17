@@ -1,12 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-mod config;
-pub use config::{
-    AwsDiscoveryConfig, BoundlessConfig, CrlConfig, DEFAULT_MAX_ATTESTATION_AGE_SECS,
-    DEFAULT_MAX_RECOVERY_ATTEMPTS, ProvingConfig, RegistrarConfig,
-};
-
 mod cert_manager;
 pub use cert_manager::CertManager;
 
@@ -51,6 +45,9 @@ pub use signer_manager::{
     DEFAULT_MAX_TX_RETRIES, DEFAULT_TX_RETRY_DELAY_SECS, PendingRegistration, ProofTaskOutcome,
     ProofTaskSet, SignerManager, SignerManagerConfig,
 };
+
+mod service;
+pub use service::RegistrarConfig;
 
 mod traits;
 pub use traits::{InstanceDiscovery, SignerClient};
