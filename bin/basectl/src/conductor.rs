@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use basectl_cli::{
     ConductorClusterSnapshot, ConductorControl, ConductorFanoutReport, ConductorNodeConfig,
     ConductorNodeFailure, ConductorNodeStatus, ConductorSource, JsonOutput, KeyValueTable,
@@ -18,6 +18,7 @@ use crate::{
         ConductorNodeActionArgs, ConductorStatusArgs,
     },
     confirm::{confirm_or_abort, confirm_typed_or_abort},
+    helpers::{CommandOutcome, find_node, fmt_bool, fmt_u32, fmt_u64, resolve_source},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +32,13 @@ impl NodeActionKind {
         match self {
             Self::Pause => ConductorAction::Pause,
             Self::Unpause => ConductorAction::Unpause,
+        }
+    }
+
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::Pause => "Pause",
+            Self::Unpause => "Unpause",
         }
     }
 }
@@ -63,6 +71,13 @@ impl ClusterActionKind {
             Self::UnpauseAll => ConductorAction::UnpauseAll,
         }
     }
+
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::PauseAll => "pause",
+            Self::UnpauseAll => "unpause",
+        }
+    }
 }
 
 /// Runs the `basectl conductor` command group.
@@ -70,8 +85,8 @@ pub(crate) async fn run(
     config: MonitoringConfig,
     conductor_rpc: Option<Url>,
     command: ConductorCommands,
-) -> Result<()> {
-    let source = resolve_source(&config, conductor_rpc)?;
+) -> Result<CommandOutcome> {
+    let source = resolve_source(&config, conductor_rpc, "conductor")?;
     match command {
         ConductorCommands::Status(args) => run_status(config, source, args).await,
         ConductorCommands::TransferLeader(args) => run_transfer_leader(config, source, args).await,
@@ -94,7 +109,7 @@ async fn run_status(
     config: MonitoringConfig,
     source: ConductorSource,
     args: ConductorStatusArgs,
-) -> Result<()> {
+) -> Result<CommandOutcome> {
     let snapshot = ConductorControl::snapshot(source).await?;
     let status = ConductorStatusJson::from_snapshot(&config.name, &snapshot);
     if args.json {
@@ -102,19 +117,19 @@ async fn run_status(
     } else {
         print_status_pretty(&status)?;
     }
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 async fn run_transfer_leader(
     config: MonitoringConfig,
     source: ConductorSource,
     args: ConductorLeaderArgs,
-) -> Result<()> {
+) -> Result<CommandOutcome> {
     let nodes = current_nodes_for_action(&source).await?;
     if let Some(target) = args.target.as_deref() {
         // Validate before prompting so a typo does not ask for confirmation and only
         // fail after the operator already answered yes.
-        find_node(&nodes, target)?;
+        find_node(&nodes, target, "conductor")?;
     }
 
     let prompt = args.target.as_deref().map_or_else(
@@ -127,7 +142,7 @@ async fn run_transfer_leader(
         |target| format!("Transfer conductor leadership to {target} for {}? [y/N] ", config.name),
     );
     if !confirm_or_abort(&prompt, args.yes)? {
-        return Ok(());
+        return Ok(CommandOutcome::Success);
     }
 
     let message = ConductorControl::transfer_leader(&nodes, args.target.as_deref()).await?;
@@ -139,7 +154,8 @@ async fn run_transfer_leader(
             message,
         ),
         args.json,
-    )
+    )?;
+    Ok(CommandOutcome::Success)
 }
 
 async fn run_node_action(
@@ -147,26 +163,18 @@ async fn run_node_action(
     source: ConductorSource,
     args: ConductorNodeActionArgs,
     action: NodeActionKind,
-) -> Result<()> {
+) -> Result<CommandOutcome> {
     let nodes = current_nodes_for_action(&source).await?;
-    let node = find_node(&nodes, &args.node)?;
+    let node = find_node(&nodes, &args.node, "conductor")?;
     let json_action = action.action();
-    let prompt = match action {
-        NodeActionKind::Pause => {
-            format!(
-                "Pause conductor control loop on {} ({})? [y/N] ",
-                node.name, node.conductor_rpc
-            )
-        }
-        NodeActionKind::Unpause => {
-            format!(
-                "Unpause conductor control loop on {} ({})? [y/N] ",
-                node.name, node.conductor_rpc
-            )
-        }
-    };
+    let prompt = format!(
+        "{} conductor control loop on {} ({})? [y/N] ",
+        action.verb(),
+        node.name,
+        node.conductor_rpc
+    );
     if !confirm_or_abort(&prompt, args.yes)? {
-        return Ok(());
+        return Ok(CommandOutcome::Success);
     }
 
     let message = match action {
@@ -176,7 +184,8 @@ async fn run_node_action(
     print_single_action(
         &ConductorActionJson::single(&config.name, json_action, Some(node.name.clone()), message),
         args.json,
-    )
+    )?;
+    Ok(CommandOutcome::Success)
 }
 
 async fn run_cluster_action(
@@ -184,28 +193,20 @@ async fn run_cluster_action(
     source: ConductorSource,
     args: ConductorClusterActionArgs,
     action: ClusterActionKind,
-) -> Result<()> {
+) -> Result<CommandOutcome> {
     let (nodes, node_scope) = current_nodes_for_cluster_action(&source).await?;
     let names = nodes.iter().map(|node| node.name.as_str()).collect::<Vec<_>>().join(", ");
     let json_action = action.action();
-    let prompt = match action {
-        ClusterActionKind::PauseAll => format!(
-            "Type {} to pause conductor control loop on all {} {} ({}): ",
-            config.name,
-            nodes.len(),
-            node_scope.description(),
-            names
-        ),
-        ClusterActionKind::UnpauseAll => format!(
-            "Type {} to unpause conductor control loop on all {} {} ({}): ",
-            config.name,
-            nodes.len(),
-            node_scope.description(),
-            names
-        ),
-    };
+    let prompt = format!(
+        "Type {} to {} conductor control loop on all {} {} ({}): ",
+        config.name,
+        action.verb(),
+        nodes.len(),
+        node_scope.description(),
+        names
+    );
     if !confirm_typed_or_abort(&prompt, &config.name, args.yes)? {
-        return Ok(());
+        return Ok(CommandOutcome::Success);
     }
 
     let report = match action {
@@ -216,25 +217,16 @@ async fn run_cluster_action(
         &ConductorFanoutJson::from_report(&config.name, json_action, &report),
         args.json,
     )?;
-    if report.is_success() { Ok(()) } else { bail!(report.summary(json_action.past_tense())) }
-}
-
-fn resolve_source(
-    config: &MonitoringConfig,
-    conductor_rpc: Option<Url>,
-) -> Result<ConductorSource> {
-    config.conductor_source(conductor_rpc).ok_or_else(|| {
-        anyhow!(
-            "conductor commands need conductor config or a bootstrap RPC URL for '{}'. Set `conductors` or `discovery.bootstrap_rpc` in config, or pass `--conductor-rpc <url>`.",
-            config.name
-        )
-    })
+    Ok(fanout_outcome(&report))
 }
 
 async fn current_nodes_for_action(source: &ConductorSource) -> Result<Vec<ConductorNodeConfig>> {
     match source {
         ConductorSource::Static(nodes) => Ok(nodes.clone()),
-        ConductorSource::Discover { .. } => current_nodes_for_all(source).await,
+        ConductorSource::Discover { .. } => {
+            let membership = ConductorControl::current_membership(source).await?;
+            ConductorControl::nodes_from_membership(source, &membership)
+        }
     }
 }
 
@@ -251,9 +243,9 @@ async fn current_nodes_for_cluster_action(
                     ConductorControl::nodes_from_membership(source, &membership)?,
                     ClusterNodeScope::CurrentRaftMembers,
                 )),
-                Err(err) => {
+                Err(error) => {
                     warn!(
-                        error = %err,
+                        error = %error,
                         "membership lookup failed for static conductor source; falling back to configured node list"
                     );
                     Ok((nodes.clone(), ClusterNodeScope::ConfiguredNodes))
@@ -261,23 +253,19 @@ async fn current_nodes_for_cluster_action(
             }
         }
         ConductorSource::Discover { .. } => {
-            Ok((current_nodes_for_all(source).await?, ClusterNodeScope::CurrentRaftMembers))
+            let membership = ConductorControl::current_membership(source).await?;
+            let nodes = ConductorControl::nodes_from_membership(source, &membership)?;
+            Ok((nodes, ClusterNodeScope::CurrentRaftMembers))
         }
     }
 }
 
-async fn current_nodes_for_all(source: &ConductorSource) -> Result<Vec<ConductorNodeConfig>> {
-    let membership = ConductorControl::current_membership(source).await?;
-    ConductorControl::nodes_from_membership(source, &membership)
-}
-
-fn find_node<'a>(nodes: &'a [ConductorNodeConfig], name: &str) -> Result<&'a ConductorNodeConfig> {
-    nodes.iter().find(|node| node.name == name).ok_or_else(|| {
-        anyhow!(
-            "conductor node {name} not found. Available nodes: {}",
-            nodes.iter().map(|node| node.name.as_str()).collect::<Vec<_>>().join(", ")
-        )
-    })
+/// Maps a fanout report onto the process-exit outcome.
+///
+/// An empty fanout (no nodes targeted) is treated as a failure so operators
+/// notice when a bulk action silently matched nothing.
+const fn fanout_outcome(report: &ConductorFanoutReport) -> CommandOutcome {
+    CommandOutcome::from_failures(!report.is_success())
 }
 
 fn print_status_pretty(status: &ConductorStatusJson) -> Result<()> {
@@ -455,7 +443,7 @@ impl ConductorStatusJson {
             .iter()
             .map(|node| {
                 let status = snapshot.statuses.iter().find(|status| status.name == node.name);
-                ConductorNodeJson::from_node_status(node, status)
+                ConductorNodeJson::from_node_status(node, status, snapshot.discovered)
             })
             .collect::<Vec<_>>();
         let leader =
@@ -513,7 +501,11 @@ struct ConductorNodeJson {
 }
 
 impl ConductorNodeJson {
-    fn from_node_status(node: &ConductorNodeConfig, status: Option<&ConductorNodeStatus>) -> Self {
+    fn from_node_status(
+        node: &ConductorNodeConfig,
+        status: Option<&ConductorNodeStatus>,
+        discovered: bool,
+    ) -> Self {
         Self {
             name: node.name.clone(),
             server_id: node.server_id.clone(),
@@ -543,17 +535,18 @@ impl ConductorNodeJson {
             suffrage: status.and_then(|status| {
                 status.suffrage.map(|suffrage| format!("{suffrage:?}").to_ascii_lowercase())
             }),
-            discovered: status.is_some_and(|status| status.discovered),
+            discovered,
         }
     }
 
     fn compact_status(&self) -> String {
         format!(
-            "leader={} active={} paused={} stopped={} healthy={} unsafe={} safe={} cl_peers={} el_peers={}",
+            "leader={} conductor_active={} conductor_paused={} conductor_stopped={} sequencer_active={} sequencer_healthy={} unsafe={} safe={} cl_peers={} el_peers={}",
             fmt_bool(self.is_leader),
             fmt_bool(self.conductor_active),
             fmt_bool(self.conductor_paused),
             fmt_bool(self.conductor_stopped),
+            fmt_bool(self.sequencer_active),
             fmt_bool(self.sequencer_healthy),
             fmt_u64(self.unsafe_l2_block),
             fmt_u64(self.safe_l2_block),
@@ -561,22 +554,6 @@ impl ConductorNodeJson {
             fmt_u32(self.el_peer_count),
         )
     }
-}
-
-const fn fmt_bool(value: Option<bool>) -> &'static str {
-    match value {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "unknown",
-    }
-}
-
-fn fmt_u64(value: Option<u64>) -> String {
-    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
-}
-
-fn fmt_u32(value: Option<u32>) -> String {
-    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
 }
 
 #[cfg(test)]
@@ -587,7 +564,8 @@ mod tests {
     use url::Url;
 
     use super::{
-        ConductorAction, ConductorActionJson, ConductorFanoutJson, ConductorStatusJson, find_node,
+        ConductorAction, ConductorActionJson, ConductorFanoutJson, ConductorNodeJson,
+        ConductorStatusJson, fanout_outcome, find_node,
     };
 
     fn node(name: &str) -> ConductorNodeConfig {
@@ -682,6 +660,32 @@ mod tests {
     }
 
     #[test]
+    fn fanout_failure_exit_matches_report_status() {
+        let success = basectl_cli::ConductorFanoutReport {
+            total: 2,
+            successes: vec!["op-conductor-0".to_string(), "op-conductor-1".to_string()],
+            failures: Vec::new(),
+        };
+        let partial_failure = basectl_cli::ConductorFanoutReport {
+            total: 2,
+            successes: vec!["op-conductor-0".to_string()],
+            failures: vec![ConductorNodeFailure {
+                name: "op-conductor-1".to_string(),
+                error: "request timed out".to_string(),
+            }],
+        };
+        let empty = basectl_cli::ConductorFanoutReport {
+            total: 0,
+            successes: Vec::new(),
+            failures: Vec::new(),
+        };
+
+        assert!(!fanout_outcome(&success).has_failures());
+        assert!(fanout_outcome(&partial_failure).has_failures());
+        assert!(fanout_outcome(&empty).has_failures());
+    }
+
+    #[test]
     fn status_json_derives_leader_and_paused_summary() {
         let snapshot = ConductorClusterSnapshot {
             nodes: vec![node("op-conductor-0"), node("op-conductor-1")],
@@ -700,6 +704,39 @@ mod tests {
         assert_eq!(value["leader"], "op-conductor-0");
         assert_eq!(value["paused"], json!({"known": 2, "paused": 1}));
         assert_eq!(value["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn compact_status_distinguishes_conductor_and_sequencer_activity() {
+        let node = node("op-conductor-0");
+        let mut node_status = status("op-conductor-0", true, true);
+        node_status.conductor_active = Some(false);
+        node_status.conductor_paused = Some(true);
+        node_status.sequencer_active = Some(true);
+
+        let compact =
+            ConductorNodeJson::from_node_status(&node, Some(&node_status), false).compact_status();
+
+        assert!(compact.contains("conductor_active=false"));
+        assert!(compact.contains("conductor_paused=true"));
+        assert!(compact.contains("sequencer_active=true"));
+        assert!(compact.contains("sequencer_healthy=true"));
+    }
+
+    #[test]
+    fn status_json_preserves_discovered_provenance_for_offline_nodes() {
+        let snapshot = ConductorClusterSnapshot {
+            nodes: vec![node("op-conductor-0")],
+            statuses: Vec::new(),
+            membership: None,
+            membership_error: None,
+            discovered: true,
+        };
+
+        let value =
+            serde_json::to_value(ConductorStatusJson::from_snapshot("devnet", &snapshot)).unwrap();
+
+        assert_eq!(value["nodes"][0]["discovered"], true);
     }
 
     #[test]
@@ -722,7 +759,8 @@ mod tests {
     fn find_node_reports_missing_name() {
         let nodes = vec![node("op-conductor-0")];
 
-        let err = find_node(&nodes, "op-conductor-1").expect_err("missing node should error");
+        let err = find_node(&nodes, "op-conductor-1", "conductor")
+            .expect_err("missing node should error");
 
         assert!(err.to_string().contains("op-conductor-1"));
         assert!(err.to_string().contains("op-conductor-0"));

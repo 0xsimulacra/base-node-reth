@@ -12,7 +12,7 @@ use jsonrpsee::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{AdminApiServer, SequencerAdminAPIClient};
+use crate::{AdminApiServer, SequencerAdminAPIClient, SequencerAdminAPIError};
 
 /// The query types to the network actor for the admin api.
 #[derive(Debug)]
@@ -68,6 +68,21 @@ fn sequencer_unavailable() -> ErrorObject<'static> {
     ErrorObject::owned(-32001, "sequencer not available on this node", None::<()>)
 }
 
+/// Maps public sequencer admin failures without exposing internal details.
+fn sequencer_admin_error(error: SequencerAdminAPIError) -> ErrorObject<'static> {
+    match error {
+        SequencerAdminAPIError::NotLeader => {
+            ErrorObject::owned(-32002, "Node is not the conductor leader.", None::<()>)
+        }
+        SequencerAdminAPIError::RequestError(_)
+        | SequencerAdminAPIError::ResponseError
+        | SequencerAdminAPIError::ErrorAfterSequencerWasStopped(_)
+        | SequencerAdminAPIError::LeaderOverrideError(_) => {
+            ErrorObject::from(ErrorCode::InternalError)
+        }
+    }
+}
+
 #[async_trait]
 impl<SequencerAdminAPIClient_> AdminApiServer for AdminRpc<SequencerAdminAPIClient_>
 where
@@ -116,10 +131,7 @@ where
             return Err(sequencer_unavailable());
         };
 
-        sequencer_client
-            .start_sequencer(unsafe_head)
-            .await
-            .map_err(|_| ErrorObject::from(ErrorCode::InternalError))
+        sequencer_client.start_sequencer(unsafe_head).await.map_err(sequencer_admin_error)
     }
 
     async fn admin_stop_sequencer(&self) -> RpcResult<B256> {
@@ -128,10 +140,7 @@ where
             return Err(sequencer_unavailable());
         };
 
-        sequencer_client
-            .stop_sequencer()
-            .await
-            .map_err(|_| ErrorObject::from(ErrorCode::InternalError))
+        sequencer_client.stop_sequencer().await.map_err(sequencer_admin_error)
     }
 
     async fn admin_conductor_enabled(&self) -> RpcResult<bool> {
@@ -192,5 +201,32 @@ where
             .reset_derivation_pipeline()
             .await
             .map_err(|_| ErrorObject::from(ErrorCode::InternalError))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jsonrpsee::types::{ErrorCode, ErrorObject};
+
+    use super::sequencer_admin_error;
+    use crate::SequencerAdminAPIError;
+
+    #[test]
+    fn sequencer_admin_error_redacts_internal_failure_details() {
+        let error = sequencer_admin_error(SequencerAdminAPIError::RequestError(
+            "block hash mismatch: engine unsafe head is 0x1, caller requested 0x2".to_string(),
+        ));
+        let internal_error = ErrorObject::from(ErrorCode::InternalError);
+
+        assert_eq!(error.code(), internal_error.code());
+        assert_eq!(error.message(), internal_error.message());
+    }
+
+    #[test]
+    fn sequencer_admin_error_uses_not_leader_error() {
+        let error = sequencer_admin_error(SequencerAdminAPIError::NotLeader);
+
+        assert_eq!(error.code(), -32002);
+        assert_eq!(error.message(), "Node is not the conductor leader.");
     }
 }

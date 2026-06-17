@@ -5,7 +5,9 @@ mod cli;
 mod conductor;
 mod confirm;
 mod doctor;
+mod helpers;
 mod p2p;
+mod sequencer;
 mod sync_status;
 
 use basectl_cli::{MonitoringConfig, ViewId, run_app, run_flashblocks_json};
@@ -56,11 +58,25 @@ async fn main() -> anyhow::Result<()> {
             p2p::run(MonitoringConfig::load(config).await?, command).await
         }
         Some(cli::Commands::Conductor { command }) => {
-            conductor::run(MonitoringConfig::load(config).await?, conductor_rpc, command).await
+            if conductor::run(MonitoringConfig::load(config).await?, conductor_rpc, command)
+                .await?
+                .has_failures()
+            {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Some(cli::Commands::Sequencer { command }) => {
+            if sequencer::run(MonitoringConfig::load(config).await?, conductor_rpc, command)
+                .await?
+                .has_failures()
+            {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Some(cli::Commands::Doctor(args)) => {
-            let has_failures = doctor::run(MonitoringConfig::load(config).await?, args).await?;
-            if has_failures {
+            if doctor::run(MonitoringConfig::load(config).await?, args).await?.has_failures() {
                 std::process::exit(1);
             }
             Ok(())
