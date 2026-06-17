@@ -5911,10 +5911,16 @@ dependencies = [
 name = "base-proof-zk-host"
 version = "0.0.0"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
+ "base-proof-primitives",
+ "base-proof-worker",
+ "base-prover-service-client",
  "base-prover-service-protocol",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
