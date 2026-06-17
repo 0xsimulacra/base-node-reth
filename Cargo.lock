@@ -5451,6 +5451,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-proof-submission"
+version = "0.0.0"
+dependencies = [
+ "alloy-consensus 2.0.5",
+ "alloy-primitives",
+ "alloy-rpc-types-eth 2.0.5",
+ "base-proof-contracts",
+ "base-tx-manager",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "base-proof-succinct-build-utils"
 version = "0.0.0"
 dependencies = [
@@ -5943,6 +5956,7 @@ dependencies = [
  "base-proof-contracts",
  "base-proof-primitives",
  "base-proof-rpc",
+ "base-proof-submission",
  "base-prover-service-client",
  "base-prover-service-protocol",
  "base-retry",
