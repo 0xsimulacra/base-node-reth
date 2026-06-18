@@ -3690,7 +3690,6 @@ dependencies = [
  "auto_impl",
  "base-common-genesis",
  "revm",
- "serde",
  "spin 0.10.0",
 ]
 
@@ -3739,6 +3738,7 @@ dependencies = [
  "base-common-chains",
  "base-common-consensus",
  "base-common-flz",
+ "base-common-genesis",
  "base-common-precompiles",
  "base-metrics",
  "metrics",
@@ -3791,6 +3791,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "spin 0.10.0",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -3822,6 +3823,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "base-common-chains",
+ "base-common-genesis",
  "base-precompile-macros",
  "base-precompile-storage",
  "criterion",
@@ -4379,6 +4381,7 @@ dependencies = [
  "alloy-primitives",
  "base-common-chains",
  "base-common-consensus",
+ "base-common-genesis",
  "base-common-rpc-types",
  "derive_more 2.1.1",
  "reth-chainspec",
@@ -4462,6 +4465,7 @@ dependencies = [
  "alloy-trie",
  "base-common-chains",
  "base-common-consensus",
+ "base-common-genesis",
  "base-execution-chainspec",
  "base-node-core",
  "reth-chainspec",
@@ -4512,6 +4516,7 @@ dependencies = [
  "base-common-chains",
  "base-common-consensus",
  "base-common-evm",
+ "base-common-genesis",
  "base-common-rpc-types-engine",
  "base-execution-chainspec",
  "base-execution-consensus",
@@ -6452,6 +6457,27 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+]
+
+[[package]]
+name = "base-upgrade-signal"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-provider 2.0.5",
+ "alloy-rpc-types-eth 2.0.5",
+ "alloy-sol-types",
+ "base-common-genesis",
+ "base-metrics",
+ "clap",
+ "futures",
+ "metrics",
+ "rstest",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

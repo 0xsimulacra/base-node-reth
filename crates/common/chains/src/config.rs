@@ -26,7 +26,7 @@ pub struct ChainConfig {
     /// Channel timeout in L1 blocks.
     pub channel_timeout: u64,
 
-    // Upgrade schedule
+    // Hardfork schedule
     /// Bedrock activation block.
     pub bedrock_block: u64,
     /// Regolith activation timestamp.
