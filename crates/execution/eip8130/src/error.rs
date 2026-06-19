@@ -13,15 +13,11 @@ pub enum AuthError {
     #[error("authentication data is malformed")]
     MalformedAuth,
 
-    /// The authenticator address is not in the canonical allowlist (and is not
-    /// the native `ECRECOVER_AUTHENTICATOR` sentinel). Non-canonical
-    /// authenticators are not accepted on the EIP-8130 block-validation path.
+    /// The authenticator address is not one of the canonical EIP-8130
+    /// authenticators (the pinned allowlist and the `K1_AUTHENTICATOR`
+    /// sentinel), so it is not accepted on the block-validation path.
     #[error("authenticator {0} is not canonical")]
     NotCanonical(Address),
-
-    /// The authenticator address is the `REVOKED_AUTHENTICATOR` sentinel.
-    #[error("authenticator is the revoked sentinel")]
-    Revoked,
 
     /// The signature did not verify against the supplied hash / public key, or
     /// the verifying authenticator returned no actor (`bytes32(0)`).

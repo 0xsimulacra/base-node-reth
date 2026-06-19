@@ -13,7 +13,7 @@ use crate::AuthError;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorizeError {
     /// The stateless authenticate (dispatch) step failed: malformed blob,
-    /// non-canonical or revoked authenticator, or an invalid signature.
+    /// non-canonical authenticator, or an invalid signature.
     #[error("authenticate failed: {0}")]
     Authenticate(#[from] AuthError),
 
@@ -37,6 +37,17 @@ pub enum AuthorizeError {
         authenticator: Address,
     },
 
+    /// A k1 signature recovered to the account itself, but the account's
+    /// secp256k1 self key is disabled: its `DEFAULT_EOA_REVOKED` flag is set, so
+    /// the self key has been revoked outright or superseded by a non-k1 self
+    /// authenticator. Mirrors `_authenticateK1`'s `require(flag unset)` on the
+    /// `recovered == account` path.
+    #[error("secp256k1 self key is disabled for account {account}")]
+    DefaultEoaRevoked {
+        /// The account whose inline self key is disabled.
+        account: Address,
+    },
+
     /// The resolved actor's configured expiry has passed (`now > expiry`).
     #[error("actor {actor_id} expired at {expiry}")]
     Expired {
@@ -55,15 +66,4 @@ pub enum AuthorizeError {
         /// The nested actor id that failed the SIGNATURE-scope check.
         actor_id: B256,
     },
-
-    /// The implicit-EOA self-actor slot is occupied by an explicit actor, so the
-    /// implicit owner is shadowed and `address(0)` cannot authenticate. Mirrors
-    /// `require(_actorConfig[self][account].authenticator == address(0))`.
-    #[error("implicit-EOA self-actor slot is occupied by an explicit actor")]
-    ImplicitEoaShadowed,
-
-    /// The implicit-EOA signature recovered an address other than the account
-    /// itself. Mirrors `require(recovered == account)`.
-    #[error("implicit-EOA signer does not match the account")]
-    ImplicitEoaMismatch,
 }
