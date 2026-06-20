@@ -138,7 +138,7 @@ impl ProposerService {
             init_bond = %init_bond,
             impl_address = %impl_address,
             game_type = config.game_type,
-            "Read on-chain config from AggregateVerifier and DisputeGameFactory"
+            "Read onchain config from AggregateVerifier and DisputeGameFactory"
         );
 
         let factory_client = Arc::new(factory_client);
@@ -150,7 +150,7 @@ impl ProposerService {
 
         let (output_proposer, proposer_address): (Arc<dyn crate::OutputProposer>, Option<Address>) =
             if config.dry_run {
-                info!("Dry-run mode enabled — proofs will be sourced but NOT submitted on-chain");
+                info!("Dry-run mode enabled - proofs will be sourced but NOT submitted onchain");
                 (Arc::new(crate::DryRunProposer), None)
             } else {
                 let signing = config.signing.ok_or_else(|| {
