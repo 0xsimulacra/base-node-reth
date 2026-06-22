@@ -6,13 +6,14 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
 use base_proof_contracts::{ITEEProverRegistry, TEEProverRegistryClient};
 use base_proof_tee_nitro_attestation_prover::AttestationProofProvider;
+use base_proof_tee_nitro_verifier::VerifierJournal;
 use base_tx_manager::{TxCandidate, TxManager, TxManagerError};
 use tokio::{
     sync::Semaphore,
@@ -29,6 +30,21 @@ pub const DEFAULT_MAX_TX_RETRIES: u32 = 3;
 
 /// Default initial delay between transaction submission retries in seconds.
 pub const DEFAULT_TX_RETRY_DELAY_SECS: u64 = 5;
+
+/// Runtime configuration for [`SignerManager`].
+#[derive(Debug, Clone, Copy)]
+pub struct SignerManagerConfig {
+    /// `TEEProverRegistry` contract address.
+    pub registry_address: Address,
+    /// Maximum concurrent proof-generation tasks.
+    pub max_concurrency: usize,
+    /// Maximum number of transaction submission retries for transient errors.
+    pub max_tx_retries: u32,
+    /// Delay between transaction submission retries.
+    pub tx_retry_delay: Duration,
+    /// Maximum proof attestation age accepted before on-chain submission.
+    pub max_attestation_age: Duration,
+}
 
 /// Maximum exponential backoff delay between transaction submission retries.
 const MAX_TX_RETRY_BACKOFF_DELAY: Duration = Duration::from_secs(60);
@@ -58,19 +74,19 @@ pub struct SignerManager<P, R, T> {
     registry_address: Address,
     max_tx_retries: u32,
     tx_retry_delay: Duration,
+    max_attestation_age: Duration,
 }
 
 impl<P, R, T> SignerManager<P, R, T> {
     /// Creates a signer manager from the signer lifecycle dependencies.
-    pub fn new(
-        proof_provider: P,
-        registry: R,
-        tx_manager: T,
-        registry_address: Address,
-        max_concurrency: usize,
-        max_tx_retries: u32,
-        tx_retry_delay: Duration,
-    ) -> Self {
+    pub fn new(proof_provider: P, registry: R, tx_manager: T, config: SignerManagerConfig) -> Self {
+        let SignerManagerConfig {
+            registry_address,
+            max_concurrency,
+            max_tx_retries,
+            tx_retry_delay,
+            max_attestation_age,
+        } = config;
         let proof_semaphore = Semaphore::new(max_concurrency.max(1));
         Self {
             proof_provider,
@@ -80,6 +96,7 @@ impl<P, R, T> SignerManager<P, R, T> {
             registry_address,
             max_tx_retries,
             tx_retry_delay,
+            max_attestation_age,
         }
     }
 }
@@ -238,6 +255,10 @@ where
             }
             Err(e) => return Err(e.into()),
         };
+
+        let journal = VerifierJournal::decode(&proof.output)
+            .map_err(|e| RegistrarError::InvalidProofJournal { reason: e.to_string() })?;
+        let attestation_timestamp = journal.timestamp;
         drop(proof_permit);
 
         let calldata = Bytes::from(
@@ -267,6 +288,7 @@ where
                 if signer_cancel.is_cancelled() {
                     return Ok(());
                 }
+                self.ensure_attestation_fresh(signer_address, attestation_timestamp)?;
 
                 // Do not wrap send in run_until_cancelled: dropping it after nonce
                 // acquisition can leave a nonce gap.
@@ -358,6 +380,29 @@ where
             "signer registered successfully"
         );
         RegistrarMetrics::registrations_total().increment(1);
+
+        Ok(())
+    }
+
+    fn ensure_attestation_fresh(&self, signer: Address, timestamp_ms: u64) -> Result<()> {
+        let now_ms =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let age = Duration::from_millis(now_ms.saturating_sub(timestamp_ms));
+
+        if age > self.max_attestation_age {
+            warn!(
+                signer = %signer,
+                age_secs = age.as_secs(),
+                max_age_secs = self.max_attestation_age.as_secs(),
+                timestamp_ms,
+                "pre-submission freshness check failed"
+            );
+            return Err(RegistrarError::StaleAttestationProof {
+                signer,
+                age,
+                max_age: self.max_attestation_age,
+            });
+        }
 
         Ok(())
     }
@@ -504,6 +549,7 @@ mod tests {
     use alloy_primitives::{Address, B256};
     use async_trait::async_trait;
     use base_proof_tee_nitro_attestation_prover::AttestationProof;
+    use base_proof_tee_nitro_verifier::VerificationResult;
     use base_tx_manager::{SendHandle, TxManagerError};
     use tokio::sync::Notify;
 
@@ -519,6 +565,7 @@ mod tests {
 
     const TEST_PENDING_INSTANCE_ID: &str = "i-pending-test";
     const GATED_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_MAX_ATTESTATION_AGE: Duration = Duration::from_secs(3300);
     const ATTESTATION: &[u8] = b"stub-attestation";
     const SIGNER_A: Address = Address::new([0xAA; 20]);
     const SIGNER_B: Address = Address::new([0xBB; 20]);
@@ -641,7 +688,29 @@ mod tests {
     struct RecordingProofProvider {
         cancel_then_error: bool,
         blocked_signers: Arc<Mutex<Vec<Address>>>,
+        proof_output: Option<Bytes>,
         records: ProofRecords,
+    }
+
+    fn proof_output_with_age(age: Duration) -> Bytes {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+        let age_ms = u64::try_from(age.as_millis()).unwrap_or(u64::MAX);
+        let timestamp = u64::try_from(now_ms).unwrap_or(u64::MAX).saturating_sub(age_ms);
+        Bytes::from(
+            VerifierJournal {
+                result: VerificationResult::Success,
+                trustedCertsPrefixLen: 1,
+                timestamp,
+                certs: Vec::new(),
+                certExpiries: Vec::new(),
+                userData: Bytes::new(),
+                nonce: Bytes::new(),
+                publicKey: Bytes::new(),
+                pcrs: Vec::new(),
+                moduleId: "test-module".to_string(),
+            }
+            .encode(),
+        )
     }
 
     #[async_trait]
@@ -668,7 +737,10 @@ mod tests {
                 ));
             }
             Ok(AttestationProof {
-                output: Bytes::from_static(b"stub-output"),
+                output: self
+                    .proof_output
+                    .clone()
+                    .unwrap_or_else(|| proof_output_with_age(Duration::ZERO)),
                 proof_bytes: Bytes::from_static(b"stub-proof"),
             })
         }
@@ -683,14 +755,35 @@ mod tests {
         registry: MockRegistry,
         tx_manager: T,
     ) -> SignerManager<RecordingProofProvider, MockRegistry, T> {
+        manager_with_config(
+            proof_provider,
+            registry,
+            tx_manager,
+            DEFAULT_MAX_TX_RETRIES,
+            Duration::from_secs(DEFAULT_TX_RETRY_DELAY_SECS),
+            TEST_MAX_ATTESTATION_AGE,
+        )
+    }
+
+    fn manager_with_config<T>(
+        proof_provider: RecordingProofProvider,
+        registry: MockRegistry,
+        tx_manager: T,
+        max_tx_retries: u32,
+        tx_retry_delay: Duration,
+        max_attestation_age: Duration,
+    ) -> SignerManager<RecordingProofProvider, MockRegistry, T> {
         SignerManager::new(
             proof_provider,
             registry,
             tx_manager,
-            TEST_REGISTRY_ADDRESS,
-            DEFAULT_MAX_CONCURRENCY,
-            DEFAULT_MAX_TX_RETRIES,
-            Duration::from_secs(DEFAULT_TX_RETRY_DELAY_SECS),
+            SignerManagerConfig {
+                registry_address: TEST_REGISTRY_ADDRESS,
+                max_concurrency: DEFAULT_MAX_CONCURRENCY,
+                max_tx_retries,
+                tx_retry_delay,
+                max_attestation_age,
+            },
         )
     }
 
@@ -873,7 +966,7 @@ mod tests {
             ("exponential", 3, Duration::from_secs(1), 3, 4, Duration::from_secs(7)),
             ("capped", 4, Duration::from_secs(30), 4, 5, Duration::from_secs(210)),
         ] {
-            let manager = SignerManager::new(
+            let manager = manager_with_config(
                 RecordingProofProvider::default(),
                 MockRegistry::default(),
                 RecordingTxManager::with_errors(
@@ -881,10 +974,9 @@ mod tests {
                         .map(|retry| TxManagerError::Rpc(format!("transient {retry}")))
                         .collect(),
                 ),
-                TEST_REGISTRY_ADDRESS,
-                DEFAULT_MAX_CONCURRENCY,
                 max_retries,
                 retry_delay,
+                TEST_MAX_ATTESTATION_AGE,
             );
             let start = tokio::time::Instant::now();
 
@@ -916,6 +1008,74 @@ mod tests {
         );
         assert_eq!(manager.tx_manager.send_count(), 1, "should submit exactly one tx");
         assert_eq!(*proof_provider.blocked_signers.lock().unwrap(), vec![SIGNER_A]);
+    }
+
+    #[tokio::test]
+    async fn register_signer_rejects_stale_proof_before_tx() {
+        let proof_provider = RecordingProofProvider {
+            proof_output: Some(proof_output_with_age(
+                TEST_MAX_ATTESTATION_AGE + Duration::from_secs(1),
+            )),
+            ..Default::default()
+        };
+        let manager = manager_with(
+            proof_provider.clone(),
+            MockRegistry::default(),
+            RecordingTxManager::default(),
+        );
+
+        let result = register(&manager, &CancellationToken::new()).await;
+
+        assert!(
+            matches!(result, Err(RegistrarError::StaleAttestationProof { signer, .. }) if signer == SIGNER_A),
+            "stale proof should fail before submission: {result:?}"
+        );
+        assert_eq!(manager.tx_manager.send_count(), 0, "stale proof must not submit a tx");
+        assert!(proof_provider.blocked_signers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_signer_rechecks_freshness_before_retry_send() {
+        let proof_provider = RecordingProofProvider::default();
+        let manager = manager_with_config(
+            proof_provider.clone(),
+            MockRegistry::default(),
+            RecordingTxManager::with_errors(vec![TxManagerError::Rpc("transient".into())]),
+            DEFAULT_MAX_TX_RETRIES,
+            Duration::from_millis(50),
+            Duration::from_millis(20),
+        );
+
+        let result = register(&manager, &CancellationToken::new()).await;
+
+        assert!(
+            matches!(result, Err(RegistrarError::StaleAttestationProof { signer, .. }) if signer == SIGNER_A),
+            "proof should become stale before retry submission: {result:?}"
+        );
+        assert_eq!(manager.tx_manager.send_count(), 1, "stale retry must not submit again");
+        assert!(proof_provider.blocked_signers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_signer_rejects_invalid_proof_journal_before_tx() {
+        let proof_provider = RecordingProofProvider {
+            proof_output: Some(Bytes::from_static(b"not-an-abi-journal")),
+            ..Default::default()
+        };
+        let manager = manager_with(
+            proof_provider.clone(),
+            MockRegistry::default(),
+            RecordingTxManager::default(),
+        );
+
+        let result = register(&manager, &CancellationToken::new()).await;
+
+        assert!(
+            matches!(result, Err(RegistrarError::InvalidProofJournal { .. })),
+            "invalid proof journal should fail before submission: {result:?}"
+        );
+        assert_eq!(manager.tx_manager.send_count(), 0, "invalid proof must not submit a tx");
+        assert!(proof_provider.blocked_signers.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -969,10 +1129,13 @@ mod tests {
             proof_provider.clone(),
             MockRegistry::default(),
             RecordingTxManager::stalling(),
-            TEST_REGISTRY_ADDRESS,
-            1,
-            DEFAULT_MAX_TX_RETRIES,
-            Duration::from_secs(DEFAULT_TX_RETRY_DELAY_SECS),
+            SignerManagerConfig {
+                registry_address: TEST_REGISTRY_ADDRESS,
+                max_concurrency: 1,
+                max_tx_retries: DEFAULT_MAX_TX_RETRIES,
+                tx_retry_delay: Duration::from_secs(DEFAULT_TX_RETRY_DELAY_SECS),
+                max_attestation_age: TEST_MAX_ATTESTATION_AGE,
+            },
         ));
         let cancel = CancellationToken::new();
 
