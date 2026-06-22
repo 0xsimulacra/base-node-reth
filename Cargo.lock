@@ -5164,6 +5164,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-observability-events"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "base-metrics",
+ "chrono",
+ "eyre",
+ "hex",
+ "metrics",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "base-optimism-rpc"
 version = "0.0.0"
 dependencies = [
