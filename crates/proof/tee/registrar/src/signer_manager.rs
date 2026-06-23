@@ -351,9 +351,18 @@ where
                         }
 
                         if !e.is_retryable() {
-                            if matches!(e, TxManagerError::ExecutionReverted { .. }) {
+                            if let TxManagerError::ExecutionReverted { data, reason, .. } = &e {
+                                let registry_error = data
+                                    .as_ref()
+                                    .and_then(|d| d.get(..4))
+                                    .and_then(|selector| selector.try_into().ok())
+                                    .and_then(
+                                        ITEEProverRegistry::ITEEProverRegistryErrors::name_by_selector,
+                                    );
                                 warn!(
                                     signer = %signer_address,
+                                    registry_error = ?registry_error,
+                                    reason = ?reason,
                                     "execution reverted, blocking proof recovery for signer"
                                 );
                                 self.proof_provider.block_recovery_for_signer(signer_address);
