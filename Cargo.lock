@@ -4400,6 +4400,7 @@ dependencies = [
  "base-common-genesis",
  "base-execution-chainspec",
  "base-execution-consensus",
+ "base-execution-eip8130-rpc-node",
  "base-execution-evm",
  "base-execution-trie",
  "base-flashblocks",
@@ -4497,6 +4498,44 @@ dependencies = [
  "revm",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "base-execution-eip8130-rpc"
+version = "0.0.0"
+dependencies = [
+ "alloy-consensus 2.0.5",
+ "alloy-eips 2.0.5",
+ "alloy-primitives",
+ "alloy-rpc-types 2.0.5",
+ "base-common-chains",
+ "base-common-consensus",
+ "base-common-network",
+ "base-common-precompiles",
+ "jsonrpsee",
+ "jsonrpsee-types",
+ "reth-chainspec",
+ "reth-provider",
+ "reth-rpc-eth-api",
+ "reth-rpc-eth-types",
+ "reth-storage-api",
+ "tracing",
+]
+
+[[package]]
+name = "base-execution-eip8130-rpc-node"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-client 2.0.5",
+ "base-common-consensus",
+ "base-execution-chainspec",
+ "base-execution-eip8130-rpc",
+ "base-node-runner",
+ "base-test-utils",
+ "eyre",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4778,6 +4817,7 @@ dependencies = [
  "base-common-rpc-types",
  "base-common-rpc-types-engine",
  "base-execution-chainspec",
+ "base-execution-eip8130-rpc",
  "base-execution-evm",
  "base-execution-rpc",
  "base-metrics",
