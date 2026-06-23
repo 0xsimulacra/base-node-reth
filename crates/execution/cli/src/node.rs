@@ -22,7 +22,7 @@ use reth_rpc_server_types::{
 };
 use tracing::info;
 
-use crate::{RpcStandardNodeArgs, StandardNodeArgs};
+use crate::{MeteringArgs, RpcStandardNodeArgs, StandardNodeArgs};
 
 const DEFAULT_BASE_MAX_INBOUND_EL_PEERS: usize = 80;
 const DEFAULT_BASE_MAX_OUTBOUND_EL_PEERS: usize = 80;
@@ -169,6 +169,10 @@ pub struct ExecutionNodeArgs {
     /// Standard Base execution-node extension arguments.
     #[command(flatten)]
     pub standard: RpcStandardNodeArgs,
+
+    /// Metering RPC and priority-fee resource budget arguments.
+    #[command(flatten)]
+    pub metering: MeteringArgs,
 }
 
 impl ExecutionNodeArgs {
@@ -177,7 +181,7 @@ impl ExecutionNodeArgs {
         let runtime = self.node.into_runtime_config(chain);
         ExecutionNodeLaunchConfig {
             node_config: runtime.node_config,
-            standard: self.standard.into(),
+            standard: StandardNodeArgs::from(self.standard).with_metering(self.metering),
             with_unused_ports: runtime.with_unused_ports,
             upgrade_signal_startup: runtime.upgrade_signal_startup,
         }
@@ -401,6 +405,25 @@ mod tests {
             args.standard.flashblocks_url.as_ref().map(Url::as_str),
             Some("wss://example.com/ws")
         );
+        assert!(!args.metering.enable_metering);
+    }
+
+    #[test]
+    fn standard_execution_args_parse_metering_separately() {
+        let args = CommandParser::<ExecutionNodeArgs>::parse_from([
+            "reth",
+            "--enable-metering",
+            "--metering.execution-time-us",
+            "5000000",
+        ])
+        .args;
+
+        assert!(args.metering.enable_metering);
+        assert_eq!(args.metering.metering_execution_time_us, Some(5_000_000));
+
+        let launch_config = args.into_launch_config(Arc::new(BaseChainSpec::devnet()));
+        assert!(launch_config.standard.metering.enable_metering);
+        assert_eq!(launch_config.standard.metering.metering_execution_time_us, Some(5_000_000));
     }
 
     #[test]
