@@ -1,9 +1,7 @@
 {
   description = "Rust dev shell with Fenix (stable + nightly) and cargo +nightly shim";
 
-  # we should keep using master untill this is merged
-  # https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/rust/fetchcrate.nix
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/master";
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   inputs.systems.url = "github:nix-systems/default";
   inputs.flake-utils = {
     url = "github:numtide/flake-utils";
