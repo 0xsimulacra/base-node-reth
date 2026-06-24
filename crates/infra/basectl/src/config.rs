@@ -4,10 +4,57 @@ use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use anyhow::{Context, Result};
 use base_common_chains::{ChainConfig, rollup_config};
-use base_common_genesis::{HardForkConfig, RollupConfig};
+use base_common_genesis::{RollupConfig, UpgradeConfig};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use url::Url;
+
+/// Configuration for one Kubernetes pod group rendered by the pods view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PodGroupConfig {
+    /// Short group alias shown in compact tables.
+    pub alias: String,
+    /// Human-readable group label.
+    pub label: String,
+    /// Kubernetes context passed to `kubectl --context`.
+    pub context: String,
+    /// Kubernetes namespace passed to `kubectl --namespace`.
+    pub namespace: String,
+    /// Optional Kubernetes label selector passed to `kubectl -l`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+}
+
+/// Configuration for the Kubernetes pods view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodsConfig {
+    /// Optional path to a `kubectl` executable. Defaults to `kubectl` from `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubectl: Option<PathBuf>,
+    /// How often to refresh pod status, in milliseconds.
+    #[serde(default = "default_pods_refresh_interval_ms")]
+    pub refresh_interval_ms: u64,
+    /// Static pod groups from the user's local config file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<PodGroupConfig>,
+}
+
+impl PodsConfig {
+    /// Returns the command used to invoke Kubernetes.
+    pub fn kubectl_program(&self) -> PathBuf {
+        self.kubectl.clone().unwrap_or_else(|| PathBuf::from("kubectl"))
+    }
+
+    /// Returns the configured refresh interval, never less than 250 ms.
+    pub const fn refresh_interval(&self) -> std::time::Duration {
+        let millis = if self.refresh_interval_ms < 250 { 250 } else { self.refresh_interval_ms };
+        std::time::Duration::from_millis(millis)
+    }
+}
+
+const fn default_pods_refresh_interval_ms() -> u64 {
+    1_000
+}
 
 /// Configuration for proof system monitoring (proposer + dispute games).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +110,12 @@ pub struct ConductorNodeConfig {
     /// If set, the TUI can restart this container with `r`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_conductor: Option<String>,
-    /// Docker container name for the EL (execution layer) process.
+    /// Docker container name for the EL (execution layer) process or unified node.
     ///
     /// If set, the TUI can restart this container with `r`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_el: Option<String>,
-    /// Docker container name for the CL (consensus layer) process.
+    /// Docker container name for the CL (consensus layer) process or unified node.
     ///
     /// If set, the TUI can restart this container with `r`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,9 +311,9 @@ pub struct MonitoringConfig {
     /// Optional Base consensus node JSON-RPC endpoint URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consensus_node_rpc: Option<Url>,
-    /// Live rollup hardfork configuration fetched from the consensus node when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hardforks: Option<HardForkConfig>,
+    /// Live rollup upgrade configuration fetched from the consensus node when available.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "hardforks")]
+    pub upgrades: Option<UpgradeConfig>,
     /// L1 `SystemConfig` contract address.
     pub system_config: Address,
     /// L1 batcher address for blob attribution.
@@ -294,6 +341,9 @@ pub struct MonitoringConfig {
     /// Proof system monitoring configuration (dispute games, anchor state).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proofs: Option<ProofsConfig>,
+    /// Kubernetes pod groups to display in the pods view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pods: Option<PodsConfig>,
 }
 
 impl MonitoringConfig {
@@ -354,6 +404,26 @@ impl MonitoringConfig {
         }
         candidate
     }
+
+    /// Resolves the active conductor source from CLI flag and config.
+    ///
+    /// Precedence: hand-configured `conductors` list > CLI `--conductor-rpc`
+    /// flag > `discovery.bootstrap_rpc` from config.
+    pub fn conductor_source(&self, cli_flag: Option<Url>) -> Option<ConductorSource> {
+        if let Some(nodes) = self.conductors.clone() {
+            return Some(ConductorSource::Static(nodes));
+        }
+        if let Some(bootstrap) = cli_flag {
+            let ports = self.discovery.as_ref().map(|d| d.ports.clone()).unwrap_or_default();
+            return Some(ConductorSource::Discover { bootstrap, ports });
+        }
+        if let Some(d) = self.discovery.as_ref()
+            && let Some(bootstrap) = d.bootstrap_rpc.clone()
+        {
+            return Some(ConductorSource::Discover { bootstrap, ports: d.ports.clone() });
+        }
+        None
+    }
 }
 
 const fn default_blob_target() -> u64 {
@@ -367,7 +437,8 @@ struct MonitoringConfigOverride {
     flashblocks_ws: Option<Url>,
     l1_rpc: Option<Url>,
     consensus_node_rpc: Option<Url>,
-    hardforks: Option<HardForkConfig>,
+    #[serde(alias = "hardforks")]
+    upgrades: Option<UpgradeConfig>,
     #[serde(default)]
     system_config: Option<Address>,
     #[serde(default)]
@@ -377,6 +448,7 @@ struct MonitoringConfigOverride {
     discovery: Option<DiscoveryConfig>,
     validators: Option<Vec<ValidatorNodeConfig>>,
     proofs: Option<ProofsConfig>,
+    pods: Option<PodsConfig>,
 }
 
 impl MonitoringConfig {
@@ -413,7 +485,7 @@ impl MonitoringConfig {
             flashblocks_ws: Url::parse("wss://mainnet.flashblocks.base.org/ws").unwrap(),
             l1_rpc: Url::parse("https://ethereum-rpc.publicnode.com").unwrap(),
             consensus_node_rpc: None,
-            hardforks: Some(rollup.hardforks),
+            upgrades: Some(rollup.upgrades),
             system_config: rollup.l1_system_config_address,
             batcher_address: Some("0x5050F69a9786F081509234F1a7F4684b5E5b76C9".parse().unwrap()),
             l1_blob_target: 14,
@@ -424,6 +496,7 @@ impl MonitoringConfig {
             }),
             validators: None,
             proofs: None,
+            pods: None,
         }
     }
 
@@ -436,7 +509,7 @@ impl MonitoringConfig {
             flashblocks_ws: Url::parse("wss://sepolia.flashblocks.base.org/ws").unwrap(),
             l1_rpc: Url::parse("https://ethereum-sepolia-rpc.publicnode.com").unwrap(),
             consensus_node_rpc: None,
-            hardforks: Some(rollup.hardforks),
+            upgrades: Some(rollup.upgrades),
             system_config: rollup.l1_system_config_address,
             batcher_address: Some("0xfc56E7272EEBBBA5bC6c544e159483C4a38f8bA3".parse().unwrap()),
             l1_blob_target: 14,
@@ -447,6 +520,7 @@ impl MonitoringConfig {
             }),
             validators: None,
             proofs: None,
+            pods: None,
         }
     }
 
@@ -465,7 +539,7 @@ impl MonitoringConfig {
             flashblocks_ws: Url::parse("ws://localhost:7111").unwrap(),
             l1_rpc: Url::parse("http://localhost:4545").unwrap(),
             consensus_node_rpc: Some(Url::parse("http://localhost:7549").unwrap()),
-            hardforks: None,
+            upgrades: None,
             // These will be populated by fetch_rollup_config
             system_config: Address::ZERO,
             batcher_address: None,
@@ -480,7 +554,7 @@ impl MonitoringConfig {
                     el_rpc: Some(Url::parse("http://localhost:7545").unwrap()),
                     docker_conductor: Some("op-conductor-0".to_string()),
                     docker_el: Some("base-builder".to_string()),
-                    docker_cl: Some("base-builder-cl".to_string()),
+                    docker_cl: Some("base-builder".to_string()),
                     flashblocks_ws: Some(Url::parse("ws://localhost:7111").unwrap()),
                 },
                 ConductorNodeConfig {
@@ -492,7 +566,7 @@ impl MonitoringConfig {
                     el_rpc: Some(Url::parse("http://localhost:10545").unwrap()),
                     docker_conductor: Some("op-conductor-1".to_string()),
                     docker_el: Some("base-sequencer-1".to_string()),
-                    docker_cl: Some("base-sequencer-1-cl".to_string()),
+                    docker_cl: Some("base-sequencer-1".to_string()),
                     flashblocks_ws: Some(Url::parse("ws://localhost:10111").unwrap()),
                 },
                 ConductorNodeConfig {
@@ -504,18 +578,18 @@ impl MonitoringConfig {
                     el_rpc: Some(Url::parse("http://localhost:11545").unwrap()),
                     docker_conductor: Some("op-conductor-2".to_string()),
                     docker_el: Some("base-sequencer-2".to_string()),
-                    docker_cl: Some("base-sequencer-2-cl".to_string()),
+                    docker_cl: Some("base-sequencer-2".to_string()),
                     flashblocks_ws: Some(Url::parse("ws://localhost:11111").unwrap()),
                 },
             ]),
             validators: Some(vec![
                 ValidatorNodeConfig {
                     name: "base-client".to_string(),
-                    binary: Some("/app/base-client + /app/base-consensus".to_string()),
+                    binary: Some("/app/base".to_string()),
                     cl_rpc: Url::parse("http://localhost:8549").unwrap(),
                     el_rpc: Some(Url::parse("http://localhost:8545").unwrap()),
                     docker_el: Some("base-client".to_string()),
-                    docker_cl: Some("base-client-cl".to_string()),
+                    docker_cl: Some("base-client".to_string()),
                 },
                 ValidatorNodeConfig {
                     name: "base-rpc".to_string(),
@@ -528,6 +602,7 @@ impl MonitoringConfig {
             ]),
             discovery: None,
             proofs: None,
+            pods: None,
         }
     }
 
@@ -610,7 +685,7 @@ impl MonitoringConfig {
 
         config.system_config = rollup_config.l1_system_config_address;
         config.batcher_address = rollup_config.genesis.system_config.map(|sc| sc.batcher_address);
-        config.hardforks = Some(rollup_config.hardforks);
+        config.upgrades = Some(rollup_config.upgrades);
 
         Ok(config)
     }
@@ -638,7 +713,7 @@ impl MonitoringConfig {
             flashblocks_ws: overrides.flashblocks_ws.unwrap_or(base.flashblocks_ws),
             l1_rpc: overrides.l1_rpc.unwrap_or(base.l1_rpc),
             consensus_node_rpc: overrides.consensus_node_rpc.or(base.consensus_node_rpc),
-            hardforks: overrides.hardforks.or(base.hardforks),
+            upgrades: overrides.upgrades.or(base.upgrades),
             system_config: overrides.system_config.unwrap_or(base.system_config),
             batcher_address: overrides.batcher_address.or(base.batcher_address),
             l1_blob_target: overrides.l1_blob_target.unwrap_or(base.l1_blob_target),
@@ -646,6 +721,7 @@ impl MonitoringConfig {
             discovery: overrides.discovery.or(base.discovery),
             validators: overrides.validators.or(base.validators),
             proofs: overrides.proofs.or(base.proofs),
+            pods: overrides.pods.or(base.pods),
         })
     }
 
@@ -683,11 +759,11 @@ mod tests {
         let validators = devnet.validators.expect("devnet should include validator/RPC node");
         assert_eq!(validators.len(), 2);
         assert_eq!(validators[0].name, "base-client");
-        assert_eq!(validators[0].binary.as_deref(), Some("/app/base-client + /app/base-consensus"));
+        assert_eq!(validators[0].binary.as_deref(), Some("/app/base"));
         assert_eq!(validators[0].cl_rpc.as_str(), "http://localhost:8549/");
         assert_eq!(validators[0].el_rpc.as_ref().unwrap().as_str(), "http://localhost:8545/");
         assert_eq!(validators[0].docker_el.as_deref(), Some("base-client"));
-        assert_eq!(validators[0].docker_cl.as_deref(), Some("base-client-cl"));
+        assert_eq!(validators[0].docker_cl.as_deref(), Some("base-client"));
         assert_eq!(validators[1].name, "base-rpc");
         assert_eq!(validators[1].binary.as_deref(), Some("/app/base"));
         assert_eq!(validators[1].cl_rpc.as_str(), "http://localhost:8649/");
@@ -700,5 +776,52 @@ mod tests {
     async fn test_unknown_config() {
         let result = MonitoringConfig::load("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn conductor_source_prefers_static_nodes() {
+        let mut config = MonitoringConfig::devnet_base();
+        let cli_url = Url::parse("http://127.0.0.1:5545").unwrap();
+
+        let Some(ConductorSource::Static(nodes)) = config.conductor_source(Some(cli_url)) else {
+            panic!("expected static conductor source");
+        };
+
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].name, "op-conductor-0");
+        config.conductors = None;
+        assert!(config.conductor_source(None).is_none());
+    }
+
+    #[test]
+    fn conductor_source_uses_cli_flag_without_static_nodes() {
+        let mut config = MonitoringConfig::mainnet();
+        let cli_url = Url::parse("http://127.0.0.1:5545").unwrap();
+
+        let Some(ConductorSource::Discover { bootstrap, ports }) =
+            config.conductor_source(Some(cli_url.clone()))
+        else {
+            panic!("expected discovered conductor source");
+        };
+
+        assert_eq!(bootstrap, cli_url);
+        assert_eq!(ports.conductor_rpc, 5545);
+        config.discovery = None;
+        assert!(config.conductor_source(None).is_none());
+    }
+
+    #[test]
+    fn conductor_source_uses_config_discovery_bootstrap() {
+        let mut config = MonitoringConfig::mainnet();
+        let bootstrap = Url::parse("http://10.0.0.1:5545").unwrap();
+        config.discovery.as_mut().unwrap().bootstrap_rpc = Some(bootstrap.clone());
+
+        let Some(ConductorSource::Discover { bootstrap: resolved, .. }) =
+            config.conductor_source(None)
+        else {
+            panic!("expected discovered conductor source");
+        };
+
+        assert_eq!(resolved, bootstrap);
     }
 }

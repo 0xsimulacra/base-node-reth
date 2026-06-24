@@ -171,6 +171,7 @@ where
             &sys_config,
             sequence_number,
             &l1_header,
+            l2_parent.block_info.timestamp,
             next_l2_time,
         )
         .map_err(|e| {
@@ -263,7 +264,7 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_primitives::{B256, Log, LogData, U64, U256, address};
     use base_common_chains::Sepolia;
-    use base_common_genesis::{HardForkConfig, SystemConfig, SystemConfigUpdate};
+    use base_common_genesis::{SystemConfig, SystemConfigUpdate, UpgradeConfig};
     use base_protocol::{BlockInfo, DepositDecodeError};
 
     use super::*;
@@ -508,7 +509,7 @@ mod tests {
         let timestamp = 100;
         let cfg = Arc::new(RollupConfig {
             block_time,
-            hardforks: HardForkConfig { canyon_time: Some(0), ..Default::default() },
+            upgrades: UpgradeConfig { canyon_time: Some(0), ..Default::default() },
             ..Default::default()
         });
         let l1_cfg = Arc::new(Sepolia::l1_config());
@@ -561,7 +562,7 @@ mod tests {
         let timestamp = 100;
         let cfg = Arc::new(RollupConfig {
             block_time,
-            hardforks: HardForkConfig { ecotone_time: Some(102), ..Default::default() },
+            upgrades: UpgradeConfig { ecotone_time: Some(102), ..Default::default() },
             ..Default::default()
         });
         let l1_cfg = Arc::new(Sepolia::l1_config());
@@ -615,7 +616,7 @@ mod tests {
         let timestamp = 100;
         let cfg = Arc::new(RollupConfig {
             block_time,
-            hardforks: HardForkConfig { fjord_time: Some(102), ..Default::default() },
+            upgrades: UpgradeConfig { fjord_time: Some(102), ..Default::default() },
             ..Default::default()
         });
         let l1_cfg = Arc::new(Sepolia::l1_config());

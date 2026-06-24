@@ -10,6 +10,7 @@ use std::{
 use alloy_consensus::{
     Eip658Value, Header as ConsensusHeader, Receipt, ReceiptEnvelope, ReceiptWithBloom,
 };
+use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, Bloom, Bytes, U256, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{EIP1186AccountProofResponse, Header as RpcHeader, TransactionReceipt};
@@ -24,8 +25,9 @@ use base_proof_contracts::{
 use base_proof_rpc::{L2Provider, RpcError, RpcResult};
 use base_prover_service_client::{ProofRequesterProvider, ProverServiceClientError};
 use base_prover_service_protocol::{
-    GetProofRequest, GetProofResponse, ProofResult as ApiProofResult, ProofStatus,
-    ProveBlockRangeRequest, ProveBlockRangeResponse, SnarkGroth16ProofResult, ZkProofResult, ZkVm,
+    DeleteProofRequest, GetProofRequest, GetProofResponse, ProofResult as ApiProofResult,
+    ProofStatus, ProveBlockRangeRequest, ProveBlockRangeResponse, SnarkGroth16ProofResult,
+    ZkProofResult, ZkVm,
 };
 use base_tx_manager::{SendHandle, SendResponse, TxCandidate, TxManager};
 
@@ -657,8 +659,11 @@ impl L2Provider for MockL2Provider {
             .ok_or_else(|| RpcError::ProofNotFound(format!("no proof for hash {block_hash}")))
     }
 
-    async fn header_by_number(&self, number: Option<u64>) -> RpcResult<RpcHeader> {
-        let block_number = number.unwrap_or(0);
+    async fn header_by_number(&self, block: BlockNumberOrTag) -> RpcResult<RpcHeader> {
+        let block_number = match block {
+            BlockNumberOrTag::Number(number) => number,
+            other => panic!("MockL2Provider::header_by_number does not support tag {other:?}"),
+        };
         if self.error_blocks.contains(&block_number) {
             return Err(RpcError::BlockNotFound(format!("block {block_number} not available")));
         }
@@ -668,7 +673,10 @@ impl L2Provider for MockL2Provider {
             .ok_or_else(|| RpcError::HeaderNotFound(format!("no header for block {block_number}")))
     }
 
-    async fn block_by_number(&self, _number: Option<u64>) -> RpcResult<base_proof_rpc::BaseBlock> {
+    async fn block_by_number(
+        &self,
+        _block: BlockNumberOrTag,
+    ) -> RpcResult<base_proof_rpc::BaseBlock> {
         Err(RpcError::BlockNotFound("not implemented in mock".into()))
     }
 
@@ -695,6 +703,10 @@ pub struct MockZkProofState {
     pub proof: Vec<u8>,
     /// Optional full prover-service result returned when status is [`ProofStatus::Succeeded`].
     pub result: Option<ApiProofResult>,
+    /// When `true`, [`get_proof`](ProofRequesterProvider::get_proof) returns `None` for
+    /// `result` even when `proof_status` is [`ProofStatus::Succeeded`]. Used to simulate
+    /// the "succeeded without result" malformed-response path.
+    pub omit_result_on_success: bool,
     /// Error message returned when status is `Failed`.
     pub error_message: Option<String>,
     /// Every [`ProveBlockRangeRequest`] received by `prove_block_range`, in call order.
@@ -707,6 +719,7 @@ impl Default for MockZkProofState {
             proof_status: ProofStatus::Queued,
             proof: Vec::new(),
             result: None,
+            omit_result_on_success: false,
             error_message: None,
             prove_block_range_log: Vec::new(),
         }
@@ -725,8 +738,7 @@ impl ProofRequesterProvider for MockZkProofProvider {
         &self,
         request: ProveBlockRangeRequest,
     ) -> Result<ProveBlockRangeResponse, ProverServiceClientError> {
-        let session_id =
-            request.proof.session_id.clone().unwrap_or_else(|| self.session_id.clone());
+        let session_id = request.proof.session_id.clone();
         self.state.lock().unwrap().prove_block_range_log.push(request);
         Ok(ProveBlockRangeResponse { session_id })
     }
@@ -737,11 +749,15 @@ impl ProofRequesterProvider for MockZkProofProvider {
     ) -> Result<GetProofResponse, ProverServiceClientError> {
         let state = self.state.lock().unwrap().clone();
         let result = if state.proof_status == ProofStatus::Succeeded {
-            state.result.or_else(|| {
-                Some(ApiProofResult::SnarkGroth16(SnarkGroth16ProofResult {
-                    proof: ZkProofResult { zk_vm: ZkVm::Sp1, proof: state.proof.into() },
-                }))
-            })
+            if state.omit_result_on_success {
+                None
+            } else {
+                state.result.or_else(|| {
+                    Some(ApiProofResult::SnarkGroth16(SnarkGroth16ProofResult {
+                        proof: ZkProofResult { zk_vm: ZkVm::Sp1, proof: state.proof.into() },
+                    }))
+                })
+            }
         } else {
             None
         };
@@ -751,6 +767,16 @@ impl ProofRequesterProvider for MockZkProofProvider {
             result,
         })
     }
+
+    async fn delete_proof_request(
+        &self,
+        request: DeleteProofRequest,
+    ) -> Result<(), ProverServiceClientError> {
+        let mut state = self.state.lock().unwrap();
+        state.prove_block_range_log.retain(|entry| entry.proof.session_id != request.session_id);
+        Ok(())
+    }
+
     async fn list_proofs(
         &self,
         _request: base_prover_service_protocol::ListProofsRequest,
@@ -964,6 +990,14 @@ mod tests {
 
     use super::*;
     use crate::scanner::{GameCategory, GameScanner};
+
+    #[tokio::test]
+    #[should_panic(expected = "MockL2Provider::header_by_number does not support tag finalized")]
+    async fn test_mock_l2_provider_rejects_block_tags() {
+        let provider = MockL2Provider::new();
+
+        let _ = provider.header_by_number(BlockNumberOrTag::Finalized).await;
+    }
 
     /// Happy path: mixed games, only `IN_PROGRESS` / non-nullified returned.
     #[tokio::test]

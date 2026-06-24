@@ -3,7 +3,7 @@
 use std::{path::Path, sync::Arc};
 
 use base_consensus_cli::{
-    ConsensusNodeArgs, ConsensusNodeOverrides, EmbeddedConsensusNodeConfigArgs,
+    CliMetrics, ConsensusNodeArgs, ConsensusNodeOverrides, EmbeddedConsensusNodeConfigArgs,
 };
 use base_execution_chainspec::BaseChainSpec;
 use base_execution_cli::{ExecutionNodeArgs, chainspec::chain_value_parser};
@@ -18,8 +18,14 @@ use crate::config::ResolvedChainConfig;
 #[derive(Args, Clone, Debug)]
 #[command(
     mut_arg("builder_disallow", |arg| arg.hide(true).long("__builder-disallow-disabled")),
-    mut_arg("sequencer", |arg| arg.hide(true).long("__rollup-sequencer-disabled")),
-    mut_arg("sequencer_headers", |arg| arg.hide(true).long("__rollup-sequencer-headers-disabled"))
+    mut_arg("sequencer", |arg| arg
+        .hide(true)
+        .long("__rollup-sequencer-disabled")
+        .alias(None::<&'static str>)),
+    mut_arg("sequencer_headers", |arg| arg
+        .hide(true)
+        .long("__rollup-sequencer-headers-disabled")
+        .alias(None::<&'static str>))
 )]
 pub(crate) struct RpcCommand {
     /// Execution chain spec to use instead of the root chain selection.
@@ -37,7 +43,11 @@ pub(crate) struct RpcCommand {
 
 impl RpcCommand {
     /// Runs the `rpc` flavor.
-    pub(crate) fn run(self, resolved_chain: ResolvedChainConfig) -> eyre::Result<()> {
+    pub(crate) fn run(
+        self,
+        resolved_chain: ResolvedChainConfig,
+        metrics_enabled: bool,
+    ) -> eyre::Result<()> {
         let execution_chain = match self.execution_chain {
             Some(chain) => chain,
             None => resolved_chain.execution_chain_spec()?,
@@ -45,11 +55,17 @@ impl RpcCommand {
         let consensus_chain = resolved_chain.consensus_chain_args();
         let consensus_args = ConsensusNodeArgs::new(consensus_chain, self.consensus.into());
         let rollup_config = consensus_args.load_rollup_config()?;
+        if metrics_enabled {
+            CliMetrics::init_rollup_config(&rollup_config);
+        }
 
-        let execution = self.execution.into_launch_config(execution_chain).with_auth_ipc();
+        let execution =
+            self.execution.into_launch_config(execution_chain).with_unified_auth_endpoint();
         let l2_engine_rpc = engine_ipc_url(execution.auth_ipc_path())?;
 
         CliRunner::try_default_runtime()?.run_command_until_exit(|ctx| async move {
+            let _upgrade_countdown_metrics = metrics_enabled
+                .then(|| CliMetrics::spawn_upgrade_countdown_recorder(rollup_config.clone()));
             let task_executor = ctx.task_executor.clone();
             let launched = execution.launch_default(ctx).await?;
             let handle = launched.handle;
@@ -97,7 +113,7 @@ impl RpcCommand {
     }
 }
 
-fn engine_ipc_url(path: &str) -> eyre::Result<Url> {
+pub(super) fn engine_ipc_url(path: &str) -> eyre::Result<Url> {
     let path = Path::new(path);
     let path =
         if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
@@ -108,10 +124,20 @@ fn engine_ipc_url(path: &str) -> eyre::Result<Url> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
+    use base_execution_chainspec::BaseChainSpec;
     use clap::Parser;
 
-    use crate::{cli::BaseCli, commands::BaseCommand, config::ChainArg};
+    use crate::{
+        cli::BaseCli,
+        commands::BaseCommand,
+        config::{BuiltInChain, ChainArg},
+    };
 
+    const RPC_FORWARDING_ENDPOINT_ENV: &str = "OP_RETH_SEQUENCER_HTTP";
+    const RPC_FORWARDING_ENDPOINT_ENV_CHILD_TEST: &str =
+        "commands::rpc::tests::parses_rpc_forwarding_endpoint_from_env_child";
     const REQUIRED_CONSENSUS_ARGS: &[&str] =
         &["--l1-eth-rpc", "http://localhost:8545", "--l1-beacon", "http://localhost:5052"];
 
@@ -136,7 +162,7 @@ mod tests {
             panic!("expected rpc command");
         };
 
-        assert_eq!(rpc.execution.network.port, 30333);
+        assert_eq!(rpc.execution.node.network.port, 30333);
         assert_eq!(rpc.consensus.rpc_flags.listen_port, 9546);
     }
 
@@ -208,16 +234,80 @@ mod tests {
             "-vvv",
         ]);
 
-        assert!(matches!(cli.chain, ChainArg::File(_)));
+        assert!(matches!(cli.chain, ChainArg::BuiltIn(BuiltInChain::Dev)));
         let BaseCommand::Rpc(rpc) = cli.command else {
             panic!("expected rpc command");
         };
 
-        assert_eq!(rpc.execution.rpc.auth_ipc_path, "/data/engine.ipc");
-        assert_eq!(rpc.execution.network.port, 30303);
+        assert_eq!(rpc.execution.node.rpc.auth_ipc_path, "/data/engine.ipc");
+        assert_eq!(rpc.execution.node.network.port, 30303);
         assert!(rpc.execution_chain.is_some());
         assert_eq!(rpc.consensus.rpc_flags.listen_port, 8549);
         assert_eq!(rpc.consensus.p2p_flags.network.listen_tcp_port, 8003);
+    }
+
+    #[test]
+    fn parses_rpc_forwarding_endpoint_arg() {
+        let cli = BaseCli::parse_from(rpc_args(&[
+            "base",
+            "rpc",
+            "--rpc.forwarding-endpoint",
+            "http://localhost:8545",
+        ]));
+
+        let BaseCommand::Rpc(rpc) = cli.command else {
+            panic!("expected rpc command");
+        };
+
+        let launch_config = rpc.execution.into_launch_config(BaseChainSpec::devnet().into());
+
+        assert_eq!(
+            launch_config.standard.rpc.rpc_forwarding_endpoint.as_deref(),
+            Some("http://localhost:8545")
+        );
+        assert_eq!(
+            launch_config.standard.rpc.rollup_args.sequencer.as_deref(),
+            Some("http://localhost:8545")
+        );
+        assert!(!launch_config.standard.enable_tx_forwarding);
+        assert!(launch_config.standard.builder_rpc_urls.is_empty());
+    }
+
+    #[test]
+    fn parses_rpc_forwarding_endpoint_from_env() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.arg("--exact").arg(RPC_FORWARDING_ENDPOINT_ENV_CHILD_TEST).arg("--ignored");
+        command.env(RPC_FORWARDING_ENDPOINT_ENV, "http://localhost:8547");
+
+        let output = command.output().unwrap();
+
+        assert!(
+            output.status.success(),
+            "child env parsing test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by parses_rpc_forwarding_endpoint_from_env with isolated process env"]
+    fn parses_rpc_forwarding_endpoint_from_env_child() {
+        let cli = BaseCli::parse_from(rpc_args(&["base", "rpc"]));
+
+        let BaseCommand::Rpc(rpc) = cli.command else {
+            panic!("expected rpc command");
+        };
+
+        let launch_config = rpc.execution.into_launch_config(BaseChainSpec::devnet().into());
+
+        assert_eq!(
+            launch_config.standard.rpc.rpc_forwarding_endpoint.as_deref(),
+            Some("http://localhost:8547")
+        );
+        assert_eq!(
+            launch_config.standard.rpc.rollup_args.sequencer.as_deref(),
+            Some("http://localhost:8547")
+        );
     }
 
     #[test]
@@ -286,12 +376,65 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rpc_metering_args() {
-        let err =
-            BaseCli::try_parse_from(rpc_args(&["base", "rpc", "--enable-metering"])).unwrap_err();
+    fn rejects_rpc_rollup_sequencer_http_alias_arg() {
+        let err = BaseCli::try_parse_from(rpc_args(&[
+            "base",
+            "rpc",
+            "--rollup.sequencer-http",
+            "http://localhost:8545",
+        ]))
+        .unwrap_err();
 
         let rendered = err.to_string();
-        assert!(rendered.contains("--enable-metering"));
+        assert!(rendered.contains("--rollup.sequencer-http"));
+    }
+
+    #[test]
+    fn rejects_rpc_rollup_sequencer_ws_alias_arg() {
+        let err = BaseCli::try_parse_from(rpc_args(&[
+            "base",
+            "rpc",
+            "--rollup.sequencer-ws",
+            "ws://localhost:8546",
+        ]))
+        .unwrap_err();
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--rollup.sequencer-ws"));
+    }
+
+    #[test]
+    fn rejects_rpc_rollup_sequencer_headers_arg() {
+        let err = BaseCli::try_parse_from(rpc_args(&[
+            "base",
+            "rpc",
+            "--rollup.sequencer-headers",
+            "authorization=token",
+        ]))
+        .unwrap_err();
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--rollup.sequencer-headers"));
+    }
+
+    #[test]
+    fn parses_rpc_metering_args() {
+        let cli = BaseCli::parse_from(rpc_args(&[
+            "base",
+            "rpc",
+            "--enable-metering",
+            "--metering.execution-time-us",
+            "5000000",
+        ]));
+
+        let BaseCommand::Rpc(rpc) = cli.command else {
+            panic!("expected rpc command");
+        };
+
+        let launch_config = rpc.execution.into_launch_config(BaseChainSpec::devnet().into());
+
+        assert!(launch_config.standard.metering.enable_metering);
+        assert_eq!(launch_config.standard.metering.metering_execution_time_us, Some(5_000_000));
     }
 
     #[test]
