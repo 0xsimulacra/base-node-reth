@@ -25,17 +25,6 @@ impl ProposerProofAdapter {
         ProofSessionId::derive(Self::SESSION_NAMESPACE, Self::TEE_SESSION_LABEL, root)
     }
 
-    /// Derives a TEE proof retry session id for a discarded proof.
-    pub fn tee_discard_retry_session_id(request: &PrimitiveProofRequest, attempt: u32) -> String {
-        let l1_head_number = request.l1_head_number.to_be_bytes();
-        let attempt = attempt.to_be_bytes();
-        ProofSessionId::derive_from_components(
-            Self::SESSION_NAMESPACE,
-            Self::TEE_SESSION_LABEL,
-            &[request.claimed_l2_output_root.as_slice(), &l1_head_number, &attempt],
-        )
-    }
-
     /// Builds a prover-service request for a TEE proposal proof.
     pub fn tee_prove_block_range_request(request: PrimitiveProofRequest) -> ProveBlockRangeRequest {
         let session_id = Self::tee_session_id_for_root(request.claimed_l2_output_root);
@@ -126,21 +115,6 @@ mod tests {
     }
 
     #[test]
-    fn tee_discard_retry_session_id_varies_by_retry_identity() {
-        let first = test_request(B256::repeat_byte(0xaa));
-        let mut second = first.clone();
-        second.l1_head_number += 1;
-        let retry_id = ProposerProofAdapter::tee_discard_retry_session_id(&first, 1);
-
-        assert_ne!(
-            retry_id,
-            ProposerProofAdapter::tee_session_id_for_root(first.claimed_l2_output_root),
-        );
-        assert_ne!(retry_id, ProposerProofAdapter::tee_discard_retry_session_id(&first, 2),);
-        assert_ne!(retry_id, ProposerProofAdapter::tee_discard_retry_session_id(&second, 1),);
-    }
-
-    #[test]
     fn tee_prove_block_range_request_wraps_primitive_request() {
         let root = B256::repeat_byte(0xaa);
         let request = test_request(root);
@@ -186,12 +160,17 @@ mod tests {
                 ProofResult::Compressed(ZkProofResult {
                     zk_vm: ZkVm::Sp1,
                     proof: Bytes::from(vec![]),
+                    execution_stats: None,
                 }),
                 "expected TEE proof result, got Compressed",
             ),
             (
                 ProofResult::SnarkGroth16(SnarkGroth16ProofResult {
-                    proof: ZkProofResult { zk_vm: ZkVm::Sp1, proof: Bytes::from(vec![]) },
+                    proof: ZkProofResult {
+                        zk_vm: ZkVm::Sp1,
+                        proof: Bytes::from(vec![]),
+                        execution_stats: None,
+                    },
                 }),
                 "expected TEE proof result, got SnarkGroth16",
             ),

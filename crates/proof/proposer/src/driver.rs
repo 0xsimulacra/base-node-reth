@@ -15,7 +15,7 @@ use std::{
 
 use alloy_primitives::{Address, B256};
 use async_trait::async_trait;
-use base_proof_rpc::{L1Provider, L2Provider, RollupProvider};
+use base_proof_rpc::{L1Provider, RollupProvider};
 use eyre::Result;
 use tokio::{sync::Mutex as TokioMutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -32,15 +32,10 @@ use crate::pipeline::ProvingPipeline;
 pub struct DriverConfig {
     /// Polling interval for new blocks.
     pub poll_interval: Duration,
-    /// Maximum retries for a single target block before dropping the cached
-    /// recovery. Only proof failures and dispatch RPC errors count against
-    /// this budget; transient submit and poll errors do not.
-    pub max_retries: u32,
     /// Maximum number of concurrent RPC calls during the recovery scan.
     pub recovery_scan_concurrency: usize,
     /// Optional maximum duration for a single inline submit (validation + L1
-    /// transaction). When exceeded, the pipeline restarts without counting
-    /// against the retry budget. `None` disables the outer pipeline timeout.
+    /// transaction). `None` disables the outer pipeline timeout.
     pub submit_timeout: Option<Duration>,
     /// Optional address of the `TEEProverRegistry` contract on L1.
     /// When set, the pipeline validates signers via `isValidSigner` before submission.
@@ -70,7 +65,6 @@ impl Default for DriverConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(12),
-            max_retries: 8,
             recovery_scan_concurrency: 8,
             submit_timeout: None,
             tee_prover_registry_address: None,
@@ -127,22 +121,20 @@ struct Session {
 
 /// Manages the lifecycle of a [`ProvingPipeline`], allowing it to be started
 /// and stopped at runtime (e.g. via the admin RPC).
-pub struct PipelineHandle<L1, L2, R>
+pub struct PipelineHandle<L1, R>
 where
     L1: L1Provider + 'static,
-    L2: L2Provider + 'static,
     R: RollupProvider + 'static,
 {
-    pipeline: Arc<ProvingPipeline<L1, L2, R>>,
+    pipeline: Arc<ProvingPipeline<L1, R>>,
     session: TokioMutex<Session>,
     global_cancel: CancellationToken,
     running: Arc<AtomicBool>,
 }
 
-impl<L1, L2, R> std::fmt::Debug for PipelineHandle<L1, L2, R>
+impl<L1, R> std::fmt::Debug for PipelineHandle<L1, R>
 where
     L1: L1Provider + 'static,
-    L2: L2Provider + 'static,
     R: RollupProvider + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,14 +144,13 @@ where
     }
 }
 
-impl<L1, L2, R> PipelineHandle<L1, L2, R>
+impl<L1, R> PipelineHandle<L1, R>
 where
     L1: L1Provider + 'static,
-    L2: L2Provider + 'static,
     R: RollupProvider + 'static,
 {
     /// Creates a new [`PipelineHandle`] wrapping the given proving pipeline.
-    pub fn new(pipeline: ProvingPipeline<L1, L2, R>, global_cancel: CancellationToken) -> Self {
+    pub fn new(pipeline: ProvingPipeline<L1, R>, global_cancel: CancellationToken) -> Self {
         let session = Session { cancel: global_cancel.child_token(), task: None };
         Self {
             pipeline: Arc::new(pipeline),
@@ -171,10 +162,9 @@ where
 }
 
 #[async_trait]
-impl<L1, L2, R> ProposerDriverControl for PipelineHandle<L1, L2, R>
+impl<L1, R> ProposerDriverControl for PipelineHandle<L1, R>
 where
     L1: L1Provider + 'static,
-    L2: L2Provider + 'static,
     R: RollupProvider + 'static,
 {
     async fn start_proposer(&self) -> Result<(), String> {
@@ -247,9 +237,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ProofCollector, ProofCollectorOrchestrator, ProofCollectorRuntimeConfig, ProofDispatcher,
-        ProofDispatcherConfig, ProofRecovery, ProofRecoveryConfig, ProofSubmitter,
-        ProofSubmitterConfig,
+        ProofCollector, ProofDispatcher, ProofDispatcherConfig, ProofRecovery, ProofRecoveryConfig,
+        ProofSubmitter, ProofSubmitterConfig,
         test_utils::{
             MockAggregateVerifier, MockAnchorStateRegistry, MockDisputeGameFactory, MockL1, MockL2,
             MockOutputProposer, MockProofRequester, MockRollupClient, test_anchor_root,
@@ -259,7 +248,7 @@ mod tests {
 
     fn test_pipeline_handle(
         global_cancel: CancellationToken,
-    ) -> PipelineHandle<MockL1, MockL2, MockRollupClient> {
+    ) -> PipelineHandle<MockL1, MockRollupClient> {
         let l1 = Arc::new(MockL1::new(1000));
         let l2 = Arc::new(MockL2 { block_not_found: true, canonical_hash: None });
         let rollup = Arc::new(MockRollupClient {
@@ -278,11 +267,11 @@ mod tests {
             Arc::new(MockProofRequester::default());
         let verifier: Arc<dyn base_proof_contracts::AggregateVerifierClient> =
             Arc::new(MockAggregateVerifier::default());
-        let output_proposer: Arc<dyn crate::OutputProposer> = Arc::new(MockOutputProposer);
+        let output_proposer: Arc<dyn crate::OutputProposer> =
+            Arc::new(MockOutputProposer::default());
         let config = DriverConfig {
             poll_interval: Duration::from_secs(3600),
             submit_timeout: Some(std::time::Duration::from_secs(60)),
-            max_retries: 3,
             recovery_scan_concurrency: 8,
             tee_prover_registry_address: None,
             block_interval: 512,
@@ -290,19 +279,12 @@ mod tests {
             ..Default::default()
         };
 
-        let proof_collector =
-            ProofCollector::new(Arc::clone(&proof_requester), Arc::clone(&rollup));
         let proof_dispatcher = ProofDispatcher::new(
             Arc::clone(&proof_requester),
-            Arc::clone(&l1),
-            Arc::clone(&l2),
-            Arc::clone(&rollup),
-            ProofDispatcherConfig {
-                proposer_address: config.proposer_address,
-                allow_non_finalized: config.allow_non_finalized,
-                intermediate_block_interval: config.intermediate_block_interval,
-                tee_image_hash: config.tee_image_hash,
-            },
+            Arc::<MockL1>::clone(&l1),
+            l2,
+            Arc::<MockRollupClient>::clone(&rollup),
+            ProofDispatcherConfig::from(&config),
         );
         let proof_submitter = ProofSubmitter::new(
             output_proposer,
@@ -333,23 +315,15 @@ mod tests {
             anchor_registry,
             factory,
         ));
-        let proof_collector_orchestrator = ProofCollectorOrchestrator::new(
-            proof_collector,
-            proof_dispatcher.clone(),
+        let proof_collector = ProofCollector::new(
+            Arc::clone(&proof_requester),
+            Arc::clone(&rollup),
             proof_submitter,
-            Arc::clone(&proof_recovery),
-            ProofCollectorRuntimeConfig {
-                block_interval: config.block_interval,
-                max_retries: config.max_retries,
-                submit_timeout: config.submit_timeout,
-            },
+            config.block_interval,
+            config.submit_timeout,
         );
-        let pipeline = ProvingPipeline::new(
-            config,
-            proof_dispatcher,
-            proof_recovery,
-            proof_collector_orchestrator,
-        );
+        let pipeline =
+            ProvingPipeline::new(config, proof_dispatcher, proof_recovery, proof_collector);
         PipelineHandle::new(pipeline, global_cancel)
     }
 
