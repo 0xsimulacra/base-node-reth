@@ -16,6 +16,7 @@
 //!    After the TEE proof is nullified, the game is re-scanned as Path 3.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,6 +25,7 @@ use alloy_primitives::{Address, B256};
 use base_proof_contracts::{AggregateVerifierClient, GameStatus};
 use base_proof_primitives::ProofRequest as TeeProofRequest;
 use base_proof_rpc::L2Provider;
+use base_proof_submission::KnownRevert;
 use base_prover_service_client::ProofRequesterProvider;
 use base_prover_service_protocol::{SnarkGroth16ProofRequest, TeeKind, ZkProofRequest, ZkVm};
 use base_runtime::{Clock, TokioRuntime};
@@ -33,9 +35,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    BondManager, CandidateGame, ChallengeSubmitter, ChallengerMetrics, DisputeIntent, GameCategory,
-    GameScanner, IntermediateValidationParams, L1HeadProvider, OutputValidator, PendingProof,
-    PendingProofs, ProofKind, ProofPhase, ProofUpdate, ValidatorError,
+    BondManager, CandidateGame, ChallengeSubmitError, ChallengeSubmitter, ChallengerMetrics,
+    DisputeIntent, GameCategory, GameScanner, IntermediateValidationParams, L1HeadProvider,
+    OutputValidator, PendingProof, PendingProofs, ProofKind, ProofPhase, ProofUpdate,
+    ValidatorError,
 };
 
 /// Configuration for the challenger [`Driver`].
@@ -112,6 +115,8 @@ where
     pub verifier_client: Arc<dyn AggregateVerifierClient>,
     /// In-flight proof sessions keyed by game address.
     pub pending_proofs: PendingProofs,
+    /// Games that hit terminal contract reverts and should not be rediscovered.
+    ignored_games: HashSet<Address>,
     /// Bond lifecycle manager (optional; enabled when claim addresses are configured).
     pub bond_manager: Option<BondManager<C>>,
     /// Interval between polling cycles.
@@ -147,6 +152,7 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
             tee: components.tee,
             verifier_client: components.verifier_client,
             pending_proofs: PendingProofs::new(),
+            ignored_games: HashSet::new(),
             bond_manager: components.bond_manager,
             poll_interval: config.poll_interval,
             max_proof_duration: config.max_proof_duration,
@@ -168,6 +174,7 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
             }
 
             ChallengerMetrics::pending_proofs().set(self.pending_proofs.len() as f64);
+            ChallengerMetrics::ignored_games().set(self.ignored_games.len() as f64);
 
             select! {
                 biased;
@@ -241,6 +248,11 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
     /// handler based on the game's [`GameCategory`].
     async fn process_candidate(&mut self, candidate: CandidateGame) -> eyre::Result<()> {
         let game_address = candidate.factory.proxy;
+
+        if self.ignored_games.contains(&game_address) {
+            debug!(game = %game_address, "skipping ignored game");
+            return Ok(());
+        }
 
         // If this game already has an in-flight proof session, skip it.
         // Pending proofs are polled separately in `poll_pending_proofs`.
@@ -806,27 +818,91 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
                 }
             }
             Err(e) => {
-                if targets_tee && let Some(p) = self.pending_proofs.get_mut(&game_address) {
-                    warn!(
-                        error = %e,
-                        game = %game_address,
-                        "TEE dispute tx failed, falling back to ZK"
-                    );
+                let known_revert = match &e {
+                    ChallengeSubmitError::KnownRevert(revert) => Some(*revert),
+                    ChallengeSubmitError::TxReverted { .. }
+                    | ChallengeSubmitError::TxManager(_) => None,
+                };
+
+                match known_revert {
+                    Some(KnownRevert::GameAlreadyExists) => {
+                        info!(
+                            error = %e,
+                            game = %game_address,
+                            "dispute game already exists, dropping pending proof"
+                        );
+                        self.pending_proofs.remove(&game_address);
+                        return Ok(());
+                    }
+                    Some(KnownRevert::ProofAlreadyVerified) => {
+                        info!(
+                            error = %e,
+                            game = %game_address,
+                            "dispute proof already verified onchain, dropping pending proof"
+                        );
+                        self.pending_proofs.remove(&game_address);
+                        return Ok(());
+                    }
+                    Some(KnownRevert::InvalidParentGame) => {
+                        warn!(
+                            error = %e,
+                            game = %game_address,
+                            "dispute game parent is invalid onchain, ignoring game"
+                        );
+                        self.ignore_game(game_address);
+                        return Ok(());
+                    }
+                    Some(KnownRevert::L1OriginTooOld) => {
+                        warn!(
+                            error = %e,
+                            game = %game_address,
+                            "dispute proof L1 origin is too old, ignoring game"
+                        );
+                        self.ignore_game(game_address);
+                        return Ok(());
+                    }
+                    Some(KnownRevert::InvalidSigner) if !targets_tee => {
+                        warn!(
+                            error = %e,
+                            game = %game_address,
+                            "dispute proof signer is invalid onchain, dropping pending proof"
+                        );
+                        self.pending_proofs.remove(&game_address);
+                        return Ok(());
+                    }
+                    _ if targets_tee => {
+                        warn!(
+                            error = %e,
+                            game = %game_address,
+                            "TEE dispute tx failed, falling back to ZK"
+                        );
+                    }
+                    _ => {
+                        warn!(
+                            error = %e,
+                            game = %game_address,
+                            "dispute tx failed, will retry next tick"
+                        );
+                        return Ok(());
+                    }
+                }
+
+                if let Some(p) = self.pending_proofs.get_mut(&game_address) {
                     // Don't retry the failed TEE submission — switch to the ZK
                     // fallback so the next retry uses the pre-built ZK request.
                     p.phase = ProofPhase::NeedsRetry;
                     return self.handle_proof_retry(game_address).await;
                 }
-                warn!(
-                    error = %e,
-                    game = %game_address,
-                    "dispute tx failed, will retry next tick"
-                );
-                // Leave entry as ReadyToSubmit for retry.
             }
         }
 
         Ok(())
+    }
+
+    fn ignore_game(&mut self, game_address: Address) {
+        self.pending_proofs.remove(&game_address);
+        self.ignored_games.insert(game_address);
+        ChallengerMetrics::ignored_games().set(self.ignored_games.len() as f64);
     }
 
     /// Handles a proof that needs retrying after failure.
@@ -923,5 +999,199 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use alloy_primitives::{Address, B256, Bytes};
+    use base_proof_contracts::l1_origin_too_old_selector;
+    use base_prover_service_protocol::{SnarkGroth16ProofRequest, ZkProofRequest, ZkVm};
+    use base_tx_manager::TxManagerError;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::test_utils::{
+        MockAggregateVerifier, MockDisputeGameFactory, MockL2Provider, MockTxManager,
+        MockZkProofProvider, addr, factory_game, mock_anchor_registry, mock_state,
+    };
+
+    fn proof_request() -> SnarkGroth16ProofRequest {
+        SnarkGroth16ProofRequest {
+            proof: ZkProofRequest {
+                start_block_number: 100,
+                number_of_blocks_to_prove: 10,
+                sequence_window: None,
+                l1_head: Some(B256::repeat_byte(0xAA)),
+                intermediate_root_interval: Some(10),
+                zk_vm: ZkVm::Sp1,
+            },
+            prover_address: Address::repeat_byte(0xCC),
+        }
+    }
+
+    fn driver_with_tx_error(
+        err: TxManagerError,
+    ) -> (Driver<MockL2Provider, MockZkProofProvider, MockTxManager>, Arc<MockZkProofProvider>)
+    {
+        let game_address = addr(0);
+        let mut verifier_games = HashMap::new();
+        verifier_games.insert(game_address, mock_state(GameStatus::InProgress, Address::ZERO, 100));
+        let verifier = Arc::new(MockAggregateVerifier::new(verifier_games));
+        let factory = Arc::new(MockDisputeGameFactory::new(vec![]));
+        let scanner = GameScanner::new(
+            factory,
+            Arc::clone(&verifier) as Arc<dyn AggregateVerifierClient>,
+            mock_anchor_registry(Address::ZERO),
+        );
+        let proof_requester = Arc::new(MockZkProofProvider::default());
+        let tx_manager = MockTxManager::new(Err(err));
+        let components = DriverComponents {
+            scanner,
+            validator: OutputValidator::new(Arc::new(MockL2Provider::new())),
+            proof_requester: Arc::clone(&proof_requester),
+            submitter: ChallengeSubmitter::new(tx_manager),
+            tee: None,
+            verifier_client: verifier,
+            bond_manager: None,
+        };
+        let driver = Driver::new(
+            DriverConfig {
+                poll_interval: Duration::from_millis(10),
+                max_proof_duration: Duration::from_secs(60),
+                cancel: CancellationToken::new(),
+            },
+            components,
+        );
+
+        (driver, proof_requester)
+    }
+
+    fn insert_ready_proof(driver: &mut Driver<MockL2Provider, MockZkProofProvider, MockTxManager>) {
+        let game_address = addr(0);
+        driver.pending_proofs.insert(
+            game_address,
+            PendingProof::ready(
+                Bytes::from(vec![0x01, 0xAA]),
+                0,
+                B256::repeat_byte(0x22),
+                proof_request(),
+                DisputeIntent::Challenge,
+            ),
+        );
+    }
+
+    fn insert_ready_tee_proof(
+        driver: &mut Driver<MockL2Provider, MockZkProofProvider, MockTxManager>,
+    ) {
+        let game_address = addr(0);
+        driver.pending_proofs.insert(
+            game_address,
+            PendingProof {
+                phase: ProofPhase::ReadyToSubmit { proof_bytes: Bytes::from(vec![0x00, 0xAA]) },
+                kind: ProofKind::Tee {
+                    zk_fallback_request: Some(proof_request()),
+                    zk_fallback_intent: Some(DisputeIntent::Nullify),
+                },
+                invalid_index: 0,
+                expected_root: B256::repeat_byte(0x22),
+                retry_count: 0,
+                intent: DisputeIntent::Nullify,
+            },
+        );
+    }
+
+    fn candidate() -> CandidateGame {
+        let state = mock_state(GameStatus::InProgress, Address::ZERO, 100);
+        CandidateGame {
+            index: 0,
+            factory: factory_game(0, 1),
+            info: state.game_info,
+            starting_block_number: state.starting_block_number,
+            intermediate_block_interval: 10,
+            l1_head: state.l1_head,
+            tee_prover: state.tee_prover,
+            category: GameCategory::InvalidZkProposal,
+        }
+    }
+
+    #[tokio::test]
+    async fn proof_already_verified_revert_drops_pending_proof() {
+        let (mut driver, _proof_requester) =
+            driver_with_tx_error(TxManagerError::ExecutionReverted {
+                reason: Some("AlreadyProven(1)".to_string()),
+                data: None,
+            });
+        insert_ready_proof(&mut driver);
+
+        driver.poll_or_submit(addr(0)).await.unwrap();
+
+        assert!(!driver.pending_proofs.contains_key(&addr(0)));
+    }
+
+    #[tokio::test]
+    async fn game_already_exists_revert_drops_pending_proof() {
+        let (mut driver, _proof_requester) =
+            driver_with_tx_error(TxManagerError::ExecutionReverted {
+                reason: Some("GameAlreadyExists(0x00)".to_string()),
+                data: None,
+            });
+        insert_ready_proof(&mut driver);
+
+        driver.poll_or_submit(addr(0)).await.unwrap();
+
+        assert!(!driver.pending_proofs.contains_key(&addr(0)));
+    }
+
+    #[tokio::test]
+    async fn stale_l1_origin_revert_drops_pending_zk_proof() {
+        let (mut driver, proof_requester) =
+            driver_with_tx_error(TxManagerError::ExecutionReverted {
+                reason: None,
+                data: Some(Bytes::from(l1_origin_too_old_selector().to_vec())),
+            });
+        insert_ready_proof(&mut driver);
+
+        driver.poll_or_submit(addr(0)).await.unwrap();
+
+        assert!(!driver.pending_proofs.contains_key(&addr(0)));
+        assert!(driver.ignored_games.contains(&addr(0)));
+        let state = proof_requester.state.lock().unwrap();
+        assert!(state.prove_block_range_log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_l1_origin_revert_drops_pending_tee_proof_without_requesting_zk() {
+        let (mut driver, proof_requester) =
+            driver_with_tx_error(TxManagerError::ExecutionReverted {
+                reason: None,
+                data: Some(Bytes::from(l1_origin_too_old_selector().to_vec())),
+            });
+        insert_ready_tee_proof(&mut driver);
+
+        driver.poll_or_submit(addr(0)).await.unwrap();
+
+        assert!(!driver.pending_proofs.contains_key(&addr(0)));
+        assert!(driver.ignored_games.contains(&addr(0)));
+        let state = proof_requester.state.lock().unwrap();
+        assert!(state.prove_block_range_log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ignored_game_is_not_reprocessed_from_scan() {
+        let (mut driver, proof_requester) =
+            driver_with_tx_error(TxManagerError::ExecutionReverted {
+                reason: None,
+                data: Some(Bytes::from(l1_origin_too_old_selector().to_vec())),
+            });
+        insert_ready_proof(&mut driver);
+
+        driver.poll_or_submit(addr(0)).await.unwrap();
+        driver.process_candidate(candidate()).await.unwrap();
+
+        let state = proof_requester.state.lock().unwrap();
+        assert!(state.prove_block_range_log.is_empty());
     }
 }
