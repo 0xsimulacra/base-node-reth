@@ -61,6 +61,9 @@ pub use receipt_builder::{AlloyReceiptBuilder, BaseReceiptBuilder};
 mod canyon;
 pub use canyon::ensure_create2_deployer;
 
+mod cobalt;
+pub use cobalt::ensure_eip8130_system_accounts;
+
 mod executor;
 pub use executor::{
     BaseBlockExecutionCtx, BaseBlockExecutor, BaseBlockExecutorFactory, BaseTxResult,
