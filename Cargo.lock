@@ -4533,19 +4533,24 @@ version = "0.0.0"
 dependencies = [
  "alloy-consensus 2.0.5",
  "alloy-eips 2.0.5",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rpc-types 2.0.5",
  "base-common-chains",
  "base-common-consensus",
+ "base-common-evm",
  "base-common-network",
  "base-common-precompiles",
+ "base-common-rpc-types",
  "jsonrpsee",
  "jsonrpsee-types",
  "reth-chainspec",
+ "reth-evm",
  "reth-provider",
  "reth-rpc-eth-api",
  "reth-rpc-eth-types",
  "reth-storage-api",
+ "revm",
  "tracing",
 ]
 
@@ -5954,18 +5959,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "base-proof-zk-requester"
-version = "0.0.0"
-dependencies = [
- "alloy-primitives",
- "async-trait",
- "base-prover-service-client",
- "base-prover-service-protocol",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
