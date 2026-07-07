@@ -50,8 +50,8 @@ use base_common_consensus::{
 };
 use base_common_precompiles::{NonceManagerStorage, TxContextStorage};
 use base_execution_eip8130::{
-    AccountChangeApplier, AccountConfigurationStorage, FeeCheck, IntrinsicGas, IntrinsicGasInput,
-    NonceMode, NonceValidator, TransactionAuthorizer,
+    AccountChangeApplier, AccountConfigurationStorage, ApplyError, FeeCheck, IntrinsicGas,
+    IntrinsicGasInput, NonceMode, NonceValidator, TransactionAuthorizer,
 };
 use base_precompile_storage::{JournalStorageProvider, StorageCtx};
 use revm::{
@@ -761,7 +761,6 @@ impl Eip8130Executor {
             >,
     {
         let tx = signed.tx();
-        let sender_is_eoa = tx.sender.is_none();
         let nonce_key = tx.nonce_key;
         let gas_limit = tx.gas_limit;
         let max_fee = tx.max_fee_per_gas;
@@ -850,16 +849,14 @@ impl Eip8130Executor {
                 false
             };
 
-            // 5. Auto-delegate a code-less EOA sender to the default account so a
-            // basic account can dispatch its calls. This is unconditional for
-            // code-less EOA senders: an explicit delegation installed in step 2 with
-            // a non-zero target leaves non-empty code and is preserved here, but
-            // clearing the sender's delegation in the same transaction leaves it
-            // code-less and is intentionally re-delegated — a basic-account sender
-            // is always delegated to `DEFAULT_ACCOUNT`. The `&&` short-circuits so
-            // a configured (non-EOA) sender is never auto-delegated.
-            let sender_auto_delegated =
-                sender_is_eoa && Self::auto_delegate_codeless_sender(sctx, sender)?;
+            // 5. Auto-delegate any code-less sender to the default account so the
+            // account can dispatch its calls. An explicit delegation applied in
+            // step 2 with a non-zero target leaves non-empty code and is preserved
+            // here. Clearing the sender's delegation in the same transaction leaves
+            // it code-less and is intentionally re-delegated — any basic-account
+            // sender is always delegated to `DEFAULT_ACCOUNT` regardless of which
+            // signing key or authenticator was used.
+            let sender_auto_delegated = Self::auto_delegate_codeless_sender(sctx, sender)?;
 
             // 6. Intrinsic gas under the EIP-8130 schedule.
             let (sender_intrinsic, payer_auth, execution_gas_available) =
@@ -1348,9 +1345,17 @@ impl Eip8130Executor {
         let mut acc_mut = AccountConfigurationStorage::new(sctx);
         let mut created_effect: Option<(Address, Bytes)> = None;
         let mut delegation_effect: Option<(Address, Address)> = None;
-        for change in &signed.tx().account_changes {
+        for (index, change) in signed.tx().account_changes.iter().enumerate() {
             match change {
                 AccountChange::Create(entry) => {
+                    if delegation_effect.is_some() {
+                        return Err(BaseTransactionError::eip8130(ApplyError::CreateAndDelegation));
+                    }
+                    if index != 0 || created_effect.is_some() {
+                        return Err(BaseTransactionError::eip8130(
+                            ApplyError::InvalidCreatePosition,
+                        ));
+                    }
                     let created = AccountChangeApplier::apply_create(&mut acc_mut, entry)
                         .map_err(BaseTransactionError::eip8130)?;
                     created_effect = Some((created.address, created.code));
@@ -1365,6 +1370,12 @@ impl Eip8130Executor {
                     .map_err(BaseTransactionError::eip8130)?;
                 }
                 AccountChange::Delegation(Delegation { target }) => {
+                    if delegation_effect.is_some() {
+                        return Err(BaseTransactionError::eip8130(ApplyError::MultipleDelegations));
+                    }
+                    if created_effect.is_some() {
+                        return Err(BaseTransactionError::eip8130(ApplyError::CreateAndDelegation));
+                    }
                     delegation_effect = Some((sender, *target));
                 }
             }
@@ -1382,11 +1393,12 @@ impl Eip8130Executor {
     }
 
     /// Auto-delegates a code-less sender to [`Eip8130Contracts::DEFAULT_ACCOUNT`]
-    /// so a basic account can dispatch its `calls`, returning whether the
-    /// delegation was installed (which feeds the intrinsic-gas schedule). The
-    /// caller decides *whether* to consider auto-delegation: the verifying path
-    /// only does so for an EOA sender, while estimation considers any code-less
-    /// sender (a configured account already has code, so the check is a no-op).
+    /// so the account can dispatch its `calls`, returning whether the delegation
+    /// was installed (which feeds the intrinsic-gas schedule). Both the verifying
+    /// and estimation paths call this unconditionally: a configured account
+    /// already has code so the check is a no-op for it, and any basic-account
+    /// sender — regardless of signing path or authenticator — is delegated to
+    /// `DEFAULT_ACCOUNT`.
     fn auto_delegate_codeless_sender(
         sctx: StorageCtx<'_>,
         sender: Address,
