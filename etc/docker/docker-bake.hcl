@@ -2,16 +2,16 @@ variable "PROFILE" {
   default = "release"
 }
 
-variable "ZK_PROVER_PROFILE" {
-  default = "release"
-}
-
 variable "RUST_VERSION" {
   default = "1.94.1"
 }
 
 variable "BASE_SUCCINCT_ELF_REQUIRE" {
   default = "1"
+}
+
+variable "ZK_HOST_PROFILE" {
+  default = "release"
 }
 
 variable "REGISTRY_IMAGE" {
@@ -40,12 +40,13 @@ group "rust-services" {
     "audit-archiver",
     "batcher",
     "sidecrush",
-    "zk-prover",
+    "prover-service",
+    "zk-host",
   ]
 }
 
 group "devnet" {
-  targets = ["base", "batcher", "zk-prover"]
+  targets = ["base", "batcher", "prover-service", "zk-host"]
 }
 
 group "ingress" {
@@ -159,16 +160,26 @@ target "sidecrush" {
   ]
 }
 
-target "zk-prover" {
+target "prover-service" {
   inherits = ["_rust-service-common"]
-  target = "zk-prover"
-  args = {
-    PROFILE                   = "${ZK_PROVER_PROFILE}"
-    BASE_SUCCINCT_ELF_REQUIRE = "${BASE_SUCCINCT_ELF_REQUIRE}"
-  }
-  tags = ["base-prover-zk:local"]
+  target = "prover-service"
+  tags = ["base-prover-service:local"]
   cache-from = [
     "type=registry,ref=${REGISTRY_IMAGE}:cache-${PLATFORM_PAIR}",
-    "type=registry,ref=${REGISTRY_IMAGE}:cache-zk-prover-${PLATFORM_PAIR}",
+    "type=registry,ref=${REGISTRY_IMAGE}:cache-prover-service-${PLATFORM_PAIR}",
+  ]
+}
+
+target "zk-host" {
+  inherits = ["_rust-service-common"]
+  target = "zk-host"
+  args = {
+    PROFILE                   = "${ZK_HOST_PROFILE}"
+    BASE_SUCCINCT_ELF_REQUIRE = "${BASE_SUCCINCT_ELF_REQUIRE}"
+  }
+  tags = ["base-prover-zk-host:local"]
+  cache-from = [
+    "type=registry,ref=${REGISTRY_IMAGE}:cache-${PLATFORM_PAIR}",
+    "type=registry,ref=${REGISTRY_IMAGE}:cache-zk-host-${PLATFORM_PAIR}",
   ]
 }
