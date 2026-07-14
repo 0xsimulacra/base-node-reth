@@ -1,6 +1,6 @@
 //! CLI definition for the ZK prover host worker binary.
 
-use std::{fmt, time::Duration};
+use std::{collections::HashMap, fmt, time::Duration};
 
 use base_cli_utils::{LogConfig, RuntimeManager};
 use base_proof_worker::{
@@ -224,6 +224,12 @@ impl fmt::Display for ZkBackendArg {
     }
 }
 
+impl From<ZkBackendArg> for ZkBackend {
+    fn from(backend: ZkBackendArg) -> Self {
+        backend.protocol()
+    }
+}
+
 impl WorkerArgs {
     fn backend_config(&self) -> eyre::Result<SuccinctZkBackendConfig> {
         match self.backend {
@@ -361,14 +367,13 @@ impl WorkerArgs {
         let worker_id =
             args.worker_id.clone().unwrap_or_else(|| format!("zk-host-{}", Uuid::new_v4()));
         let host_config = ZkHostConfig::sp1(worker_id.clone())
-            .with_zk_backend(args.backend.protocol())
             .with_job_discovery_poll_interval(Duration::from_millis(
                 args.job_discovery_poll_interval_ms,
             ))
             .with_job_discovery_lock_duration_seconds(args.job_discovery_lock_duration_seconds)
             .with_job_discovery_max_concurrent_jobs(args.job_discovery_max_concurrent_jobs)
             .with_proof_generator_heartbeat(heartbeat);
-        let host = ZkHost::new(client, prover, host_config);
+        let host = ZkHost::new(client, HashMap::from([(args.backend.into(), prover)]), host_config);
 
         info!(
             worker_id = %worker_id,
