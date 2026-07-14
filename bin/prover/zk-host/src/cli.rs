@@ -1,6 +1,6 @@
 //! CLI definition for the ZK prover host worker binary.
 
-use std::{fmt, time::Duration};
+use std::{collections::HashMap, fmt, time::Duration};
 
 use base_cli_utils::{LogConfig, RuntimeManager};
 use base_proof_worker::{
@@ -13,7 +13,7 @@ use base_proof_zk_backend::{
 use base_proof_zk_host::{
     DEFAULT_PROOF_GENERATOR_HEARTBEAT_LOCK_DURATION_SECONDS,
     DEFAULT_PROOF_GENERATOR_MAX_CONSECUTIVE_HEARTBEAT_FAILURES, ProofGeneratorHeartbeatConfig,
-    ZkHost, ZkHostConfig,
+    ZkBackend, ZkHost, ZkHostConfig,
 };
 use base_prover_service_client::{ProverServiceClientConfig, ProverWorkerClient};
 use clap::{Parser, ValueEnum};
@@ -201,20 +201,32 @@ enum ZkBackendArg {
     Network,
 }
 
+impl ZkBackendArg {
+    const fn protocol(self) -> ZkBackend {
+        match self {
+            Self::Mock => ZkBackend::Mock,
+            Self::DryRun => ZkBackend::DryRun,
+            Self::Cluster => ZkBackend::Cluster,
+            Self::Network => ZkBackend::Network,
+        }
+    }
+}
+
 impl AsRef<str> for ZkBackendArg {
     fn as_ref(&self) -> &str {
-        match self {
-            Self::Mock => "mock",
-            Self::DryRun => "dry_run",
-            Self::Cluster => "cluster",
-            Self::Network => "network",
-        }
+        self.protocol().as_str()
     }
 }
 
 impl fmt::Display for ZkBackendArg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_ref())
+    }
+}
+
+impl From<ZkBackendArg> for ZkBackend {
+    fn from(backend: ZkBackendArg) -> Self {
+        backend.protocol()
     }
 }
 
@@ -361,7 +373,7 @@ impl WorkerArgs {
             .with_job_discovery_lock_duration_seconds(args.job_discovery_lock_duration_seconds)
             .with_job_discovery_max_concurrent_jobs(args.job_discovery_max_concurrent_jobs)
             .with_proof_generator_heartbeat(heartbeat);
-        let host = ZkHost::new(client, prover, host_config);
+        let host = ZkHost::new(client, HashMap::from([(args.backend.into(), prover)]), host_config);
 
         info!(
             worker_id = %worker_id,

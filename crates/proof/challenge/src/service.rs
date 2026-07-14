@@ -23,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    AnchorUpdater, BondManager, ChallengeSubmitter, ChallengerConfig, ChallengerMetrics, Driver,
-    DriverComponents, DriverConfig, GameScanner, OutputValidator,
+    AnchorUpdater, BondManager, BondManagerConfig, ChallengeSubmitter, ChallengerConfig,
+    ChallengerMetrics, Driver, DriverComponents, DriverConfig, GameScanner, OutputValidator,
 };
 
 /// Top-level challenger service.
@@ -196,28 +196,18 @@ impl ChallengerService {
         );
 
         let bond_manager = if !config.bond_claim_addresses.is_empty() {
-            let mut bm = BondManager::new(
-                config.bond_claim_addresses,
-                l1_rpc_url,
+            Some(BondManager::new(
+                BondManagerConfig {
+                    claim_addresses: config.bond_claim_addresses,
+                    l1_rpc_url,
+                    lookback: config.bond_discovery_lookback_games,
+                    discovery_interval: config.bond_discovery_interval,
+                    metrics_enabled: config.metrics.enabled,
+                },
                 Arc::clone(&factory_client) as Arc<dyn DisputeGameFactoryClient>,
-                config.bond_discovery_lookback_games,
-                config.bond_discovery_interval,
+                Arc::clone(&l2_client) as Arc<dyn L2Provider>,
                 TokioRuntime::new(),
-            );
-            info!("starting bond recovery scan");
-            match bm.startup_scan(&*verifier_client).await {
-                Ok(_) => {}
-                Err(e) => {
-                    // On failure `bond_scan_head` stays at 0, so
-                    // `discover_claimable_games` will progressively scan the
-                    // factory over multiple ticks (capped at `lookback` games
-                    // per tick). This is intentional: progressive catch-up
-                    // is preferable to disabling bond claiming entirely.
-                    warn!(error = %e, "bond startup scan failed, continuing without recovery");
-                }
-            }
-            info!(tracked = bm.tracked_count(), "bond manager ready");
-            Some(bm)
+            ))
         } else {
             info!("bond claiming disabled (no --bond-claim-addresses)");
             None

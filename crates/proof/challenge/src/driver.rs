@@ -27,7 +27,9 @@ use base_proof_primitives::ProofRequest as TeeProofRequest;
 use base_proof_rpc::L2Provider;
 use base_proof_submission::KnownRevert;
 use base_prover_service_client::ProofRequesterProvider;
-use base_prover_service_protocol::{SnarkGroth16ProofRequest, TeeKind, ZkProofRequest, ZkVm};
+use base_prover_service_protocol::{
+    SnarkGroth16ProofRequest, TeeKind, ZkBackend, ZkProofRequest, ZkVm,
+};
 use base_runtime::{Clock, TokioRuntime};
 use base_tx_manager::{TxManager, TxManagerError};
 use tokio::select;
@@ -93,7 +95,7 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> std::fmt
         f.debug_struct("DriverComponents")
             .field("scanner", &self.scanner)
             .field("tee", &self.tee.as_ref().map(|_| ".."))
-            .field("bond_manager", &self.bond_manager)
+            .field("bond_manager", &self.bond_manager.as_ref().map(|_| ".."))
             .finish_non_exhaustive()
     }
 }
@@ -209,13 +211,11 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
     /// Executes a single scan-validate-prove-submit cycle.
     ///
     /// First polls any in-flight proof sessions that are not in the current
-    /// scan batch, then discovers claimable bonds, advances bond lifecycle
-    /// claims, polls anchor updates, and finally scans for new candidates and
-    /// processes them.
+    /// scan batch, then scans recent games for claimable bonds, polls anchor
+    /// updates, and finally scans for new candidates and processes them.
     pub async fn step(&mut self) -> eyre::Result<()> {
         self.poll_pending_proofs().await;
         self.discover_claimable_bonds().await;
-        self.poll_bond_claims().await;
         self.anchor_updater.poll(&*self.verifier_client, &self.submitter).await;
 
         let candidates = self.scanner.scan().await?;
@@ -230,26 +230,15 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
         Ok(())
     }
 
-    /// Discovers new claimable games via incremental and periodic full
-    /// rescanning. Runs before [`poll_bond_claims`](Self::poll_bond_claims)
-    /// so that newly discovered games are immediately eligible for
-    /// advancement in the same tick.
+    /// Scans recent games from scratch and advances ready bond claims.
     async fn discover_claimable_bonds(&mut self) {
         let Some(ref mut bond_manager) = self.bond_manager else {
             return;
         };
 
-        match bond_manager.discover_claimable_games(&*self.verifier_client).await {
+        match bond_manager.discover_claimable_games(&*self.verifier_client, &self.submitter).await {
             Ok(_) => {}
             Err(e) => warn!(error = %e, "bond discovery scan failed"),
-        }
-    }
-
-    /// Polls the bond manager to advance tracked games through the bond
-    /// lifecycle (resolve → unlock → delay → withdraw).
-    async fn poll_bond_claims(&mut self) {
-        if let Some(ref mut bond_manager) = self.bond_manager {
-            bond_manager.poll(&*self.verifier_client, &self.submitter).await;
         }
     }
 
@@ -662,6 +651,7 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
                 l1_head: Some(candidate.l1_head),
                 intermediate_root_interval: Some(candidate.intermediate_block_interval),
                 zk_vm: ZkVm::Sp1,
+                zk_backend: ZkBackend::Cluster,
             },
             prover_address: self.submitter.sender_address(),
         })
@@ -824,20 +814,6 @@ impl<L2: L2Provider, P: ProofRequesterProvider, T: TxManager, C: Clock> Driver<L
         match result {
             Ok(_) => {
                 self.pending_proofs.remove(&game_address);
-
-                if intent == DisputeIntent::Challenge
-                    && let Some(ref mut bond_manager) = self.bond_manager
-                {
-                    let sender = self.submitter.sender_address();
-                    if !bond_manager.track_game(game_address, sender) {
-                        warn!(
-                            game = %game_address,
-                            sender = %sender,
-                            "bond will not be tracked — sender address is not \
-                             in --bond-claim-addresses; bond may go unclaimed"
-                        );
-                    }
-                }
             }
             Err(e) => {
                 let known_revert = match &e {
@@ -1098,6 +1074,7 @@ mod tests {
                 l1_head: Some(B256::repeat_byte(0xAA)),
                 intermediate_root_interval: Some(10),
                 zk_vm: ZkVm::Sp1,
+                zk_backend: ZkBackend::Cluster,
             },
             prover_address: Address::repeat_byte(0xCC),
         }
