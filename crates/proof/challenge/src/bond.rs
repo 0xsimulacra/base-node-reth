@@ -2,11 +2,13 @@
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
+use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::Address;
 use base_proof_contracts::{
     AggregateVerifierClient, DelayedWETHClient, DelayedWETHContractClient,
     DisputeGameFactoryClient, encode_claim_credit_calldata, encode_resolve_calldata,
 };
+use base_proof_rpc::L2Provider;
 use base_runtime::Clock;
 use base_tx_manager::TxManager;
 use futures::stream::{self, StreamExt};
@@ -19,6 +21,23 @@ enum BondAction {
     Resolve(Address),
     Unlock(Address),
     WithdrawIfReady { game_address: Address, bond_recipient: Address },
+}
+
+const FINALITY_METRIC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Configuration for bond discovery and claiming.
+#[derive(Debug)]
+pub struct BondManagerConfig {
+    /// Addresses whose bonds can be claimed.
+    pub claim_addresses: Vec<Address>,
+    /// L1 RPC endpoint used to read the delayed WETH contract.
+    pub l1_rpc_url: url::Url,
+    /// Number of recent factory games to scan.
+    pub lookback: u64,
+    /// Minimum interval between full discovery scans.
+    pub discovery_interval: Duration,
+    /// Whether finality metrics are recorded.
+    pub metrics_enabled: bool,
 }
 
 impl BondAction {
@@ -38,9 +57,11 @@ pub struct BondManager<C: Clock> {
     l1_rpc_url: url::Url,
     clock: C,
     factory_client: Arc<dyn DisputeGameFactoryClient>,
+    l2_provider: Arc<dyn L2Provider>,
     last_scan: Option<Duration>,
     lookback: u64,
     discovery_interval: Duration,
+    metrics_enabled: bool,
 }
 
 impl<C: Clock> std::fmt::Debug for BondManager<C> {
@@ -50,26 +71,26 @@ impl<C: Clock> std::fmt::Debug for BondManager<C> {
 }
 
 impl<C: Clock> BondManager<C> {
-    /// Creates a new bond manager for the given set of claim addresses.
+    /// Creates a new bond manager from its configuration and contract clients.
     pub fn new(
-        claim_addresses: Vec<Address>,
-        l1_rpc_url: url::Url,
+        config: BondManagerConfig,
         factory_client: Arc<dyn DisputeGameFactoryClient>,
-        lookback: u64,
-        discovery_interval: Duration,
+        l2_provider: Arc<dyn L2Provider>,
         clock: C,
     ) -> Self {
-        let set: HashSet<Address> = claim_addresses.into_iter().collect();
+        let set: HashSet<Address> = config.claim_addresses.into_iter().collect();
         info!(count = set.len(), "bond manager initialized with claim addresses");
         Self {
             claim_addresses: set,
             weth_delay: None,
-            l1_rpc_url,
+            l1_rpc_url: config.l1_rpc_url,
             clock,
             factory_client,
+            l2_provider,
             last_scan: None,
-            lookback,
-            discovery_interval,
+            lookback: config.lookback,
+            discovery_interval: config.discovery_interval,
+            metrics_enabled: config.metrics_enabled,
         }
     }
 
@@ -107,11 +128,15 @@ impl<C: Clock> BondManager<C> {
         ChallengerMetrics::bond_discovery_scans_total("full").increment(1);
         let actions = self.bond_actions(start_index..game_count, verifier_client).await;
         let action_count = actions.len();
+        let mut finality_metric_records = Vec::new();
 
         for action in actions {
-            self.process_action(action, verifier_client, submitter).await;
+            if let Some(record) = self.process_action(action, verifier_client, submitter).await {
+                finality_metric_records.push(record);
+            }
         }
 
+        self.record_finality_metrics(finality_metric_records, verifier_client).await;
         self.last_scan = Some(now);
 
         if action_count > 0 {
@@ -254,25 +279,33 @@ impl<C: Clock> BondManager<C> {
         action: BondAction,
         verifier_client: &dyn AggregateVerifierClient,
         submitter: &ChallengeSubmitter<T>,
-    ) {
+    ) -> Option<(Address, u64)> {
         let game_address = action.game_address();
         let result = match action {
-            BondAction::Resolve(game_address) => {
-                self.try_resolve(game_address, submitter).await.map_err(|e| eyre::eyre!(e))
-            }
+            BondAction::Resolve(game_address) => self
+                .try_resolve(game_address, submitter)
+                .await
+                .map(Some)
+                .map_err(|e| eyre::eyre!(e)),
             BondAction::Unlock(game_address) => {
                 Self::send_claim_credit(game_address, "unlock", submitter)
                     .await
+                    .map(|()| None)
                     .map_err(|e| eyre::eyre!(e))
             }
-            BondAction::WithdrawIfReady { game_address, bond_recipient } => {
-                self.try_withdraw_if_ready(game_address, bond_recipient, verifier_client, submitter)
-                    .await
-            }
+            BondAction::WithdrawIfReady { game_address, bond_recipient } => self
+                .try_withdraw_if_ready(game_address, bond_recipient, verifier_client, submitter)
+                .await
+                .map(|()| None),
         };
 
-        if let Err(e) = result {
-            warn!(game = %game_address, error = %e, "failed to advance bond claim");
+        match result {
+            Ok(Some(confirmed_at)) if self.metrics_enabled => Some((game_address, confirmed_at)),
+            Ok(_) => None,
+            Err(e) => {
+                warn!(game = %game_address, error = %e, "failed to advance bond claim");
+                None
+            }
         }
     }
 
@@ -280,15 +313,16 @@ impl<C: Clock> BondManager<C> {
         &self,
         game_address: Address,
         submitter: &ChallengeSubmitter<T>,
-    ) -> Result<(), ChallengeSubmitError> {
+    ) -> Result<u64, ChallengeSubmitError> {
         let calldata = encode_resolve_calldata();
         info!(game = %game_address, "submitting resolve transaction");
         match submitter.send_bond_tx(game_address, game_address, calldata).await {
             Ok(tx_hash) => {
+                let confirmed_at = self.clock.wall_clock_unix_secs();
                 info!(game = %game_address, tx_hash = %tx_hash, "resolve transaction confirmed");
                 ChallengerMetrics::resolve_tx_outcome_total(ChallengerMetrics::STATUS_SUCCESS)
                     .increment(1);
-                Ok(())
+                Ok(confirmed_at)
             }
             Err(e) => {
                 ChallengerMetrics::resolve_tx_outcome_total(ChallengerMetrics::STATUS_ERROR)
@@ -296,6 +330,63 @@ impl<C: Clock> BondManager<C> {
                 Err(e)
             }
         }
+    }
+
+    async fn record_finality_metrics(
+        &self,
+        records: Vec<(Address, u64)>,
+        verifier_client: &dyn AggregateVerifierClient,
+    ) {
+        let collection = stream::iter(records).for_each_concurrent(
+            GameScanner::SCAN_CONCURRENCY,
+            |(game_address, confirmed_at)| async move {
+                self.record_finality_time(game_address, verifier_client, confirmed_at).await;
+            },
+        );
+        if tokio::time::timeout(FINALITY_METRIC_TIMEOUT, collection).await.is_err() {
+            warn!(
+                timeout_secs = FINALITY_METRIC_TIMEOUT.as_secs(),
+                "timed out collecting finality metrics"
+            );
+        }
+    }
+
+    async fn record_finality_time(
+        &self,
+        game_address: Address,
+        verifier_client: &dyn AggregateVerifierClient,
+        confirmed_at: u64,
+    ) {
+        let l2_block_number = match verifier_client.game_info(game_address).await {
+            Ok(game_info) => game_info.l2_block_number,
+            Err(error) => {
+                warn!(
+                    game = %game_address,
+                    error = %error,
+                    "failed to read game info for finality metric"
+                );
+                return;
+            }
+        };
+        let header = match self
+            .l2_provider
+            .header_by_number(BlockNumberOrTag::Number(l2_block_number))
+            .await
+        {
+            Ok(header) => header,
+            Err(error) => {
+                warn!(
+                    game = %game_address,
+                    l2_block_number,
+                    error = %error,
+                    "failed to read L2 block timestamp for finality metric"
+                );
+                return;
+            }
+        };
+
+        let finality_time_secs = confirmed_at.saturating_sub(header.timestamp);
+        ChallengerMetrics::game_finality_time_seconds().record(finality_time_secs as f64);
     }
 
     async fn try_withdraw_if_ready<T: TxManager>(
@@ -390,11 +481,17 @@ mod tests {
 
     use alloy_primitives::B256;
     use futures::stream::BoxStream;
+    #[cfg(feature = "metrics")]
+    use metrics_util::{
+        MetricKind,
+        debugging::{DebugValue, DebuggingRecorder},
+    };
 
     use super::*;
     use crate::test_utils::{
-        MockAggregateVerifier, MockDisputeGameFactory, SharedMockTxManager,
-        TEST_DISCOVERY_INTERVAL, addr, factory_game, mock_state, receipt_with_status,
+        MockAggregateVerifier, MockDisputeGameFactory, MockL2Provider, SharedMockTxManager,
+        TEST_DISCOVERY_INTERVAL, addr, build_test_header_and_account, factory_game, mock_state,
+        receipt_with_status,
     };
 
     struct FixedClock {
@@ -451,9 +548,24 @@ mod tests {
         claim_addr: Address,
         rpc_url: url::Url,
         clock: FixedClock,
+        metrics_enabled: bool,
     ) -> BondManager<FixedClock> {
         let factory = Arc::new(MockDisputeGameFactory::new(vec![factory_game(0, 0)]));
-        BondManager::new(vec![claim_addr], rpc_url, factory, 1000, TEST_DISCOVERY_INTERVAL, clock)
+        let mut l2_provider = MockL2Provider::new();
+        let (header, account) = build_test_header_and_account(100, B256::ZERO);
+        l2_provider.insert_block(100, header, account);
+        BondManager::new(
+            BondManagerConfig {
+                claim_addresses: vec![claim_addr],
+                l1_rpc_url: rpc_url,
+                lookback: 1000,
+                discovery_interval: TEST_DISCOVERY_INTERVAL,
+                metrics_enabled,
+            },
+            factory,
+            Arc::new(l2_provider),
+            clock,
+        )
     }
 
     fn bond_submitter(
@@ -551,11 +663,91 @@ mod tests {
             claim_addr,
             "http://localhost:8545".parse().unwrap(),
             fixed_clock(2_000_000_000),
+            false,
         );
 
         mgr.discover_claimable_games(&*verifier, &submitter).await.unwrap();
 
         assert_eq!(tx_manager.recorded_calls().len(), 1);
+        assert_eq!(verifier.game_info_read_count(addr(0)), 0);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn scan_records_finality_time_when_resolving_game() {
+        let claim_addr = claim_addr();
+        let state = game_state(Address::repeat_byte(0xDD), claim_addr, 0, false);
+        let verifier = verifier(state);
+        let (submitter, _) = bond_submitter(vec![Ok(receipt_with_status(true, B256::ZERO))]);
+        let mut mgr = manager(
+            claim_addr,
+            "http://localhost:8545".parse().unwrap(),
+            fixed_clock(2_000_000_000),
+            true,
+        );
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime must build")
+                .block_on(async {
+                    mgr.discover_claimable_games(&*verifier, &submitter).await.unwrap();
+                });
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let finality_time = snapshot.iter().find_map(|(key, _, _, value)| {
+            (key.kind() == MetricKind::Histogram
+                && key.key().name() == "base_challenger.game_finality_time_seconds")
+                .then_some(value)
+        });
+        assert_eq!(finality_time, Some(&DebugValue::Histogram(vec![2_000_000_000.0.into()])),);
+        assert_eq!(verifier.game_info_read_count(addr(0)), 1);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test(start_paused = true)]
+    async fn scan_advances_all_bonds_before_waiting_for_finality_metrics() {
+        let claim_addr = claim_addr();
+        let state = game_state(Address::repeat_byte(0xDD), claim_addr, 0, false);
+        let verifier = Arc::new(MockAggregateVerifier::new(HashMap::from([
+            (addr(0), state.clone()),
+            (addr(1), state),
+        ])));
+        let factory =
+            Arc::new(MockDisputeGameFactory::new(vec![factory_game(0, 0), factory_game(1, 0)]));
+        let mut l2_provider = MockL2Provider::new();
+        let (header, account) = build_test_header_and_account(100, B256::ZERO);
+        l2_provider.insert_block(100, header, account);
+        l2_provider.header_delay = Some(FINALITY_METRIC_TIMEOUT + Duration::from_secs(1));
+        let mut mgr = BondManager::new(
+            BondManagerConfig {
+                claim_addresses: vec![claim_addr],
+                l1_rpc_url: "http://localhost:8545".parse().unwrap(),
+                lookback: 1000,
+                discovery_interval: TEST_DISCOVERY_INTERVAL,
+                metrics_enabled: true,
+            },
+            factory,
+            Arc::new(l2_provider),
+            fixed_clock(2_000_000_000),
+        );
+        let (submitter, tx_manager) = bond_submitter(vec![
+            Ok(receipt_with_status(true, B256::ZERO)),
+            Ok(receipt_with_status(true, B256::ZERO)),
+        ]);
+
+        let scan =
+            tokio::spawn(async move { mgr.discover_claimable_games(&*verifier, &submitter).await });
+        tokio::task::yield_now().await;
+
+        assert_eq!(tx_manager.recorded_calls().len(), 2);
+
+        tokio::time::advance(FINALITY_METRIC_TIMEOUT).await;
+        scan.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -567,6 +759,7 @@ mod tests {
             Address::ZERO,
             "http://localhost:8545".parse().unwrap(),
             fixed_clock(2_000_000_000),
+            false,
         );
 
         mgr.discover_claimable_games(&*verifier, &submitter).await.unwrap();
@@ -585,6 +778,7 @@ mod tests {
             claim_addr,
             "http://localhost:8545".parse().unwrap(),
             fixed_clock(2_000_000_000),
+            false,
         );
 
         mgr.discover_claimable_games(&*verifier, &submitter).await.unwrap();
@@ -600,7 +794,7 @@ mod tests {
         let (rpc_url, handle) =
             delayed_weth_rpc(vec![u256(60), format!("{}{}", u256(1), u256(100))]);
         let (submitter, tx_manager) = bond_submitter(vec![]);
-        let mut mgr = manager(claim_addr, rpc_url, fixed_clock(150));
+        let mut mgr = manager(claim_addr, rpc_url, fixed_clock(150), false);
 
         mgr.discover_claimable_games(&*verifier, &submitter).await.unwrap();
         handle.join().unwrap();
@@ -618,7 +812,7 @@ mod tests {
             delayed_weth_rpc(vec![u256(60), format!("{}{}", u256(1), u256(100))]);
         let (submitter, tx_manager) =
             bond_submitter(vec![Ok(receipt_with_status(true, B256::ZERO))]);
-        let mut mgr = manager(claim_addr, rpc_url, fixed_clock(160));
+        let mut mgr = manager(claim_addr, rpc_url, fixed_clock(160), false);
 
         mgr.discover_claimable_games(&*verifier, &submitter).await.unwrap();
         handle.join().unwrap();
