@@ -14,7 +14,7 @@ use base_proof_succinct_client_utils::client::DEFAULT_INTERMEDIATE_ROOT_INTERVAL
 use base_proof_succinct_proof_utils::{ClusterArtifactStore, ClusterProofConfig};
 use base_proof_zk_host::{ZkProver, ZkProverError, ZkSessionState};
 use base_prover_service_protocol::{
-    ProofResult, SessionType, SnarkGroth16ProofRequest, SnarkGroth16ProofResult, ZkProofRequest,
+    ProofResult, SessionType, SnarkPlonkProofRequest, SnarkPlonkProofResult, ZkProofRequest,
     ZkProofResult, ZkVm,
 };
 use serde::{Deserialize, Serialize};
@@ -667,7 +667,7 @@ impl ClusterZkProver {
     }
 
     /// Upload the stage artifacts with the provided client and create the cluster request. The
-    /// `proof_mode` selects the stage: `Compressed` for the range proof, `Groth16` for aggregation.
+    /// `proof_mode` selects the stage: `Compressed` for the range proof, `Plonk` for aggregation.
     pub async fn create_cluster_request_with_client<A>(
         &self,
         artifact_client: A,
@@ -685,7 +685,7 @@ impl ClusterZkProver {
                 self.config.range_gas_limit,
                 "range",
             ),
-            ProofMode::Groth16 => (
+            ProofMode::Plonk => (
                 base_proof_succinct_elfs::AGGREGATION_ELF,
                 self.config.aggregation_cycle_limit,
                 self.config.aggregation_gas_limit,
@@ -774,10 +774,10 @@ impl ClusterZkProver {
         }
     }
 
-    /// Submit the Groth16 aggregation proof after the compressed range proof completes.
+    /// Submit the PLONK aggregation proof after the compressed range proof completes.
     pub async fn submit_aggregation_proof(
         &self,
-        request: &SnarkGroth16ProofRequest,
+        request: &SnarkPlonkProofRequest,
         request_session_id: &str,
         range_backend_session_id: &str,
     ) -> Result<String, ZkProverError> {
@@ -806,7 +806,7 @@ impl ClusterZkProver {
             .map_err(|e| backend_error!("aggregation witness generation failed: {e}"))?;
         let witness_gen_duration_ms = witness_start.elapsed().as_secs_f64() * 1000.0;
 
-        let session = self.create_cluster_request(proof_id, stdin, ProofMode::Groth16).await?;
+        let session = self.create_cluster_request(proof_id, stdin, ProofMode::Plonk).await?;
         let backend_session_id = session.to_backend_session_id()?;
         info!(
             proof_id = %session.proof_id,
@@ -905,7 +905,7 @@ impl ZkProver for ClusterZkProver {
 
     async fn submit_next(
         &self,
-        request: &SnarkGroth16ProofRequest,
+        request: &SnarkPlonkProofRequest,
         request_session_id: &str,
         completed_backend_session_id: &str,
     ) -> Result<String, ZkProverError> {
@@ -938,7 +938,7 @@ impl ZkProver for ClusterZkProver {
 
         let proof = ZkProofResult { zk_vm: ZkVm::Sp1, proof: proof.into(), execution_stats: None };
         match session_type {
-            SessionType::Snark => Ok(ProofResult::SnarkGroth16(SnarkGroth16ProofResult { proof })),
+            SessionType::Snark => Ok(ProofResult::SnarkPlonk(SnarkPlonkProofResult { proof })),
             SessionType::Stark => Ok(ProofResult::Compressed(proof)),
         }
     }
