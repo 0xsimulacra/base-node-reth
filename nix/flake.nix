@@ -63,6 +63,16 @@
 
         rustAnalyzer = fenixPkgs.rust-analyzer;
 
+        # Use Fenix stable to build cargo-nextest itself.
+        fenixRustPlatform = pkgs.makeRustPlatform {
+          cargo = rustStable;
+          rustc = rustStable;
+        };
+
+        cargoNextest = pkgs.cargo-nextest.override {
+          rustPlatform = fenixRustPlatform;
+        };
+
         # Shim to emulate `cargo +nightly ...` like rustup does
         cargoShim = pkgs.writeShellScriptBin "cargo" ''
           #!${pkgs.bash}/bin/bash
@@ -143,6 +153,7 @@
 
           packages = [
             pkgs.just
+            cargoNextest
           ];
 
           # OpenSSL
