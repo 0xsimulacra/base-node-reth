@@ -1,12 +1,16 @@
 //! Builder CLI arguments and config conversion helpers.
 
 use core::{net::SocketAddr, time::Duration};
+use std::path::PathBuf;
 
 use base_builder_core::{
     BuilderConfig, ExecutionMeteringMode, RejectionCache, SharedMeteringProvider,
 };
 use base_builder_metering::MeteringStore;
 use base_node_core::args::RollupArgs;
+use base_observability_events::{
+    DEFAULT_QUEUE_CAPACITY, TransactionEventProducer, TransactionEventWriterConfig,
+};
 
 /// Parameters for Flashblocks configuration.
 ///
@@ -43,6 +47,72 @@ impl Default for FlashblocksArgs {
             flashblocks_addr: "127.0.0.1".to_string(),
             flashblocks_block_time: 250,
             flashblocks_leeway_time: 75,
+        }
+    }
+}
+
+/// Dedicated transaction event journal configuration.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct TransactionEventsArgs {
+    /// Enables dedicated transaction event JSONL writes.
+    #[arg(
+        long = "builder.transaction-events.enabled",
+        env = "BUILDER_TRANSACTION_EVENTS_ENABLED",
+        default_value = "false"
+    )]
+    pub enabled: bool,
+
+    /// Dedicated transaction events JSONL file path.
+    #[arg(
+        long = "builder.transaction-events.file-path",
+        env = "BUILDER_TRANSACTION_EVENTS_PATH",
+        default_value = "/var/log/transaction-events/base-builder/events.jsonl"
+    )]
+    pub file_path: PathBuf,
+
+    /// Bounded event queue capacity. Full queues drop events instead of blocking the builder.
+    #[arg(long = "builder.transaction-events.queue-capacity", env = "BUILDER_TRANSACTION_EVENTS_QUEUE_CAPACITY", default_value_t = DEFAULT_QUEUE_CAPACITY)]
+    pub queue_capacity: usize,
+
+    /// Fail builder startup if the transaction event writer cannot open.
+    #[arg(
+        long = "builder.transaction-events.required",
+        env = "BUILDER_TRANSACTION_EVENTS_REQUIRED",
+        default_value = "false"
+    )]
+    pub required: bool,
+
+    /// Network label to write into transaction event envelopes.
+    #[arg(
+        long = "builder.transaction-events.network",
+        env = "BUILDER_TRANSACTION_EVENTS_NETWORK",
+        default_value = "unknown"
+    )]
+    pub network: String,
+}
+
+impl Default for TransactionEventsArgs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            file_path: PathBuf::from("/var/log/transaction-events/base-builder/events.jsonl"),
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            required: false,
+            network: "unknown".to_string(),
+        }
+    }
+}
+
+impl TransactionEventsArgs {
+    /// Converts these args into the shared transaction event writer config.
+    pub fn writer_config(&self) -> TransactionEventWriterConfig {
+        TransactionEventWriterConfig {
+            enabled: self.enabled,
+            file_path: self.file_path.clone(),
+            queue_capacity: self.queue_capacity,
+            required: self.required,
+            producer: TransactionEventProducer::BaseBuilder,
+            network: self.network.clone(),
         }
     }
 }
@@ -140,6 +210,10 @@ pub struct Args {
     /// Flashblocks configuration
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
+
+    /// Transaction event journal configuration
+    #[command(flatten)]
+    pub transaction_events: TransactionEventsArgs,
 }
 
 impl Args {
@@ -178,6 +252,7 @@ impl Default for Args {
             rejection_cache_ttl_secs: 1800,
             sampling_ratio: 100,
             flashblocks: FlashblocksArgs::default(),
+            transaction_events: TransactionEventsArgs::default(),
         }
     }
 }
