@@ -5416,6 +5416,7 @@ dependencies = [
  "base-common-rpc-types-engine",
  "base-consensus-providers",
  "base-metrics",
+ "base-optimism-rpc",
  "base-proof",
  "base-proof-client",
  "base-proof-mpt",
