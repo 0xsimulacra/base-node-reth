@@ -226,13 +226,13 @@
             mkdir -p "$TOOLROOT"
             ln -sfn "$SRC" "$TOOLROOT/rust-src"
 
-            echo "which cargo: $(command -v cargo)"
-            echo "cargo is:   $(readlink -f "$(command -v cargo)" || command -v cargo)"
+            #echo "which cargo: $(command -v cargo)"
+            #echo "cargo is:   $(readlink -f "$(command -v cargo)" || command -v cargo)"
             echo "rustc: $(rustc --version)"
-            echo "CARGO_HOME=$CARGO_HOME"
-            echo "Toolchain symlinks in $TOOLBIN"
-            echo "rust-src linked at $TOOLROOT/rust-src"
-            echo "protoc: $(command -v protoc)"
+            #echo "CARGO_HOME=$CARGO_HOME"
+            #echo "Toolchain symlinks in $TOOLBIN"
+            #echo "rust-src linked at $TOOLROOT/rust-src"
+            #echo "protoc: $(command -v protoc)"
           '';
         };
       }
