@@ -835,11 +835,11 @@ impl View for UpgradesView {
                     self.checks.reset();
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
-                if self.selected_chain < self.chains.len() - 1 {
-                    self.selected_chain += 1;
-                    self.checks.reset();
-                }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab
+                if self.selected_chain < self.chains.len() - 1 =>
+            {
+                self.selected_chain += 1;
+                self.checks.reset();
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selected_check_upgrade(-1);
@@ -847,12 +847,13 @@ impl View for UpgradesView {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selected_check_upgrade(1);
             }
-            KeyCode::Char(c @ '1'..='4') => {
+            KeyCode::Char(c @ '1'..='4')
+                if (c as usize) - ('1' as usize) < self.chains.len()
+                    && (c as usize) - ('1' as usize) != self.selected_chain =>
+            {
                 let idx = (c as usize) - ('1' as usize);
-                if idx < self.chains.len() && idx != self.selected_chain {
-                    self.selected_chain = idx;
-                    self.checks.reset();
-                }
+                self.selected_chain = idx;
+                self.checks.reset();
             }
             KeyCode::Char('r') if !self.checks.running => {
                 self.start_checks(resources);
@@ -2593,7 +2594,7 @@ mod tests {
         assert_eq!(target_upgrade(&chain, 100), Some("Beryl"));
 
         chain.apply_upgrades(&UpgradeConfig {
-            base: BaseUpgradeConfig { azul: Some(10), beryl: Some(12), cobalt: None },
+            base: BaseUpgradeConfig { azul: Some(10), beryl: Some(12), cobalt: None, zombie: None },
             ..UpgradeConfig::default()
         });
 
@@ -2612,7 +2613,7 @@ mod tests {
         };
         chain.apply_upgrades(&UpgradeConfig {
             jovian_time: Some(10),
-            base: BaseUpgradeConfig { azul: Some(20), beryl: None, cobalt: None },
+            base: BaseUpgradeConfig { azul: Some(20), beryl: None, cobalt: None, zombie: None },
             ..UpgradeConfig::default()
         });
 
@@ -2631,7 +2632,7 @@ mod tests {
         let delta = chain.specs.iter().find(|spec| spec.name == "Delta").unwrap().timestamp;
 
         chain.apply_upgrades(&UpgradeConfig {
-            base: BaseUpgradeConfig { azul: Some(20), beryl: None, cobalt: None },
+            base: BaseUpgradeConfig { azul: Some(20), beryl: None, cobalt: None, zombie: None },
             ..UpgradeConfig::default()
         });
 

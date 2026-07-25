@@ -7,8 +7,8 @@ use alloy_primitives::{Address, B256};
 use base_common_consensus::{Eip8130Constants, Eip8130Contracts};
 
 use crate::{
-    AccountConfigurationStorage, AuthError, AuthenticatorDispatch, AuthorizeError, DispatchOutcome,
-    RecoveredActorId, ResolvedActor,
+    AccountConfigurationStorage, AccountState, AuthError, AuthenticatorDispatch, AuthorizeError,
+    DispatchOutcome, RecoveredActorId, ResolvedActor,
 };
 
 /// Authorizes actors against an [`AccountConfigurationStorage`] view.
@@ -35,11 +35,27 @@ impl ActorAuthorizer {
         auth: &[u8],
         now: u64,
     ) -> Result<ResolvedActor, AuthorizeError> {
+        Self::authenticate_actor_with_account_state(storage, account, hash, auth, now, None)
+    }
+
+    /// Authenticates `auth` while reusing an already-loaded state for `account`.
+    ///
+    /// The supplied state is used when the recovered actor is the account's
+    /// inline secp256k1 self. Nested delegate authentication targets a different
+    /// account and therefore continues to load that delegate's state normally.
+    pub fn authenticate_actor_with_account_state(
+        storage: &AccountConfigurationStorage<'_>,
+        account: Address,
+        hash: B256,
+        auth: &[u8],
+        now: u64,
+        account_state: Option<&AccountState>,
+    ) -> Result<ResolvedActor, AuthorizeError> {
         if auth.len() < 20 {
             return Err(AuthError::MalformedAuth.into());
         }
         let authenticator = Address::from_slice(&auth[..20]);
-        Self::authenticate(storage, account, hash, authenticator, &auth[20..], now)
+        Self::authenticate(storage, account, hash, authenticator, &auth[20..], now, account_state)
     }
 
     /// Mirror of `_authenticate`: route by authenticator, then authorize the
@@ -51,17 +67,19 @@ impl ActorAuthorizer {
         authenticator: Address,
         data: &[u8],
         now: u64,
+        account_state: Option<&AccountState>,
     ) -> Result<ResolvedActor, AuthorizeError> {
         // secp256k1 signers — the implicit default EOA and every explicit k1
         // actor — authenticate through `K1_AUTHENTICATOR`. Recover here (the
         // `RecoveredActorId` token proves the recovery) and authorize against
         // the account.
         if authenticator == Eip8130Constants::K1_AUTHENTICATOR {
-            return Self::authorize_k1(
+            return Self::authorize_k1_with_account_state(
                 storage,
                 account,
                 RecoveredActorId::recover_k1(hash, data)?,
                 now,
+                account_state,
             );
         }
 
@@ -143,9 +161,27 @@ impl ActorAuthorizer {
         recovered: RecoveredActorId,
         now: u64,
     ) -> Result<ResolvedActor, AuthorizeError> {
+        Self::authorize_k1_with_account_state(storage, account, recovered, now, None)
+    }
+
+    /// Resolves a recovered secp256k1 signer while reusing `account_state` for
+    /// the inline self path when it is already available.
+    pub fn authorize_k1_with_account_state(
+        storage: &AccountConfigurationStorage<'_>,
+        account: Address,
+        recovered: RecoveredActorId,
+        now: u64,
+        account_state: Option<&AccountState>,
+    ) -> Result<ResolvedActor, AuthorizeError> {
         let recovered = recovered.actor_id();
         if recovered == AccountConfigurationStorage::self_actor_id(account) {
-            let state = storage.get_account_state(account)?;
+            let loaded_state;
+            let state = if let Some(state) = account_state {
+                state
+            } else {
+                loaded_state = storage.get_account_state(account)?;
+                &loaded_state
+            };
             // Flag set => the inline k1 self is disabled: either revoked outright
             // or superseded by a non-k1 self in `actor_config`. A k1 signature
             // recovering to the account can never authorize in that state.
@@ -171,6 +207,7 @@ impl ActorAuthorizer {
                 actor_id: recovered,
                 scope: state.default_eoa_scope,
                 policy_target,
+                expiry: state.default_eoa_expiry,
             });
         }
         Self::resolve_bound(storage, account, recovered, Eip8130Constants::K1_AUTHENTICATOR, now)
@@ -190,7 +227,7 @@ impl ActorAuthorizer {
         if actor_id.is_zero() {
             return Err(AuthorizeError::ZeroActor);
         }
-        let config = storage.get_actor_config(account, actor_id)?;
+        let config = storage.actor_config_slot(account, actor_id)?;
         if config.authenticator != authenticator {
             return Err(AuthorizeError::NotBound { actor_id, authenticator });
         }
@@ -207,7 +244,7 @@ impl ActorAuthorizer {
         } else {
             storage.get_policy_manager(account, actor_id)?
         };
-        Ok(ResolvedActor { actor_id, scope: config.scope, policy_target })
+        Ok(ResolvedActor { actor_id, scope: config.scope, policy_target, expiry: config.expiry })
     }
 }
 
@@ -417,7 +454,12 @@ mod tests {
                 ActorAuthorizer::authenticate_actor(acc, ACCOUNT, HASH, &auth, NOW).unwrap();
             assert_eq!(
                 resolved,
-                ResolvedActor { actor_id: id, scope: 0x04, policy_target: Address::ZERO }
+                ResolvedActor {
+                    actor_id: id,
+                    scope: 0x04,
+                    policy_target: Address::ZERO,
+                    expiry: 0,
+                }
             );
         });
     }
@@ -494,7 +536,12 @@ mod tests {
                 ActorAuthorizer::authenticate_actor(acc, ACCOUNT, HASH, &auth, NOW).unwrap();
             assert_eq!(
                 resolved,
-                ResolvedActor { actor_id: id, scope: 0x02, policy_target: Address::ZERO }
+                ResolvedActor {
+                    actor_id: id,
+                    scope: 0x02,
+                    policy_target: Address::ZERO,
+                    expiry: 0,
+                }
             );
         });
     }
@@ -532,7 +579,12 @@ mod tests {
                 ActorAuthorizer::authenticate_actor(acc, ACCOUNT, HASH, &auth, NOW).unwrap();
             assert_eq!(
                 resolved,
-                ResolvedActor { actor_id: outer_id, scope: 0x08, policy_target: Address::ZERO }
+                ResolvedActor {
+                    actor_id: outer_id,
+                    scope: 0x08,
+                    policy_target: Address::ZERO,
+                    expiry: 0,
+                }
             );
         });
     }
@@ -670,7 +722,12 @@ mod tests {
                 ActorAuthorizer::authenticate_actor(acc, ACCOUNT, HASH, &auth, NOW).unwrap();
             assert_eq!(
                 resolved,
-                ResolvedActor { actor_id: outer_id, scope: 0x08, policy_target: Address::ZERO }
+                ResolvedActor {
+                    actor_id: outer_id,
+                    scope: 0x08,
+                    policy_target: Address::ZERO,
+                    expiry: 0,
+                }
             );
         });
     }

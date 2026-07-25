@@ -34,6 +34,12 @@ base_metrics::define_metrics! {
     #[describe("Number of preimages captured in the last witness build")]
     preimage_count: gauge,
 
+    #[describe("Size of a witness submitted to a Nitro enclave in bytes")]
+    witness_size_bytes: histogram,
+
+    #[describe("Latency in seconds for debug_executePayload RPC calls to the L2 proof node")]
+    l2_proof_node_rpc_latency_seconds: histogram,
+
     #[describe("End-to-end proof generation duration")]
     proof_duration_seconds: histogram,
 

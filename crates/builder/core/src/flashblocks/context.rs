@@ -16,12 +16,14 @@ use base_common_chains::Upgrades;
 use base_common_consensus::{BaseReceipt, BaseTransactionSigned, DepositReceipt, OpTxType};
 use base_common_evm::{BaseReceiptBuilder, BaseSpecId, L1BlockInfo};
 use base_execution_chainspec::BaseChainSpec;
+use base_execution_eip8130::IntrinsicGas;
 use base_execution_evm::{BaseEvmConfig, BaseNextBlockEnvAttributes};
 use base_execution_payload_builder::{
     BasePayloadBuilderAttributes, error::BasePayloadBuilderError,
 };
 use base_execution_txpool::{
-    BundleTransaction, TimestampedTransaction, estimated_da_size::DataAvailabilitySized,
+    BasePooledTx, BundleTransaction, GuardMetrics, TimestampedTransaction,
+    estimated_da_size::DataAvailabilitySized,
 };
 use base_observability_events::TransactionEventType;
 use reth_basic_payload_builder::PayloadConfig;
@@ -676,53 +678,10 @@ impl BasePayloadBuilderCtx {
         let payload_id = self.payload_id().to_string();
 
         while let Some(tx) = best_txs.next(()) {
-            if let Some(target) = tx.target_block_number()
-                && target != block_number
-            {
-                let tx_hash = *tx.hash();
-                num_txs_considered += 1;
-                let ordering_position = num_txs_considered;
-                trace!(
-                    target: "payload_builder",
-                    tx_hash = ?tx_hash,
-                    target_block = target,
-                    current_block = block_number,
-                    "skipping bundle tx: wrong target block"
-                );
-                self.emit_builder_decision_event(
-                    &payload_id,
-                    TransactionEventType::BuilderConsidered,
-                    tx_hash,
-                    Some(ordering_position),
-                    || {
-                        BuilderConsideredEventData::new(info, limits, None)
-                            .with_bundle_target_block(target)
-                    },
-                );
-                self.emit_builder_decision_event(
-                    &payload_id,
-                    TransactionEventType::BuilderRejected,
-                    tx_hash,
-                    Some(ordering_position),
-                    || {
-                        BuilderRejectedEventData::new(
-                            "wrong_target_block",
-                            "bundle target block does not match current block",
-                            false,
-                            info,
-                            limits,
-                            None,
-                        )
-                        .with_bundle_target_block(target)
-                        .with_current_block(block_number)
-                    },
-                );
-                best_txs.mark_invalid(tx.sender(), tx.nonce());
-                continue;
-            }
-
             if tx.is_bundle_expired(block_number, block_timestamp) {
                 let tx_hash = *tx.hash();
+                let min_block_number = tx.min_block_number();
+                let max_block_number = tx.max_block_number();
                 num_txs_considered += 1;
                 let ordering_position = num_txs_considered;
                 trace!(
@@ -737,7 +696,10 @@ impl BasePayloadBuilderCtx {
                     TransactionEventType::BuilderConsidered,
                     tx_hash,
                     Some(ordering_position),
-                    || BuilderConsideredEventData::new(info, limits, None),
+                    || {
+                        BuilderConsideredEventData::new(info, limits, None)
+                            .with_bundle_block_window(min_block_number, max_block_number)
+                    },
                 );
                 self.emit_builder_decision_event(
                     &payload_id,
@@ -753,6 +715,7 @@ impl BasePayloadBuilderCtx {
                             limits,
                             None,
                         )
+                        .with_bundle_block_window(min_block_number, max_block_number)
                         .with_block_timestamp(block_timestamp)
                     },
                 );
@@ -760,8 +723,10 @@ impl BasePayloadBuilderCtx {
                 continue;
             }
 
-            if tx.is_bundle_not_yet_valid(block_timestamp) {
+            if tx.is_bundle_not_yet_valid(block_number, block_timestamp) {
                 let tx_hash = *tx.hash();
+                let min_block_number = tx.min_block_number();
+                let max_block_number = tx.max_block_number();
                 num_txs_considered += 1;
                 let ordering_position = num_txs_considered;
                 trace!(
@@ -776,7 +741,10 @@ impl BasePayloadBuilderCtx {
                     TransactionEventType::BuilderConsidered,
                     tx_hash,
                     Some(ordering_position),
-                    || BuilderConsideredEventData::new(info, limits, None),
+                    || {
+                        BuilderConsideredEventData::new(info, limits, None)
+                            .with_bundle_block_window(min_block_number, max_block_number)
+                    },
                 );
                 self.emit_builder_decision_event(
                     &payload_id,
@@ -792,6 +760,8 @@ impl BasePayloadBuilderCtx {
                             limits,
                             None,
                         )
+                        .with_bundle_block_window(min_block_number, max_block_number)
+                        .with_current_block(block_number)
                         .with_block_timestamp(block_timestamp)
                     },
                 );
@@ -799,8 +769,82 @@ impl BasePayloadBuilderCtx {
                 continue;
             }
 
+            if self.builder_config.manifest_precheck_enabled
+                && let Some(manifest) = tx.watch_manifest()
+                && let Err(stale) = manifest.revalidate(evm.db_mut(), block_timestamp)
+            {
+                let tx_hash = *tx.hash();
+                num_txs_considered += 1;
+                let ordering_position = num_txs_considered;
+                trace!(
+                    target: "payload_builder",
+                    tx_hash = ?tx_hash,
+                    cause = stale.cause(),
+                    "skipping EIP-8130 transaction with stale authorization manifest"
+                );
+                GuardMetrics::record_builder_precheck_drop(&stale);
+                self.emit_builder_decision_event(
+                    &payload_id,
+                    TransactionEventType::BuilderConsidered,
+                    tx_hash,
+                    Some(ordering_position),
+                    || BuilderConsideredEventData::new(info, limits, None),
+                );
+                self.emit_builder_decision_event(
+                    &payload_id,
+                    TransactionEventType::BuilderRejected,
+                    tx_hash,
+                    Some(ordering_position),
+                    || {
+                        BuilderRejectedEventData::new(
+                            "manifest_precheck_stale",
+                            stale.cause(),
+                            false,
+                            info,
+                            limits,
+                            None,
+                        )
+                    },
+                );
+                diag.txs_rejected_other += 1;
+                // Nonce-free replay-ID entries are independent. The upstream
+                // payload adapter invalidates by sender (not by replay ID), so
+                // marking one would suppress unrelated entries from this sender.
+                // This transaction has already been consumed from the iterator.
+                if tx.eip8130_replay_id().is_none() {
+                    best_txs.mark_invalid(tx.sender(), tx.nonce());
+                }
+                continue;
+            }
+
             let tx_da_size = tx.estimated_da_size();
             let tx_received_at_ms = tx.received_at();
+
+            // EIP-8130 meters payer authentication gas on top of the declared gas limit, so it must
+            // be reserved against the block gas budget in addition to `gas_limit`. Reserve a
+            // conservative upper bound (worst-case payer policy gate) derived from the payer auth
+            // blob (`0` for non-8130 / self-pay); see `IntrinsicGas::max_payer_auth_cost`.
+            let tx_payer_auth = match tx.as_eip8130() {
+                Some(signed) => match IntrinsicGas::max_payer_auth_cost(signed) {
+                    Ok(payer_auth) => payer_auth,
+                    Err(err) => {
+                        trace!(
+                            target: "payload_builder",
+                            %err,
+                            tx_hash = ?tx.hash(),
+                            "skipping EIP-8130 transaction with unschedulable payer authenticator"
+                        );
+                        // Mirror the manifest pre-check above: a nonce-free replay-ID entry is
+                        // independent, so invalidating by sender would suppress unrelated entries.
+                        if tx.eip8130_replay_id().is_none() {
+                            best_txs.mark_invalid(tx.sender(), tx.nonce());
+                        }
+                        continue;
+                    }
+                },
+                None => 0,
+            };
+
             let tx = tx.into_consensus();
             let tx_hash = tx.tx_hash();
             let tx_uncompressed_size = tx.encode_2718_len() as u64;
@@ -839,6 +883,7 @@ impl BasePayloadBuilderCtx {
                     let tx_resources = TxResources {
                         da_size: tx_da_size,
                         gas_limit: tx.gas_limit(),
+                        payer_auth: tx_payer_auth,
                         execution_time_us: None,
                         uncompressed_size: tx_uncompressed_size,
                     };
@@ -883,6 +928,7 @@ impl BasePayloadBuilderCtx {
             let tx_resources = TxResources {
                 da_size: tx_da_size,
                 gas_limit: tx.gas_limit(),
+                payer_auth: tx_payer_auth,
                 execution_time_us: predicted_execution_time_us,
                 uncompressed_size: tx_uncompressed_size,
             };

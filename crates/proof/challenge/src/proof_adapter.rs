@@ -7,6 +7,7 @@ use base_prover_service_protocol::{
     SnarkPlonkProofRequest, TeeKind, TeeProofRequest,
 };
 use eyre::{Result, WrapErr, bail};
+use sp1_sdk::SP1ProofWithPublicValues;
 
 /// Conversion helpers for challenger proof requests and dispute proof bytes.
 #[derive(Debug)]
@@ -14,36 +15,24 @@ pub struct ChallengerProofAdapter;
 
 impl ChallengerProofAdapter {
     /// Namespace used to derive challenger proof session IDs.
-    pub const SESSION_NAMESPACE: &'static [u8] = b"base/challenger/proof-session/v1";
-
-    /// Returns the session-ID proof subtype label for challenger SNARK proofs.
-    pub const fn snark_plonk_session_label() -> &'static str {
-        "zk/sp1/snark_plonk"
-    }
-
-    /// Returns the session-ID proof subtype label for a TEE implementation.
-    pub const fn tee_session_label(tee_kind: TeeKind) -> &'static str {
-        match tee_kind {
-            TeeKind::AwsNitro => "tee/aws_nitro",
-        }
-    }
+    const SESSION_NAMESPACE: &'static [u8] = b"base/challenger/proof-session/v1";
 
     /// Derives an idempotent challenger SNARK proof session ID.
     pub fn snark_plonk_session_id(game_address: Address, invalid_index: u64) -> String {
         let invalid_index = invalid_index.to_be_bytes();
         ProofSessionId::derive_from_components(
             Self::SESSION_NAMESPACE,
-            Self::snark_plonk_session_label(),
+            "zk/sp1/snark_plonk",
             &[game_address.as_slice(), &invalid_index],
         )
     }
 
     /// Derives an idempotent challenger TEE proof session ID.
-    pub fn tee_session_id(game_address: Address, invalid_index: u64, tee_kind: TeeKind) -> String {
+    pub fn tee_session_id(game_address: Address, invalid_index: u64) -> String {
         let invalid_index = invalid_index.to_be_bytes();
         ProofSessionId::derive_from_components(
             Self::SESSION_NAMESPACE,
-            Self::tee_session_label(tee_kind),
+            "tee/aws_nitro",
             &[game_address.as_slice(), &invalid_index],
         )
     }
@@ -65,20 +54,22 @@ impl ChallengerProofAdapter {
         game_address: Address,
         invalid_index: u64,
         request: PrimitiveProofRequest,
-        tee_kind: TeeKind,
     ) -> ProveBlockRangeRequest {
-        let session_id = Self::tee_session_id(game_address, invalid_index, tee_kind);
+        let session_id = Self::tee_session_id(game_address, invalid_index);
         ProveBlockRangeRequest {
             proof: ProofRequest {
                 session_id,
-                request: ProofRequestKind::Tee(TeeProofRequest { proof: request, tee_kind }),
+                request: ProofRequestKind::Tee(TeeProofRequest {
+                    proof: request,
+                    tee_kind: TeeKind::AwsNitro,
+                }),
             },
         }
     }
 
     /// Converts a prover-service SNARK result into bytes accepted by `submit_dispute`.
     pub fn snark_plonk_dispute_proof_bytes(result: ProofResult) -> Result<Bytes> {
-        let proof = match result {
+        let receipt_bytes = match result {
             ProofResult::SnarkPlonk(result) => result.proof.proof,
             ProofResult::Compressed(_) => {
                 bail!("expected SNARK_PLONK proof result, got Compressed")
@@ -88,7 +79,10 @@ impl ChallengerProofAdapter {
             }
         };
 
-        Ok(ProofEncoder::encode_zk_dispute_proof_bytes(proof))
+        let (receipt, _): (SP1ProofWithPublicValues, _) =
+            bincode::serde::decode_from_slice(&receipt_bytes, bincode::config::standard())
+                .wrap_err("failed to decode SNARK proof as SP1ProofWithPublicValues")?;
+        Ok(ProofEncoder::encode_zk_dispute_proof_bytes(Bytes::from(receipt.bytes())))
     }
 
     /// Converts a prover-service TEE result into bytes accepted by `submit_dispute`.
@@ -118,27 +112,14 @@ impl ChallengerProofAdapter {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, B256, Bytes};
-    use base_proof_primitives::{PROOF_TYPE_TEE, Proposal};
+    use base_proof_primitives::{PROOF_TYPE_TEE, PROOF_TYPE_ZK, ProofRequest, Proposal};
     use base_prover_service_protocol::{
         ProofRequestKind, ProofResult, SnarkPlonkProofRequest, SnarkPlonkProofResult, TeeKind,
-        TeeProofResult, ZkBackend, ZkProofRequest, ZkProofResult, ZkVm,
+        TeeProofRequest, TeeProofResult, ZkBackend, ZkProofRequest, ZkProofResult, ZkVm,
     };
+    use sp1_sdk::{SP1Proof, SP1ProofWithPublicValues, SP1PublicValues};
 
     use super::ChallengerProofAdapter;
-
-    fn test_primitive_request(root: B256) -> base_proof_primitives::ProofRequest {
-        base_proof_primitives::ProofRequest {
-            l1_head: B256::repeat_byte(0x01),
-            agreed_l2_head_hash: B256::repeat_byte(0x02),
-            agreed_l2_output_root: B256::repeat_byte(0x03),
-            claimed_l2_output_root: root,
-            claimed_l2_block_number: 600,
-            proposer: Address::repeat_byte(0x04),
-            intermediate_block_interval: 300,
-            l1_head_number: 1200,
-            image_hash: B256::repeat_byte(0x05),
-        }
-    }
 
     fn test_proposal(root: B256) -> Proposal {
         let mut signature = vec![0xab; 65];
@@ -166,7 +147,7 @@ mod tests {
         );
         assert_ne!(
             ChallengerProofAdapter::snark_plonk_session_id(game_address, invalid_index),
-            ChallengerProofAdapter::tee_session_id(game_address, invalid_index, TeeKind::AwsNitro)
+            ChallengerProofAdapter::tee_session_id(game_address, invalid_index)
         );
     }
 
@@ -206,22 +187,11 @@ mod tests {
         let wrapped = ChallengerProofAdapter::snark_plonk_prove_block_range_request(
             game_address,
             invalid_index,
-            request,
+            request.clone(),
         );
 
         assert_eq!(wrapped.proof.session_id, session_id);
-        match wrapped.proof.request {
-            ProofRequestKind::SnarkPlonk(snark) => {
-                assert_eq!(snark.prover_address, prover_address);
-                assert_eq!(snark.proof.start_block_number, 100);
-                assert_eq!(snark.proof.number_of_blocks_to_prove, 300);
-                assert_eq!(snark.proof.sequence_window, Some(10));
-                assert_eq!(snark.proof.l1_head, Some(l1_head));
-                assert_eq!(snark.proof.intermediate_root_interval, Some(150));
-                assert_eq!(snark.proof.zk_vm, ZkVm::Sp1);
-            }
-            other => panic!("unexpected proof request kind: {other:?}"),
-        }
+        assert_eq!(wrapped.proof.request, ProofRequestKind::SnarkPlonk(request));
     }
 
     #[test]
@@ -229,40 +199,60 @@ mod tests {
         let root = B256::repeat_byte(0xaa);
         let game_address = Address::repeat_byte(0xaa);
         let invalid_index = 1;
-        let request = test_primitive_request(root);
-        let session_id =
-            ChallengerProofAdapter::tee_session_id(game_address, invalid_index, TeeKind::AwsNitro);
+        let request = ProofRequest {
+            l1_head: B256::repeat_byte(0x01),
+            agreed_l2_head_hash: B256::repeat_byte(0x02),
+            agreed_l2_output_root: B256::repeat_byte(0x03),
+            claimed_l2_output_root: root,
+            claimed_l2_block_number: 600,
+            proposer: Address::repeat_byte(0x04),
+            intermediate_block_interval: 300,
+            l1_head_number: 1200,
+            image_hash: B256::repeat_byte(0x05),
+        };
+        let session_id = ChallengerProofAdapter::tee_session_id(game_address, invalid_index);
 
         let wrapped = ChallengerProofAdapter::tee_prove_block_range_request(
             game_address,
             invalid_index,
             request.clone(),
-            TeeKind::AwsNitro,
         );
 
         assert_eq!(wrapped.proof.session_id, session_id);
-        match wrapped.proof.request {
-            ProofRequestKind::Tee(tee) => {
-                assert_eq!(tee.proof, request);
-                assert_eq!(tee.tee_kind, TeeKind::AwsNitro);
-            }
-            other => panic!("unexpected proof request kind: {other:?}"),
-        }
+        assert_eq!(
+            wrapped.proof.request,
+            ProofRequestKind::Tee(TeeProofRequest { proof: request, tee_kind: TeeKind::AwsNitro })
+        );
     }
 
     #[test]
-    fn snark_plonk_dispute_proof_bytes_prefixes_zk_type() {
+    fn snark_plonk_dispute_proof_bytes_decodes_receipt_to_onchain_seal() {
+        let mut plonk_vkey_hash = [0u8; 32];
+        plonk_vkey_hash[..4].copy_from_slice(&[0x5a, 0x09, 0x3a, 0x2f]);
+        let mut receipt = SP1ProofWithPublicValues {
+            proof: SP1Proof::Plonk(Default::default()),
+            public_values: SP1PublicValues::new(),
+            sp1_version: "test".to_owned(),
+            tee_proof: None,
+        };
+        let SP1Proof::Plonk(plonk) = &mut receipt.proof else {
+            unreachable!();
+        };
+        plonk.encoded_proof = "abcd".to_owned();
+        plonk.plonk_vkey_hash = plonk_vkey_hash;
+
+        let encoded =
+            bincode::serde::encode_to_vec(&receipt, bincode::config::standard()).expect("bincode");
         let result = ProofResult::SnarkPlonk(SnarkPlonkProofResult {
             proof: ZkProofResult {
                 zk_vm: ZkVm::Sp1,
-                proof: Bytes::from_static(&[0xab, 0xcd]),
+                proof: Bytes::from(encoded),
                 execution_stats: None,
             },
         });
 
         let proof_bytes = ChallengerProofAdapter::snark_plonk_dispute_proof_bytes(result).unwrap();
-
-        assert_eq!(proof_bytes.as_ref(), &[1, 0xab, 0xcd]);
+        assert_eq!(proof_bytes.as_ref(), &[PROOF_TYPE_ZK, 0x5a, 0x09, 0x3a, 0x2f, 0xab, 0xcd]);
     }
 
     #[test]

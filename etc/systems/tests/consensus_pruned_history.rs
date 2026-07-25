@@ -21,7 +21,7 @@ use base_consensus_engine::{
 };
 use base_consensus_node::{
     DerivationClientResult, EngineActorRequest, EngineDerivationClient, EngineError,
-    EngineProcessor, EngineProcessorOptions, NodeMode, NoopCheckpointWriter,
+    EngineProcessor, EngineProcessorOptions, EngineRequestHandler, NodeMode, NoopCheckpointWriter,
 };
 use base_protocol::{BlockInfo, L1BlockInfoBedrock, L2BlockInfo};
 use tokio::{
@@ -79,8 +79,8 @@ impl ForkchoiceCheckpointReader for StaticCheckpointReader {
 /// A validator seeds its unsafe head from reth, accepts its first unsafe payload, then performs the
 /// initial reset after EL sync completes. Some pruned reth nodes return `4444: pruned history
 /// unavailable` for full historical labeled-block requests during that reset. The consensus
-/// service should treat the labeled block as unavailable and continue startup instead of exiting
-/// the engine processor.
+/// service should treat the labeled block as unavailable, fall back to genesis, and continue
+/// startup instead of exiting the engine processor.
 ///
 /// The observed failure mode is an engine task exit with
 /// `EngineReset(SyncStart(RpcError(...)))`.
@@ -99,6 +99,7 @@ struct PrunedHistoryStartup {
     rollup: Arc<RollupConfig>,
     client: Arc<MockEngineClient>,
     checkpointed_finalized_head: L2BlockInfo,
+    genesis_head: L2BlockInfo,
     reth_latest_head: L2BlockInfo,
     next_unsafe_hash: B256,
 }
@@ -107,6 +108,7 @@ impl PrunedHistoryStartup {
     fn new() -> Self {
         let rollup = test_rollup_config();
         let genesis_block = genesis_l2_block();
+        let genesis_head = block_info_from_rpc_block(&genesis_block);
         let finalized_block = pruned_l2_block(FINALIZED_BLOCK_NUMBER, rollup.genesis.l2.hash);
         let checkpointed_finalized_head = block_info_from_rpc_block(&finalized_block);
         let finalized_block_by_hash =
@@ -140,7 +142,14 @@ impl PrunedHistoryStartup {
                 .build(),
         );
 
-        Self { rollup, client, checkpointed_finalized_head, reth_latest_head, next_unsafe_hash }
+        Self {
+            rollup,
+            client,
+            checkpointed_finalized_head,
+            genesis_head,
+            reth_latest_head,
+            next_unsafe_hash,
+        }
     }
 
     fn start_validator_processor(self) -> RunningValidatorProcessor {
@@ -161,13 +170,14 @@ impl PrunedHistoryStartup {
             Arc::new(NoopCheckpointWriter),
         );
         let (request_tx, request_rx) = mpsc::channel(8);
-        let handle = base_consensus_node::EngineRequestReceiver::start(processor, request_rx);
+        let handler = EngineRequestHandler::new(processor, None);
+        let handle = base_consensus_node::EngineRequestReceiver::start(handler, request_rx);
 
         RunningValidatorProcessor {
             state_rx,
             request_tx,
             handle,
-            checkpointed_finalized_head: self.checkpointed_finalized_head,
+            genesis_head: self.genesis_head,
             reth_latest_head: self.reth_latest_head,
             next_unsafe_hash: self.next_unsafe_hash,
         }
@@ -178,7 +188,7 @@ struct RunningValidatorProcessor {
     state_rx: watch::Receiver<EngineState>,
     request_tx: mpsc::Sender<EngineActorRequest>,
     handle: JoinHandle<Result<(), EngineError>>,
-    checkpointed_finalized_head: L2BlockInfo,
+    genesis_head: L2BlockInfo,
     reth_latest_head: L2BlockInfo,
     next_unsafe_hash: B256,
 }
@@ -207,8 +217,8 @@ impl RunningValidatorProcessor {
     async fn assert_completes_initial_reset(&mut self) {
         let wait_for_reset = self.state_rx.wait_for(|state| {
             state.el_sync_finished
-                && state.sync_state.safe_head() == self.checkpointed_finalized_head
-                && state.sync_state.finalized_head() == self.checkpointed_finalized_head
+                && state.sync_state.safe_head() == self.genesis_head
+                && state.sync_state.finalized_head() == self.genesis_head
         });
 
         tokio::select! {
