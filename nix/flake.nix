@@ -219,12 +219,26 @@
             # PATH: shim first (cargo), then TOOLBIN (rustc, rustfmt, etc.)
             export PATH="${cargoShim}/bin:$TOOLBIN:$CARGO_HOME/bin:$PATH"
 
-            # Stdlib src for IDEs / rust-analyzer ===
-            # Fenix ships rust-src; stdlib lives here:
-            export RUST_SRC_PATH="${rustStable}/lib/rustlib/src/rust/library"
-            SRC="''${RUST_SRC_PATH:-}"
-            mkdir -p "$TOOLROOT"
-            ln -sfn "$SRC" "$TOOLROOT/rust-src"
+            # RustRover runs Cargo against stdlib sources, so a Nix store symlink is insufficient.
+            RUST_SRC_STORE="${rustStable}/lib/rustlib/src/rust/library"
+            RUST_SRC_COPY="$TOOLROOT/rust-src"
+            RUST_SRC_MARKER="$TOOLROOT/.rust-src-store-path"
+
+            if [[ -L "$RUST_SRC_COPY" ]]; then
+              unlink "$RUST_SRC_COPY"
+            fi
+
+            if [[ ! -d "$RUST_SRC_COPY" ]] ||
+               [[ ! -f "$RUST_SRC_MARKER" ]] ||
+               [[ "$(<"$RUST_SRC_MARKER")" != "$RUST_SRC_STORE" ]]; then
+              mkdir -p "$RUST_SRC_COPY"
+              ${pkgs.rsync}/bin/rsync -a --delete \
+                --chmod=Du+rwx,Dgo+rx,Fu+rw,Fgo+r \
+                "$RUST_SRC_STORE/" "$RUST_SRC_COPY/"
+              printf '%s\n' "$RUST_SRC_STORE" > "$RUST_SRC_MARKER"
+            fi
+
+            export RUST_SRC_PATH="$RUST_SRC_COPY"
 
             #echo "which cargo: $(command -v cargo)"
             #echo "cargo is:   $(readlink -f "$(command -v cargo)" || command -v cargo)"
